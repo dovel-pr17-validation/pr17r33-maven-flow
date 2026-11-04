@@ -1,0 +1,428 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.communication;
+
+import jakarta.servlet.ServletContext;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.component.WebComponentExporter;
+import com.vaadin.flow.component.WebComponentExporterFactory.DefaultWebComponentExporterFactory;
+import com.vaadin.flow.component.page.Push;
+import com.vaadin.flow.component.webcomponent.WebComponent;
+import com.vaadin.flow.component.webcomponent.WebComponentConfiguration;
+import com.vaadin.flow.di.Lookup;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.internal.CurrentInstance;
+import com.vaadin.flow.server.HttpStatusCode;
+import com.vaadin.flow.server.MockInstantiator;
+import com.vaadin.flow.server.VaadinContext;
+import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.flow.server.VaadinResponse;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.server.VaadinServletContext;
+import com.vaadin.flow.server.VaadinServletRequest;
+import com.vaadin.flow.server.VaadinServletService;
+import com.vaadin.flow.server.webcomponent.WebComponentConfigurationRegistry;
+import com.vaadin.flow.shared.communication.PushMode;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@Isolated
+class WebComponentProviderTest {
+
+    @Mock
+    VaadinServletRequest request;
+    @Mock
+    VaadinResponse response;
+    @Mock
+    VaadinServletService service;
+    @Mock
+    VaadinServletContext context;
+    @Mock
+    DeploymentConfiguration configuration;
+
+    WebComponentProvider provider;
+
+    WebComponentConfigurationRegistry registry;
+
+    @BeforeEach
+    @SuppressWarnings("java:S1872") // FeatureFlagsWrapper is protected class
+    void init() {
+        MockitoAnnotations.initMocks(this);
+        registry = setUpRegistry(); // same code as used for local variables in
+                                    // some tests
+        when(request.getService()).thenReturn(service);
+        when(service.getContext()).thenReturn(context);
+        when(context.getAttribute(WebComponentConfigurationRegistry.class))
+                .then(invocationOnMock -> registry);
+        when(context.getAttribute(eq(WebComponentConfigurationRegistry.class),
+                any())).then(invocationOnMock -> registry);
+        doAnswer(
+                invocationOnMock -> registry = (WebComponentConfigurationRegistry) invocationOnMock
+                        .getArguments()[0])
+                .when(context)
+                .setAttribute(any(WebComponentConfigurationRegistry.class));
+
+        final Lookup lookup = mock(Lookup.class);
+        when(context.getAttribute(Lookup.class)).thenReturn(lookup);
+        doAnswer(i -> i.getArgument(1, Supplier.class).get()).when(context)
+                .getAttribute(argThat(aClass -> "FeatureFlagsWrapper"
+                        .equals(aClass.getSimpleName())), any());
+        VaadinService.setCurrent(service);
+        when(service.getInstantiator()).thenReturn(new MockInstantiator());
+        when(service.getDeploymentConfiguration()).thenReturn(configuration);
+
+        provider = new WebComponentProvider();
+    }
+
+    @AfterEach
+    void cleanUp() {
+        CurrentInstance.clearAll();
+    }
+
+    @Test
+    void nonHandledPaths_handlerInformsNotHandled() throws IOException {
+        when(request.getPathInfo()).thenReturn(null);
+        assertFalse(provider.canHandleRequest(request),
+                "Provider shouldn't handle null path");
+
+        when(request.getPathInfo()).thenReturn("");
+        assertFalse(provider.canHandleRequest(request),
+                "Provider shouldn't handle empty path");
+
+        when(request.getPathInfo()).thenReturn("/home");
+        assertFalse(provider.canHandleRequest(request),
+                "Provider shouldn't handle non web-component path");
+    }
+
+    @Test
+    void faultyTag_handlerInformsNotHandled() throws IOException {
+        registry = setupConfigurations(MyComponentExporter.class);
+        when(request.getPathInfo())
+                .thenReturn("/web-component" + "/extensionless-component");
+
+        assertFalse(provider.handleRequest(request, response),
+                "Provider shouldn't handle path without extension");
+
+        when(request.getPathInfo()).thenReturn("/web-component/component.js");
+
+        assertFalse(provider.handleRequest(request, response),
+                "Provider shouldn't handle request for non-custom element name");
+
+        when(request.getPathInfo())
+                .thenReturn("/web-component/my-component.html");
+
+        assertFalse(provider.handleRequest(request, response),
+                "Provider shouldn't handle html extensions in npm mode");
+    }
+
+    @Test
+    void webComponentNotPresent_responseReturns404() throws IOException {
+        registry = setupConfigurations(OtherComponentExporter.class);
+        ServletContext servletContext = mock(ServletContext.class);
+
+        when(request.getServletContext()).thenReturn(servletContext);
+
+        when(request.getPathInfo())
+                .thenReturn("/web-component/my-component.js");
+        assertTrue(provider.handleRequest(request, response),
+                "Provider should handle web-component request");
+        verify(response).sendError(HttpStatusCode.NOT_FOUND.getCode(),
+                "No web component for my-component");
+    }
+
+    @Test
+    void webComponentGenerator_responseGetsResult() throws IOException {
+        registry = setupConfigurations(MyComponentExporter.class);
+
+        ByteArrayOutputStream out = spy(new ByteArrayOutputStream());
+
+        when(response.getOutputStream()).thenReturn(out);
+
+        when(request.getPathInfo())
+                .thenReturn("/web-component/my-component.js");
+        assertTrue(provider.handleRequest(request, response),
+                "Provider should handle web-component request");
+
+        String generatedScript = out.toString();
+        assertTrue(generatedScript.contains("web-component/my-component"),
+                "Response should contain the web component bootstrap script "
+                        + "for the exported component");
+        assertTrue(generatedScript.contains("web-component-bootstrap.js"),
+                "Response should reference the web component bootstrap module");
+
+        verify(response).getOutputStream();
+        verify(out).write(any(), anyInt(), anyInt());
+
+        when(request.getPathInfo())
+                .thenReturn("/web-component/web-component-bootstrap.js");
+        assertFalse(provider.handleRequest(request, response),
+                "Bootstrap request needs a session and should not be handled");
+    }
+
+    @Test
+    void handleWebComponentRequest_overridden_usedForRequests()
+            throws IOException {
+        registry = setupConfigurations(MyComponentExporter.class);
+        List<VaadinRequest> handled = new ArrayList<>();
+        WebComponentProvider customProvider = new WebComponentProvider() {
+            @Override
+            protected boolean handleWebComponentRequest(VaadinRequest req,
+                    VaadinResponse resp) {
+                handled.add(req);
+                return true;
+            }
+        };
+        when(request.getPathInfo())
+                .thenReturn("/web-component/my-component.js");
+
+        assertTrue(customProvider.handleRequest(request, response));
+        assertEquals(List.of(request), handled);
+    }
+
+    @Test
+    void providesDifferentGeneratedHTMLForEachExportedComponent()
+            throws IOException {
+        ArgumentCaptor<byte[]> captor = ArgumentCaptor.forClass(byte[].class);
+
+        registry = setupConfigurations(MyComponentExporter.class,
+                OtherComponentExporter.class);
+
+        ByteArrayOutputStream out1 = new ByteArrayOutputStream();
+        ByteArrayOutputStream out2 = new ByteArrayOutputStream();
+
+        when(response.getOutputStream()).thenReturn(out1);
+
+        when(request.getPathInfo())
+                .thenReturn("/web-component/my-component.js");
+        assertTrue(provider.handleRequest(request, response),
+                "Provider should handle first web-component request");
+
+        when(response.getOutputStream()).thenReturn(out2);
+
+        when(request.getPathInfo())
+                .thenReturn("/web-component/other-component.js");
+        assertTrue(provider.handleRequest(request, response),
+                "Provider should handle second web-component request");
+
+        verify(response, times(2)).getOutputStream();
+
+        byte[] first = out1.toByteArray();
+        byte[] second = out2.toByteArray();
+
+        assertNotEquals(first, second, "Stream output should not match");
+    }
+
+    @Test
+    void setExporters_exportersHasVariousPushes_throws() {
+        assertThrows(IllegalStateException.class, () -> {
+            WebComponentConfigurationRegistry registry = setupConfigurations(
+                    ThemedComponentExporter.class,
+                    AnotherPushComponentExporter.class);
+        });
+    }
+
+    @Test
+    void setExporters_exportersHasOnePush_pushIsSet() {
+        WebComponentConfigurationRegistry registry = setupConfigurations(
+                ThemedComponentExporter.class, MyComponentExporter.class);
+        assertTrue(registry.getEmbeddedApplicationAnnotation(Push.class)
+                .isPresent());
+    }
+
+    @Test
+    void setExporters_exportersHasSamePushDeclarations_pushIsSet() {
+        WebComponentConfigurationRegistry registry = setupConfigurations(
+                ThemedComponentExporter.class,
+                SameThemedComponentExporter.class);
+        assertTrue(registry.getEmbeddedApplicationAnnotation(Push.class)
+                .isPresent());
+        assertEquals(PushMode.AUTOMATIC, registry
+                .getEmbeddedApplicationAnnotation(Push.class).get().value());
+    }
+
+    @Test
+    void canHandleRequest_hasNoWebComponentConfigPathIsWebComponentUI_returnsFalse() {
+        WebComponentProvider handler = new WebComponentProvider();
+
+        VaadinRequest request = mockRequest(false);
+        assertFalse(handler.canHandleRequest(request));
+    }
+
+    @Test
+    void canHandleRequest_hasWebComponentConfigPathIsWebComponentUI_returnsTrue() {
+        WebComponentProvider handler = new WebComponentProvider();
+
+        VaadinRequest request = mockRequest(true);
+        assertTrue(handler.canHandleRequest(request));
+    }
+
+    private VaadinRequest mockRequest(boolean hasConfig) {
+        VaadinContext requestContext = mock(VaadinContext.class);
+        VaadinService requestService = mock(VaadinService.class);
+        VaadinRequest scriptRequest = mock(VaadinRequest.class);
+        when(scriptRequest.getService()).thenReturn(requestService);
+        when(requestService.getContext()).thenReturn(requestContext);
+
+        WebComponentConfigurationRegistry requestRegistry = mock(
+                WebComponentConfigurationRegistry.class);
+        when(requestContext.getAttribute(
+                eq(WebComponentConfigurationRegistry.class), any()))
+                .thenReturn(requestRegistry);
+        when(requestRegistry.hasConfigurations()).thenReturn(hasConfig);
+
+        when(scriptRequest.getPathInfo()).thenReturn("/web-component/a-b.js");
+
+        return scriptRequest;
+    }
+
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    @SafeVarargs
+    private WebComponentConfigurationRegistry setupConfigurations(
+            Class<? extends WebComponentExporter<? extends Component>>... exporters) {
+        WebComponentConfigurationRegistry registry = setUpRegistry();
+
+        final Set<Class<? extends WebComponentExporter<? extends Component>>> set = Stream
+                .of(exporters).collect(Collectors.toSet());
+
+        WebComponentExporter.WebComponentConfigurationFactory factory = new WebComponentExporter.WebComponentConfigurationFactory();
+
+        Set<WebComponentConfiguration<? extends Component>> configurations = new HashSet<>();
+        for (Class<? extends WebComponentExporter<? extends Component>> exporter : exporters)
+            configurations.add(factory.create(
+                    new DefaultWebComponentExporterFactory(exporter).create()));
+        registry.setConfigurations(configurations);
+
+        return registry;
+    }
+
+    private WebComponentConfigurationRegistry setUpRegistry() {
+        return new WebComponentConfigurationRegistry() {
+        };
+    }
+
+    @Tag("my-component")
+    public static class MyComponent extends Component {
+    }
+
+    public static class MyComponentExporter
+            extends WebComponentExporter<MyComponent> {
+
+        public MyComponentExporter() {
+            super("my-component");
+        }
+
+        @Override
+        public void configureInstance(WebComponent<MyComponent> webComponent,
+                MyComponent component) {
+
+        }
+    }
+
+    @Tag("another-component")
+    public static class OtherComponent extends Component {
+    }
+
+    public static class OtherComponentExporter
+            extends WebComponentExporter<OtherComponent> {
+
+        public OtherComponentExporter() {
+            super("other-component");
+        }
+
+        @Override
+        public void configureInstance(WebComponent<OtherComponent> webComponent,
+                OtherComponent component) {
+
+        }
+    }
+
+    @Push
+    public static class ThemedComponentExporter
+            extends WebComponentExporter<Component> {
+        public ThemedComponentExporter() {
+            super("foo");
+        }
+
+        @Override
+        public void configureInstance(WebComponent<Component> webComponent,
+                Component component) {
+
+        }
+    }
+
+    @Push(value = PushMode.AUTOMATIC)
+    public static class SameThemedComponentExporter
+            extends WebComponentExporter<Component> {
+        public SameThemedComponentExporter() {
+            super("foo");
+        }
+
+        @Override
+        public void configureInstance(WebComponent<Component> webComponent,
+                Component component) {
+
+        }
+    }
+
+    @Push(value = PushMode.DISABLED)
+    public static class AnotherPushComponentExporter
+            extends WebComponentExporter<Component> {
+        public AnotherPushComponentExporter() {
+            super("foo-bar");
+        }
+
+        @Override
+        public void configureInstance(WebComponent<Component> webComponent,
+                Component component) {
+
+        }
+    }
+
+}

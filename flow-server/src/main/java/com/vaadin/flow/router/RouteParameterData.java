@@ -1,0 +1,84 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.router;
+
+import java.io.Serializable;
+import java.util.Optional;
+
+import com.vaadin.flow.router.internal.ParameterInfo;
+
+/**
+ * Immutable data representing one url parameter.
+ * 
+ * @since 4.0
+ */
+public class RouteParameterData implements Serializable {
+
+    private final String template;
+
+    private final String regex;
+
+    /**
+     * Creates a parameter data instance.
+     *
+     * @param template
+     *            the parameter template.
+     * @param regex
+     *            the regex as found in the template.
+     */
+    public RouteParameterData(String template, String regex) {
+        this.template = template;
+        this.regex = regex;
+    }
+
+    /**
+     * Gets the parameter template string.
+     *
+     * @return the parameter template.
+     */
+    public String getTemplate() {
+        return template;
+    }
+
+    /**
+     * Gets the regex of the parameter.
+     *
+     * @return the regex of the parameter.
+     */
+    public Optional<String> getRegex() {
+        return Optional.ofNullable(regex);
+    }
+
+    /**
+     * Return true for optional parameter.
+     *
+     * @return true for optional parameter
+     * @since 24.5
+     */
+    public boolean isOptional() {
+        return new ParameterInfo(getTemplate()).isOptional();
+    }
+
+    /**
+     * Return true for parameter with varargs.
+     *
+     * @return true for parameter with varargs
+     * @since 24.5
+     */
+    public boolean isVarargs() {
+        return new ParameterInfo(getTemplate()).isVarargs();
+    }
+}

@@ -1,0 +1,337 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.communication;
+
+import java.io.IOException;
+import java.util.regex.Pattern;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+import tools.jackson.databind.JsonNode;
+
+import com.vaadin.flow.component.PushConfiguration;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.UI.BrowserNavigateEvent;
+import com.vaadin.flow.component.page.AppShellConfigurator;
+import com.vaadin.flow.component.page.ExtendedClientDetails;
+import com.vaadin.flow.component.page.Push;
+import com.vaadin.flow.dom.NodeVisitor.ElementType;
+import com.vaadin.flow.dom.TestNodeVisitor;
+import com.vaadin.flow.dom.impl.BasicElementStateProvider;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.server.AppShellRegistry;
+import com.vaadin.flow.server.MockServletServiceSessionSetup;
+import com.vaadin.flow.server.MockServletServiceSessionSetup.TestVaadinServletResponse;
+import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.flow.server.VaadinServletContext;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.flow.shared.communication.PushMode;
+import com.vaadin.flow.shared.ui.Transport;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+
+@Isolated
+class JavaScriptBootstrapHandlerTest {
+
+    private MockServletServiceSessionSetup mocks;
+
+    private TestVaadinServletResponse response;
+    private VaadinSession session;
+    private JavaScriptBootstrapHandler jsInitHandler;
+
+    @Push
+    static public class PushAppShell implements AppShellConfigurator {
+    }
+
+    // Transport differs from the default the UI is created with, so that
+    // applying the annotation is observable
+    @Push(transport = Transport.WEBSOCKET)
+    static public class WebSocketPushAppShell implements AppShellConfigurator {
+    }
+
+    @BeforeEach
+    void setup() throws Exception {
+        mocks = new MockServletServiceSessionSetup();
+        response = mocks.createResponse();
+        session = mocks.getSession();
+        jsInitHandler = new JavaScriptBootstrapHandler();
+    }
+
+    @AfterEach
+    void tearDown() {
+        mocks.cleanup();
+    }
+
+    @Test
+    void should_handleRequest_when_initTypeRequest() throws Exception {
+        VaadinRequest request = mocks.createRequest(mocks, "/", "v-r=init&foo");
+        assertTrue(jsInitHandler.canHandleRequest(request));
+    }
+
+    @Test
+    void should_not_handleRequest_when_pathInfo_set() throws Exception {
+        VaadinRequest request = mocks.createRequest(mocks, "/foo",
+                "v-r=init&foo");
+        assertFalse(jsInitHandler.canHandleRequest(request));
+    }
+
+    @Test
+    void should_not_handleRequest_if_not_initTypeRequest() throws Exception {
+        VaadinRequest request = mocks.createRequest(mocks, "/", "v-r=bar");
+        assertFalse(jsInitHandler.canHandleRequest(request));
+    }
+
+    @Test
+    void should_produceValidJsonResponse() throws Exception {
+        VaadinRequest request = mocks.createRequest(mocks, "/",
+                "v-r=init&foo&location");
+        jsInitHandler.handleRequest(session, request, response);
+
+        assertEquals(200, response.getErrorCode());
+
+        assertEquals("application/json", response.getContentType());
+
+        JsonNode json = JacksonUtils.readTree(response.getPayload());
+
+        assertTrue(json.has("stats"));
+        assertTrue(json.has("errors"));
+        assertTrue(json.has("appConfig"));
+        assertTrue(json.get("appConfig").has("appId"));
+        assertTrue(json.get("appConfig").get("uidl").has("changes"));
+        assertTrue(json.get("appConfig").get("debug").booleanValue());
+        assertFalse(json.get("appConfig").has("webComponentMode"));
+
+        assertEquals("./",
+                json.get("appConfig").get("contextRootUrl").asString());
+        assertNull(json.get("appConfig").get("serviceUrl"),
+                "ServiceUrl should not be set. It will be computed by flow-client");
+        assertEquals("http://localhost:8888/",
+                json.get("appConfig").get("requestURL").asString());
+
+        assertFalse(json.has("pushScript"));
+    }
+
+    @Test
+    void should_initialize_UI() throws Exception {
+        VaadinRequest request = mocks.createRequest(mocks, "/",
+                "v-r=init&foo&location=");
+        jsInitHandler.handleRequest(session, request, response);
+
+        assertNotNull(UI.getCurrent());
+        assertEquals(UI.class, UI.getCurrent().getClass());
+    }
+
+    @Test
+    void should_attachViewTo_UiContainer() throws Exception {
+        VaadinRequest request = mocks.createRequest(mocks, "/",
+                "v-r=init&foo&location=");
+        jsInitHandler.handleRequest(session, request, response);
+
+        UI ui = UI.getCurrent();
+        ui.browserNavigate(new BrowserNavigateEvent(ui, true, "a-route", "", "",
+                null, ""));
+
+        TestNodeVisitor visitor = new TestNodeVisitor(true);
+        BasicElementStateProvider.get().visit(ui.getElement().getNode(),
+                visitor);
+
+        assertTrue(hasNodeTag(visitor, "^<body>.*", ElementType.REGULAR));
+        assertTrue(hasNodeTag(visitor, "^<flow-container-.*>.*",
+                ElementType.VIRTUAL_ATTACHED));
+        assertTrue(hasNodeTag(visitor, "^<div>.*", ElementType.REGULAR));
+        // There are no routes, so it will get the "no views found" message
+        assertTrue(hasNodeTag(visitor, "^<div>.*No views found.*",
+                ElementType.REGULAR));
+
+    }
+
+    @Test
+    void should_respondPushScript_when_enabledInDeploymentConfiguration()
+            throws Exception {
+        mocks.getDeploymentConfiguration().setPushMode(PushMode.AUTOMATIC);
+
+        VaadinRequest request = mocks.createRequest(mocks, "/",
+                "v-r=init&foo&location=");
+        jsInitHandler.handleRequest(session, request, response);
+
+        assertEquals(200, response.getErrorCode());
+        assertEquals("application/json", response.getContentType());
+        JsonNode json = JacksonUtils.readTree(response.getPayload());
+
+        // Using regex, because version depends on the build
+        assertTrue(json.get("pushScript").asString().matches(
+                "^VAADIN/static/push/vaadinPush\\.js\\?v=[\\w\\.\\-]+$"));
+    }
+
+    @Test
+    void should_respondPushScript_when_nonRootServletPath() throws Exception {
+        mocks.getDeploymentConfiguration().setPushMode(PushMode.AUTOMATIC);
+
+        VaadinRequest request = mocks.createRequest(mocks, "/", "/vaadin/",
+                "v-r=init&foo&location=");
+        jsInitHandler.handleRequest(session, request, response);
+
+        assertEquals(200, response.getErrorCode());
+        assertEquals("application/json", response.getContentType());
+        JsonNode json = JacksonUtils.readTree(response.getPayload());
+
+        // Using regex, because version depends on the build
+        assertTrue(json.get("pushScript").asString().matches(
+                "^VAADIN/static/push/vaadinPush\\.js\\?v=[\\w\\.\\-]+$"));
+    }
+
+    @Test
+    void should_invoke_modifyPushConfiguration() throws Exception {
+        AppShellRegistry registry = mock(AppShellRegistry.class);
+        mocks.setAppShellRegistry(registry);
+
+        VaadinRequest request = mocks.createRequest(mocks, "/",
+                "v-r=init&foo&location=");
+        jsInitHandler.handleRequest(session, request, response);
+
+        verify(registry).modifyPushConfiguration(any(PushConfiguration.class));
+    }
+
+    @Test
+    void should_respondPushScript_when_annotatedInAppShell() throws Exception {
+        VaadinServletContext context = new VaadinServletContext(
+                mocks.getServletContext());
+        AppShellRegistry registry = AppShellRegistry.getInstance(context);
+        registry.setShell(PushAppShell.class);
+        mocks.setAppShellRegistry(registry);
+
+        VaadinRequest request = mocks.createRequest(mocks, "/",
+                "v-r=init&foo&location");
+        jsInitHandler.handleRequest(session, request, response);
+
+        assertEquals(200, response.getErrorCode());
+        assertEquals("application/json", response.getContentType());
+        JsonNode json = JacksonUtils.readTree(response.getPayload());
+
+        // Using regex, because version depends on the build
+        assertTrue(json.get("pushScript").asString().matches(
+                "^VAADIN/static/push/vaadinPush\\.js\\?v=[\\w\\.\\-]+$"));
+    }
+
+    @Test
+    void uiInitListener_shouldOverridePushConfigFromAppShellAnnotation()
+            throws Exception {
+        VaadinServletContext context = new VaadinServletContext(
+                mocks.getServletContext());
+        AppShellRegistry registry = AppShellRegistry.getInstance(context);
+        registry.setShell(WebSocketPushAppShell.class);
+        mocks.setAppShellRegistry(registry);
+
+        mocks.getService().addUIInitListener(event -> {
+            PushConfiguration push = event.getUI().getPushConfiguration();
+            // The app shell annotation must already have been applied when
+            // the listener runs, so that it can be inspected and overridden
+            assertEquals(PushMode.AUTOMATIC, push.getPushMode());
+            assertEquals(Transport.WEBSOCKET, push.getTransport());
+
+            push.setPushMode(PushMode.MANUAL);
+            push.setTransport(Transport.LONG_POLLING);
+        });
+
+        VaadinRequest request = mocks.createRequest(mocks, "/",
+                "v-r=init&foo&location=");
+        jsInitHandler.handleRequest(session, request, response);
+
+        PushConfiguration push = UI.getCurrent().getPushConfiguration();
+        assertEquals(PushMode.MANUAL, push.getPushMode());
+        assertEquals(Transport.LONG_POLLING, push.getTransport());
+    }
+
+    @Test
+    void synchronizedHandleRequest_badLocation_noUiCreated()
+            throws IOException {
+        final JavaScriptBootstrapHandler bootstrapHandler = new JavaScriptBootstrapHandler();
+
+        VaadinRequest request = mocks.createRequest(mocks, "/",
+                "v-r=init&location=..**");
+
+        final MockServletServiceSessionSetup.TestVaadinServletResponse response = mocks
+                .createResponse();
+
+        final boolean value = bootstrapHandler.synchronizedHandleRequest(
+                mocks.getSession(), request, response);
+        assertTrue(value, "No further request handlers should be called");
+
+        assertEquals(400, response.getErrorCode(),
+                "Invalid status code reported");
+        assertEquals(
+                "Invalid location: Relative path cannot contain .. segments",
+                response.getErrorMessage(), "Invalid message reported");
+    }
+
+    @Test
+    void synchronizedHandleRequest_noLocationParameter_noUiCreated()
+            throws IOException {
+        final JavaScriptBootstrapHandler bootstrapHandler = new JavaScriptBootstrapHandler();
+
+        VaadinRequest request = mocks.createRequest(mocks, "/",
+                "v-r=ini&foobar");
+
+        final MockServletServiceSessionSetup.TestVaadinServletResponse response = mocks
+                .createResponse();
+
+        final boolean value = bootstrapHandler.synchronizedHandleRequest(
+                mocks.getSession(), request, response);
+        assertTrue(value, "No further request handlers should be called");
+
+        assertEquals(400, response.getErrorCode(),
+                "Invalid status code reported");
+        assertEquals(
+                "Invalid location: Location parameter missing from bootstrap request to server.",
+                response.getErrorMessage(), "Invalid message reported");
+    }
+
+    @Test
+    void browserDetailsFromIndividualParameters_storedInUi() throws Exception {
+        // Browser details are sent as plain v-* query parameters, not as a
+        // single JSON-encoded value. v-tzid carries a "/" to ensure values
+        // with reserved characters round-trip correctly.
+        VaadinRequest request = mocks.createRequest(mocks, "/",
+                "v-r=init&location=&v-sw=1641&v-sh=736"
+                        + "&v-tzid=Europe%2FBerlin");
+        jsInitHandler.handleRequest(session, request, response);
+
+        ExtendedClientDetails details = UI.getCurrent().getInternals()
+                .getExtendedClientDetails();
+        assertNotNull(details, "Browser details should be stored");
+        assertEquals(1641, details.getScreenWidth());
+        assertEquals("Europe/Berlin", details.getTimeZoneId());
+    }
+
+    private boolean hasNodeTag(TestNodeVisitor visitor, String htmContent,
+            ElementType type) {
+        Pattern regex = Pattern.compile(htmContent, Pattern.DOTALL);
+        return visitor.getVisited().entrySet().stream().anyMatch(entry -> {
+            return entry.getValue().equals(type)
+                    && regex.matcher(entry.getKey().toString()).find();
+        });
+    }
+
+}

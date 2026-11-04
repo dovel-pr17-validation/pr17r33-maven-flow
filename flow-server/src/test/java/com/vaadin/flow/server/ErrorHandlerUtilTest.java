@@ -1,0 +1,226 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Optional;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.internal.UIInternals;
+import com.vaadin.flow.di.DefaultInstantiator;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.router.BeforeEnterEvent;
+import com.vaadin.flow.router.ErrorParameter;
+import com.vaadin.flow.router.HasErrorParameter;
+import com.vaadin.flow.router.ParentLayout;
+import com.vaadin.flow.router.Router;
+import com.vaadin.flow.router.RouterLayout;
+import com.vaadin.flow.server.startup.ApplicationRouteRegistry;
+import com.vaadin.tests.util.AlwaysLockedVaadinSession;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+@Isolated
+class ErrorHandlerUtilTest {
+
+    @Mock
+    UI ui;
+    @Mock
+    VaadinService vaadinService;
+    @Mock
+    DeploymentConfiguration config;
+
+    AlwaysLockedVaadinSession session;
+    UIInternals internals;
+    ApplicationRouteRegistry registry;
+
+    @Tag("div")
+    protected static class ErrorView extends Component
+            implements HasErrorParameter<NullPointerException> {
+
+        public static boolean setError = false;
+        public static boolean initialized = false;
+
+        public ErrorView() {
+            initialized = true;
+            setError = false;
+        }
+
+        @Override
+        public int setErrorParameter(BeforeEnterEvent event,
+                ErrorParameter<NullPointerException> parameter) {
+            getElement().setText("Nope!");
+            setError = true;
+            return 0;
+        }
+    }
+
+    @Tag("div")
+    @ParentLayout(ParentView.class)
+    protected static class ErrorWithParentView extends Component
+            implements HasErrorParameter<NullPointerException> {
+
+        public static boolean setError = false;
+        public static boolean initialized = false;
+
+        public ErrorWithParentView() {
+            initialized = true;
+            setError = false;
+        }
+
+        @Override
+        public int setErrorParameter(BeforeEnterEvent event,
+                ErrorParameter<NullPointerException> parameter) {
+            getElement().setText("Nope!");
+            setError = true;
+            return 0;
+        }
+    }
+
+    @Tag("div")
+    protected static class ParentView extends Component
+            implements RouterLayout {
+
+        public static boolean initialized = false;
+
+        public ParentView() {
+            initialized = true;
+        }
+    }
+
+    @BeforeEach
+    void init() {
+        MockitoAnnotations.initMocks(this);
+
+        ErrorView.setError = false;
+        ErrorView.initialized = false;
+
+        Element body = new Element("body");
+        when(ui.getElement()).thenReturn(body);
+        when(ui.isNavigationSupported()).thenReturn(true);
+
+        internals = new UIInternals(ui);
+
+        when(ui.getUI()).thenReturn(Optional.of(ui));
+        when(ui.getUIOrThrow()).thenCallRealMethod();
+        when(ui.getInternals()).thenReturn(internals);
+
+        RouteRegistry routeRegistry = mock(RouteRegistry.class);
+        when(routeRegistry.getRegisteredRoutes()).thenReturn(new ArrayList<>());
+        when(vaadinService.getRouteRegistry()).thenReturn(routeRegistry);
+
+        session = new AlwaysLockedVaadinSession(vaadinService);
+        VaadinContext context = new MockVaadinContext();
+        when(vaadinService.getContext()).thenReturn(context);
+        when(vaadinService.getInstantiator())
+                .thenReturn(new DefaultInstantiator(vaadinService));
+        internals.setSession(session);
+        when(vaadinService.getRouter()).thenReturn(mock(Router.class));
+
+        when(ui.getSession()).thenReturn(session);
+        when(ui.getSessionOrThrow()).thenCallRealMethod();
+
+        when(vaadinService.getDeploymentConfiguration()).thenReturn(config);
+
+        when(vaadinService.accessSession(any(VaadinSession.class),
+                any(Command.class))).thenCallRealMethod();
+        when(ui.access(any(Command.class))).thenCallRealMethod();
+
+        registry = ApplicationRouteRegistry.getInstance(context);
+
+        VaadinService.setCurrent(vaadinService);
+        UI.setCurrent(ui);
+    }
+
+    @AfterEach
+    void cleanup() {
+        VaadinService.setCurrent(null);
+        UI.setCurrent(null);
+    }
+
+    @Test
+    void nullPointerException_executesErrorView() {
+        registry.setErrorNavigationTargets(
+                Collections.singleton(ErrorView.class));
+
+        assertEquals(0, ui.getElement().getChildren().count());
+
+        ui.access(() -> {
+        });
+
+        session.getPendingAccessQueue().forEach(futureAccess -> futureAccess
+                .handleError(new NullPointerException("NPE")));
+
+        assertTrue(ErrorView.initialized);
+        assertTrue(ErrorView.setError);
+        assertEquals(1, ui.getElement().getChildren().count());
+    }
+
+    @Test
+    void illegalArgumentException_doesNotExecuteErrorView() {
+        registry.setErrorNavigationTargets(
+                Collections.singleton(ErrorView.class));
+
+        assertEquals(0, ui.getElement().getChildren().count());
+
+        ui.access(() -> {
+        });
+
+        session.getPendingAccessQueue().forEach(futureAccess -> futureAccess
+                .handleError(new IllegalArgumentException("IAE")));
+
+        assertFalse(ErrorView.initialized);
+        assertFalse(ErrorView.setError);
+        assertEquals(0, ui.getElement().getChildren().count());
+    }
+
+    @Test
+    void redrawnExceptionView_alsoInitializesParent() {
+        registry.setErrorNavigationTargets(
+                Collections.singleton(ErrorWithParentView.class));
+
+        assertEquals(0, ui.getElement().getChildren().count());
+
+        ui.access(() -> {
+        });
+
+        session.getPendingAccessQueue().forEach(futureAccess -> futureAccess
+                .handleError(new NullPointerException("NPE")));
+
+        assertTrue(ErrorWithParentView.initialized);
+        assertTrue(ErrorWithParentView.setError);
+
+        assertTrue(ParentView.initialized);
+
+        assertEquals(1, ui.getElement().getChildren().count());
+    }
+}

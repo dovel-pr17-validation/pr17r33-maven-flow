@@ -1,0 +1,368 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.uitest.ui;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
+
+import net.jcip.annotations.NotThreadSafe;
+import org.junit.After;
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Test;
+import org.mockito.ThrowingConsumer;
+
+import com.vaadin.testbench.TestBenchElement;
+
+@NotThreadSafe
+public class StylesheetLiveReloadIT extends AbstractLiveReloadIT {
+
+    private static final String UPDATED_DIV_BG_COLOR = "rgba(0, 0, 255, 1)";
+    private static final String APPSHELL_STYLES_DIV_BG_COLOR = "rgba(139, 0, 139, 1)";
+    private static final String APPSHELL_IMPORTED_DIV_BG_COLOR = "rgba(184, 134, 11, 1)";
+    private static final String APPSHELL_NESTED_IMPORTED_DIV_BG_COLOR = "rgba(139, 0, 0, 1)";
+    private static final String VIEW_STYLES_DIV_BG_COLOR = "rgba(75, 0, 130, 1)";
+    private static final String VIEW_IMPORTED_DIV_BG_COLOR = "rgba(205, 133, 63, 1)";
+    private static final String VIEW_NESTED_IMPORTED_DIV_BG_COLOR = "rgba(255, 127, 80, 1)";
+    private static final String ADDON_STYLE_DIV_BG_COLOR = "rgba(0, 128, 128, 1)";
+    private final Map<Path, byte[]> styleSheetRestore = new HashMap<>();
+    private static final String DIV_BG_COLOR_BEFORE_DELETE = "rgba(0, 255, 0, 1)";
+
+    private Path resourcesPath;
+    private Path sourceResourcesPath;
+    private Path jarResourcesPath;
+    private Path updatedImagePath;
+
+    @Before
+    public void detectStylesheetsLocation()
+            throws URISyntaxException, IOException {
+        URL markerUrl = getClass().getResource("/META-INF/resources/.marker");
+        Assert.assertNotNull("No marker file found", markerUrl);
+        Assert.assertEquals(
+                "Marker file is not a physical file: "
+                        + markerUrl.getProtocol(),
+                "file", markerUrl.getProtocol());
+        resourcesPath = Paths.get(markerUrl.toURI()).getParent();
+        updatedImagePath = resourcesPath
+                .resolve(Paths.get("css", "images", "vaadin-logo.png"));
+
+        // The file watcher monitors the source directory, not the build
+        // output. Walk up from the target path to find the Maven project
+        // root (containing both "src" and "pom.xml"), then resolve the
+        // source path.
+        Path projectDir = resourcesPath;
+        while (projectDir != null
+                && !(Files.isDirectory(projectDir.resolve("src")) && Files
+                        .isRegularFile(projectDir.resolve("pom.xml")))) {
+            projectDir = projectDir.getParent();
+        }
+        Assert.assertNotNull(
+                "Could not find project root from " + resourcesPath,
+                projectDir);
+        sourceResourcesPath = projectDir
+                .resolve("src/main/resources/META-INF/resources");
+        jarResourcesPath = projectDir
+                .resolve("src/main/frontend/generated/jar-resources");
+
+        // Create addon CSS in the target directory so Jetty can serve it
+        // on initial page load at /context/frontend/addon.css.
+        // The jar-resources copy is created later during the reload trigger
+        // to avoid a Vite rebuild at startup.
+        String addonCss = ".addon-style { background-color: "
+                + ADDON_STYLE_DIV_BG_COLOR + "; }\n";
+
+        Path targetAddonDir = resourcesPath.resolve("frontend");
+        Files.createDirectories(targetAddonDir);
+        Path targetAddonCss = targetAddonDir.resolve("addon.css");
+        Files.write(targetAddonCss, addonCss.getBytes());
+        styleSheetRestore.put(targetAddonCss, null);
+    }
+
+    @After
+    public void restoreStylesheets() throws IOException {
+        for (Map.Entry<Path, byte[]> entry : styleSheetRestore.entrySet()) {
+            Path path = entry.getKey();
+            if (entry.getValue() == null) {
+                // File was created by the test; delete it and clean up
+                // empty parent directories
+                System.out.println("Deleting " + path);
+                Files.deleteIfExists(path);
+                Path parent = path.getParent();
+                if (parent != null && Files.isDirectory(parent)) {
+                    try (var entries = Files.list(parent)) {
+                        if (entries.findFirst().isEmpty()) {
+                            Files.delete(parent);
+                        }
+                    }
+                }
+            } else {
+                System.out.println("Restoring " + path);
+                Files.write(path, entry.getValue());
+            }
+        }
+    }
+
+    // Defining a single test method for all use cases to prevent flakyness
+    // caused
+    // by resource cleanup when running individual tests in parallel
+    @Test
+    public void stylesheetTag_updateReferencedResources_changesApplied()
+            throws IOException {
+        // Disables cache to make the test reliable, preventing old content to
+        // be served by the servlet container even if the resource has been
+        // updated
+        getDevTools().setCacheDisabled(true);
+        open();
+        assertStyleSheetIsReloaded("appshell-style",
+                APPSHELL_STYLES_DIV_BG_COLOR);
+        assertStyleSheetIsReloaded("appshell-imported",
+                APPSHELL_IMPORTED_DIV_BG_COLOR);
+        assertStyleSheetIsReloaded("appshell-nested-imported",
+                APPSHELL_NESTED_IMPORTED_DIV_BG_COLOR);
+
+        assertStyleSheetIsReloaded("view-style", VIEW_STYLES_DIV_BG_COLOR);
+        assertStyleSheetIsReloaded("view-imported", VIEW_IMPORTED_DIV_BG_COLOR);
+        assertStyleSheetIsReloaded("view-nested-imported",
+                VIEW_NESTED_IMPORTED_DIV_BG_COLOR);
+
+        assertImageIsReloaded("appshell-image", "css/images/gobo.png");
+        assertImageIsReloaded("view-image", "css/images/viking.png");
+
+        assertJarResourceStyleSheetIsReloaded();
+
+        assertStyleSheetIsRemoved();
+    }
+
+    private void assertStyleSheetIsReloaded(String styledDivID,
+            String originalBGColor) throws IOException {
+        String backgroundColor = $("div").id(styledDivID)
+                .getCssValue("backgroundColor");
+        Assert.assertEquals(originalBGColor, backgroundColor);
+
+        triggerReloadStyleSheet(styledDivID);
+
+        Assert.assertEquals("Page should not be reloaded", getInitialAttachId(),
+                getAttachId());
+
+        waitUntil(d -> {
+            var newBgColor = $("div").id(styledDivID)
+                    .getCssValue("backgroundColor");
+            return UPDATED_DIV_BG_COLOR.equals(newBgColor);
+        });
+    }
+
+    private void assertImageIsReloaded(String styledDivID,
+            String expectedImagePath) throws IOException {
+        String backgroundImage = $("div").id(styledDivID)
+                .getCssValue("backgroundImage");
+        Assert.assertTrue(
+                "Expected background image " + expectedImagePath + " but got "
+                        + backgroundImage,
+                backgroundImage.contains(expectedImagePath));
+
+        triggerReloadImage(styledDivID);
+
+        Assert.assertEquals("Page should not be reloaded", getInitialAttachId(),
+                getAttachId());
+
+        backgroundImage = $("div").id(styledDivID)
+                .getCssValue("backgroundImage").replaceAll(
+                        "(?i).*url\\s*\\(\\s*['\"]?([^'\"]+)['\"]?\\s*\\).*",
+                        "$1");
+        waitUntilContentMatches(backgroundImage,
+                Files.readAllBytes(updatedImagePath));
+    }
+
+    private void assertJarResourceStyleSheetIsReloaded() throws IOException {
+        String backgroundColor = $("div").id("addon-style")
+                .getCssValue("backgroundColor");
+        Assert.assertEquals(ADDON_STYLE_DIV_BG_COLOR, backgroundColor);
+
+        // Update the target file so the servlet serves the new content
+        triggerReloadStyleSheet("addon-style");
+
+        // Create the jar-resources file with the updated CSS to trigger
+        // the file watcher. The file sits at jar-resources/addon.css
+        // (without frontend/ prefix, as TaskCopyFrontendFiles strips it)
+        String updatedCss = ".addon-style { background-color: "
+                + UPDATED_DIV_BG_COLOR + "; }\n";
+        Path jarAddonCss = jarResourcesPath.resolve("addon.css");
+        try (var writer = Files.newBufferedWriter(jarAddonCss,
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+                StandardOpenOption.SYNC)) {
+            writer.write(updatedCss);
+            writer.flush();
+        }
+        styleSheetRestore.put(jarAddonCss, null);
+
+        Assert.assertEquals("Page should not be reloaded", getInitialAttachId(),
+                getAttachId());
+
+        waitUntil(d -> {
+            var newBgColor = $("div").id("addon-style")
+                    .getCssValue("backgroundColor");
+            return UPDATED_DIV_BG_COLOR.equals(newBgColor);
+        });
+    }
+
+    private void assertStyleSheetIsRemoved() throws IOException {
+        String initialBgColor = $("div").id("view-style-deleted")
+                .getCssValue("backgroundColor");
+        // Before deletion, the element should be styled (i.e., not the
+        // default/transparent)
+        Assert.assertEquals(
+                "Precondition failed: element should be styled before deletion",
+                DIV_BG_COLOR_BEFORE_DELETE, initialBgColor);
+
+        triggerDelete();
+
+        Assert.assertEquals("Page should not be reloaded", getInitialAttachId(),
+                getAttachId());
+
+        waitUntil(d -> {
+            var newBgColor = $("div").id("view-style-deleted")
+                    .getCssValue("backgroundColor");
+            return !DIV_BG_COLOR_BEFORE_DELETE.equals(newBgColor);
+        });
+    }
+
+    private void triggerReloadStyleSheet(String styledDivID)
+            throws IOException {
+        ThrowingConsumer<Path> updater = path -> {
+            String content = Files.readString(path);
+            content = content.replaceFirst("(background-color:\\s*)([^;]+);",
+                    "$1" + UPDATED_DIV_BG_COLOR + ";");
+            // Using a buffered writer to ensure changes are flushed to disk
+            // before triggering hot reload in browser
+            try (var writer = Files.newBufferedWriter(path,
+                    StandardOpenOption.WRITE, StandardOpenOption.SYNC)) {
+                writer.write(content);
+                writer.flush();
+            }
+        };
+        triggerReload(styledDivID, updater);
+    }
+
+    private void triggerReload(String divId, ThrowingConsumer<Path> updater)
+            throws IOException {
+        TestBenchElement div = $("div").id(divId);
+        String resourceRelativePath = div
+                .getDomAttribute("test-resource-file-path");
+        Assert.assertNotNull(
+                "No test-resource-file-path attribute found for div " + divId,
+                resourceRelativePath);
+
+        Path resourcePath = resourcesPath
+                .resolve(resourceRelativePath.replace('/', File.separatorChar));
+        Assert.assertTrue("Resource file not found: " + resourcePath,
+                Files.exists(resourcePath));
+
+        if (!styleSheetRestore.containsKey(resourcePath)) {
+            styleSheetRestore.put(resourcePath,
+                    Files.readAllBytes(resourcePath));
+        }
+        updater.accept(resourcePath);
+
+        final byte[] content = Files.readAllBytes(resourcePath);
+        // Make sure the servlet container returns the updated content
+        waitUntilContentMatches(
+                getRootURL() + "/context/" + resourceRelativePath, content);
+
+        // Also update the source file so the file watcher detects the
+        // change and triggers a live CSS reload via the debug connection
+        Path sourcePath = sourceResourcesPath
+                .resolve(resourceRelativePath.replace('/', File.separatorChar));
+        if (Files.exists(sourcePath)) {
+            if (!styleSheetRestore.containsKey(sourcePath)) {
+                styleSheetRestore.put(sourcePath,
+                        Files.readAllBytes(sourcePath));
+            }
+            updater.accept(sourcePath);
+        }
+
+        // Also check jar-resources path for addon stylesheets
+        Path jarPath = jarResourcesPath
+                .resolve(resourceRelativePath.replace('/', File.separatorChar));
+        if (Files.exists(jarPath)) {
+            if (!styleSheetRestore.containsKey(jarPath)) {
+                styleSheetRestore.put(jarPath, Files.readAllBytes(jarPath));
+            }
+            updater.accept(jarPath);
+        }
+    }
+
+    private void triggerReloadImage(String styledDivID) throws IOException {
+        ThrowingConsumer<Path> updater = path -> {
+            Files.copy(updatedImagePath, path,
+                    StandardCopyOption.REPLACE_EXISTING);
+        };
+        triggerReload(styledDivID, updater);
+    }
+
+    private void triggerDelete() throws IOException {
+        TestBenchElement div = $("div").id("view-style-deleted");
+        String resourceRelativePath = div
+                .getDomAttribute("test-resource-file-path");
+        Assert.assertNotNull(
+                "No test-resource-file-path attribute found for div "
+                        + "view-style-deleted",
+                resourceRelativePath);
+
+        Path resourcePath = resourcesPath
+                .resolve(resourceRelativePath.replace('/', File.separatorChar));
+        Assert.assertTrue("Resource file not found: " + resourcePath,
+                Files.exists(resourcePath));
+
+        styleSheetRestore.put(resourcePath, Files.readAllBytes(resourcePath));
+        Files.delete(resourcePath);
+
+        waitUntil(driver -> !Files.exists(resourcePath));
+
+        // Also delete the source file so the file watcher detects the
+        // change and triggers a live CSS reload via the debug connection
+        Path sourcePath = sourceResourcesPath
+                .resolve(resourceRelativePath.replace('/', File.separatorChar));
+        if (Files.exists(sourcePath)) {
+            styleSheetRestore.put(sourcePath, Files.readAllBytes(sourcePath));
+            Files.delete(sourcePath);
+        }
+    }
+
+    private void waitUntilContentMatches(String url, byte[] expectedContent) {
+        waitUntil(driver -> {
+            try (InputStream is = URI.create(url).toURL().openStream()) {
+                var out = new ByteArrayOutputStream();
+                is.transferTo(out);
+                return Arrays.equals(expectedContent, out.toByteArray());
+            } catch (Exception ex) {
+                return false;
+            }
+        });
+    }
+}

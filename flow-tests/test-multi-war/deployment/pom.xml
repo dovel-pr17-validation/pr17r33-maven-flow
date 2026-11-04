@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.vaadin</groupId>
+    <artifactId>flow-test-multi-war</artifactId>
+    <version>25.4-SNAPSHOT</version>
+  </parent>
+  <artifactId>flow-test-multi-war-bundle</artifactId>
+  <packaging>war</packaging>
+  <name>Bundle testing multiple war deployment</name>
+  <properties>
+    <maven.deploy.skip>true</maven.deploy.skip>
+  </properties>
+
+  <dependencies/>
+
+  <profiles>
+    <profile>
+      <id>run-tests</id>
+      <activation>
+        <property>
+          <name>!skipTests</name>
+        </property>
+      </activation>
+      <build>
+        <plugins>
+          <!-- Run jetty before ITs -->
+          <plugin>
+            <groupId>org.eclipse.jetty.ee10</groupId>
+            <artifactId>jetty-ee10-maven-plugin</artifactId>
+            <configuration>
+              <webApp>
+                <contextPath>/</contextPath>
+              </webApp>
+              <jettyXmls>
+                <jettyXml>${project.basedir}/src/main/jetty/jetty.xml</jettyXml>
+              </jettyXmls>
+              <jettyProperties>
+                <webapp1.warPath>${project.parent.basedir}${file.separator}test-war1${file.separator}target${file.separator}flow-test-multi-war1.war</webapp1.warPath>
+                <webapp1.context>/test-war1</webapp1.context>
+                <webapp2.warPath>${project.parent.basedir}${file.separator}test-war2${file.separator}target${file.separator}flow-test-multi-war2.war</webapp2.warPath>
+                <webapp2.context>/test-war2</webapp2.context>
+              </jettyProperties>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+
+</project>

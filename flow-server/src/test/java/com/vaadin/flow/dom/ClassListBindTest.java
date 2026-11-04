@@ -1,0 +1,175 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.dom;
+
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.internal.nodefeature.SignalBindingFeature;
+import com.vaadin.flow.signals.BindingActiveException;
+import com.vaadin.flow.signals.local.ValueSignal;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+/**
+ * Tests for binding CSS class presence to a Signal using ClassList.bind.
+ */
+class ClassListBindTest extends SignalsUnitTest {
+
+    @Test
+    void bindingMirrorsSignalWhileAttached_toggleAddsRemovesClass() {
+        Element element = new Element("span");
+        UI.getCurrent().getElement().appendChild(element);
+
+        ValueSignal<Boolean> signal = new ValueSignal<>(false);
+        element.getClassList().bind("highlight", signal);
+
+        // Initially false -> not present
+        assertFalse(element.getClassList().contains("highlight"));
+
+        signal.set(true);
+        assertTrue(element.getClassList().contains("highlight"));
+
+        signal.set(false);
+        assertFalse(element.getClassList().contains("highlight"));
+    }
+
+    @Test
+    void bindingInactiveWhenDetached_reactivatedOnAttach_appliesCurrentValue() {
+        Element element = new Element("span");
+        UI.getCurrent().getElement().appendChild(element);
+        ValueSignal<Boolean> signal = new ValueSignal<>(false);
+        element.getClassList().bind("active", signal);
+
+        // Detach element
+        UI.getCurrent().getElement().removeChild(element);
+
+        // Change signal while detached – should NOT apply
+        signal.set(true);
+        assertFalse(element.getClassList().contains("active"));
+
+        // Reattach – current value true should be applied
+        UI.getCurrent().getElement().appendChild(element);
+        assertTrue(element.getClassList().contains("active"));
+    }
+
+    @Test
+    void manualAddRemoveForBoundName_throwsBindingActiveException() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+        ValueSignal<Boolean> signal = new ValueSignal<>(true);
+        element.getClassList().bind("locked", signal);
+
+        assertThrows(BindingActiveException.class,
+                () -> element.getClassList().add("locked"));
+        assertThrows(BindingActiveException.class,
+                () -> element.getClassList().remove("locked"));
+        assertThrows(BindingActiveException.class,
+                () -> element.getClassList().set("locked", true));
+        assertThrows(BindingActiveException.class,
+                () -> element.getClassList().set("locked", false));
+    }
+
+    @Test
+    void clear_throwsWhenBindingsActive() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+        ValueSignal<Boolean> signal = new ValueSignal<>(true);
+        element.getClassList().bind("a", signal);
+
+        assertThrows(BindingActiveException.class,
+                () -> element.getClassList().clear());
+    }
+
+    @Test
+    void setAttributeClass_throwsWhenBindingsActive() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+        ValueSignal<Boolean> bound = new ValueSignal<>(true);
+        element.getClassList().bind("flag", bound);
+        assertTrue(element.getClassList().contains("flag"));
+
+        assertThrows(BindingActiveException.class,
+                () -> element.setAttribute("class", "foo bar"));
+    }
+
+    @Test
+    void bind_nullSignal_throwsNPE() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+
+        assertThrows(NullPointerException.class,
+                () -> element.getClassList().bind("badge", null));
+    }
+
+    @Test
+    void rebinding_alreadyBound_throws() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+        ValueSignal<Boolean> s1 = new ValueSignal<>(true);
+        ValueSignal<Boolean> s2 = new ValueSignal<>(false);
+
+        element.getClassList().bind("tag", s1);
+        assertTrue(element.getClassList().contains("tag"));
+
+        // Rebind to a new signal
+        assertThrows(BindingActiveException.class,
+                () -> element.getClassList().bind("tag", s2));
+    }
+
+    @Test
+    void internalUpdatesDoNotThrowOrRecurse() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+        ValueSignal<Boolean> signal = new ValueSignal<>(false);
+        element.getClassList().bind("spin", signal);
+
+        // Flip to true a couple of times; should not throw and should not
+        // duplicate class entries.
+        signal.set(true);
+        signal.set(true); // no-op update
+        assertTrue(element.getClassList().contains("spin"));
+        assertEquals(1,
+                element.getClassList().stream().filter("spin"::equals).count());
+
+        signal.set(false);
+        signal.set(false); // no-op update
+        assertFalse(element.getClassList().contains("spin"));
+    }
+
+    @Test
+    void lazyInitSignalBindingFeature() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+        element.getClassList().add("spin");
+        assertTrue(element.getClassList().contains("spin"));
+
+        element.getNode().getFeatureIfInitialized(SignalBindingFeature.class)
+                .ifPresent(feature -> fail(
+                        "SignalBindingFeature should not be initialized before binding a signal"));
+
+        ValueSignal<Boolean> signal = new ValueSignal<>(false);
+        element.getClassList().bind("spin", signal);
+
+        element.getNode().getFeatureIfInitialized(SignalBindingFeature.class)
+                .orElseThrow(() -> new AssertionError(
+                        "SignalBindingFeature should be initialized after binding a signal"));
+    }
+}

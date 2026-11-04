@@ -1,0 +1,1136 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.frontend;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ObjectNode;
+import tools.jackson.databind.node.StringNode;
+
+import com.vaadin.flow.component.dependency.NpmPackage;
+import com.vaadin.flow.internal.FileIOUtils;
+import com.vaadin.flow.internal.FrontendUtils;
+import com.vaadin.flow.internal.FrontendVersion;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.internal.StringUtil;
+import com.vaadin.flow.server.frontend.scanner.FrontendDependenciesScanner;
+
+/**
+ * Updates <code>package.json</code> by visiting {@link NpmPackage} annotations
+ * found in the classpath. It also visits classes annotated with
+ * {@link NpmPackage}.
+ * <p>
+ * For internal use only. May be renamed or removed in a future release.
+ *
+ * @since 2.0
+ */
+public class TaskUpdatePackages extends NodeUpdater {
+
+    protected static final String VAADIN_APP_PACKAGE_HASH = "vaadinAppPackageHash";
+    private final boolean forceCleanUp;
+    private final boolean enablePnpm;
+    private final File jarResourcesFolder;
+    private ObjectNode allPinnedNpmDependencies;
+    private ObjectNode pinnedNpmDependencies;
+
+    /**
+     * A version npm resolves within a known minor or major: an exact version, a
+     * tilde range or a caret range, each with a full major.minor.patch.
+     */
+    private static final Pattern RANGE_CHECKED_VERSION = Pattern
+            .compile("[~^]?\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?");
+
+    /**
+     * Create an instance of the updater given all configurable parameters.
+     *
+     * @param options
+     *            the task options
+     */
+    TaskUpdatePackages(Options options) {
+        super(options);
+        this.jarResourcesFolder = options.getJarFrontendResourcesFolder();
+        this.forceCleanUp = options.isCleanNpmFiles();
+        this.enablePnpm = options.isEnablePnpm();
+    }
+
+    @Override
+    public void execute() {
+        try {
+            final FrontendDependenciesScanner frontDeps = options
+                    .getFrontendDependenciesScanner();
+            Map<String, String> scannedApplicationDependencies = frontDeps
+                    .getPackages();
+            Map<String, String> scannedApplicationDevDependencies = frontDeps
+                    .getDevPackages();
+            ObjectNode packageJson = getPackageJson();
+            modified = updatePackageJsonDependencies(packageJson,
+                    scannedApplicationDependencies,
+                    scannedApplicationDevDependencies);
+            warnOnVersionRangeMismatch(packageJson);
+
+            generateVersionsJson(packageJson);
+            modified = pinVersionsForNpm(packageJson) || modified;
+
+            // Recompute hash
+            final Map<String, String> pnpmOverrides = enablePnpm
+                    ? new PnpmWorkspaceFile(options.getNpmFolder())
+                            .getOverrides()
+                    : Map.of();
+            final String finalHash = generatePackageJsonHash(packageJson,
+                    pnpmOverrides);
+            final JsonNode hashNode = JacksonUtils.getNestedKey(packageJson,
+                    List.of(VAADIN_DEP_KEY, HASH_KEY));
+            modified = !finalHash
+                    .equals(hashNode != null ? hashNode.stringValue() : "")
+                    || modified;
+            if (modified) {
+                ((ObjectNode) packageJson.get(VAADIN_DEP_KEY)).put(HASH_KEY,
+                        finalHash);
+
+                if (!packageJson.has("type") || !packageJson.get("type")
+                        .asString().equals("module")) {
+                    packageJson.put("type", "module");
+                    log().info(
+                            """
+                                    Adding package.json type as module to enable ES6 modules which is now required.
+                                    With this change sources need to use 'import' instead of 'require' for imports.
+                                    """);
+                }
+                writePackageFile(packageJson);
+            }
+
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * Pins the npm packages Vaadin manages by writing the overrides that
+     * enforce their versions, into package.json for npm and into
+     * pnpm-workspace.yaml for pnpm.
+     *
+     * @param packageJson
+     *            the package.json content to pin the versions in
+     * @return {@code true} if the overrides changed
+     * @throws IOException
+     *             if the versions files cannot be read, or the overrides cannot
+     *             be read or written
+     */
+    boolean pinVersionsForNpm(ObjectNode packageJson) throws IOException {
+        final JsonNode dependencies = packageJson.get(DEPENDENCIES);
+        final JsonNode devDependencies = packageJson.get(DEV_DEPENDENCIES);
+
+        final Map<String, String> pinnedNpmVersions = collectPinnedNpmVersions();
+        final ObjectNode vaadinOverrides = computeVaadinOverrides(
+                pinnedNpmVersions, dependencies, devDependencies);
+
+        // Overrides are managed identically for npm and pnpm; only where they
+        // are loaded from and saved to differs, which the store abstracts away.
+        final OverridesStore store = enablePnpm
+                ? new PnpmOverridesStore(packageJson)
+                : new PackageJsonOverridesStore(packageJson);
+        final Map<String, String> overrides = store.load();
+        final Map<String, String> overridesBefore = new LinkedHashMap<>(
+                overrides);
+
+        removeManagedOverrides(overrides,
+                managedOverrideKeys(pinnedNpmVersions), dependencies,
+                devDependencies);
+        overrides.putAll(flattenOverrides(vaadinOverrides));
+
+        boolean updated = store.save(overrides) || store.migrated()
+                || !overridesBefore.equals(overrides);
+        updated |= removeLegacyVaadinOverrides(packageJson);
+        return updated;
+    }
+
+    /**
+     * Abstracts where dependency overrides are loaded from and saved to. npm
+     * keeps them as a nested {@code overrides} object in package.json, while
+     * pnpm keeps them as a flat map in pnpm-workspace.yaml. In both cases the
+     * overrides are managed as a flat {@code key -> version} map, with
+     * {@code >} separating nested keys.
+     */
+    private interface OverridesStore {
+        /**
+         * Loads the current overrides as a flat map, migrating overrides left
+         * in legacy locations. {@link #migrated()} reports whether such a
+         * migration changed package.json.
+         */
+        Map<String, String> load() throws IOException;
+
+        /**
+         * Persists the given overrides.
+         *
+         * @return {@code true} if the stored overrides changed
+         */
+        boolean save(Map<String, String> overrides) throws IOException;
+
+        /**
+         * @return {@code true} if {@link #load()} migrated overrides out of a
+         *         legacy location, changing package.json
+         */
+        boolean migrated();
+    }
+
+    /**
+     * Stores overrides in the nested {@code overrides} object of package.json,
+     * the format npm reads.
+     */
+    private final class PackageJsonOverridesStore implements OverridesStore {
+
+        private final ObjectNode packageJson;
+        private boolean migrated;
+
+        PackageJsonOverridesStore(ObjectNode packageJson) {
+            this.packageJson = packageJson;
+        }
+
+        @Override
+        public Map<String, String> load() {
+            final Map<String, String> overrides = new LinkedHashMap<>();
+            final JsonNode section = packageJson.get(OVERRIDES);
+            if (section instanceof ObjectNode object) {
+                overrides.putAll(flattenOverrides(object));
+            }
+            // Migrate overrides left in package.json.pnpm by an older
+            // Flow/pnpm. pnpm-workspace.yaml is deliberately left untouched: it
+            // is the user's pnpm configuration, managed only while pnpm is
+            // actually in use, so an npm build never rewrites or deletes it.
+            migrated = foldLegacyPnpmOverrides(packageJson, overrides);
+            return overrides;
+        }
+
+        @Override
+        public boolean save(Map<String, String> overrides) {
+            final ObjectNode section = JacksonUtils.createObjectNode();
+            toSortedMap(overrides)
+                    .forEach((key, value) -> putNestedOverride(section,
+                            List.of(key.split(">")), value));
+            final JsonNode previous = packageJson.get(OVERRIDES);
+            packageJson.set(OVERRIDES, section);
+            return !section.equals(previous);
+        }
+
+        @Override
+        public boolean migrated() {
+            return migrated;
+        }
+    }
+
+    /**
+     * Stores overrides in the flat {@code overrides} map of
+     * pnpm-workspace.yaml, the location pnpm 10+ reads, migrating any overrides
+     * left in package.json.
+     */
+    private final class PnpmOverridesStore implements OverridesStore {
+
+        private final ObjectNode packageJson;
+        private PnpmWorkspaceFile workspace;
+        private boolean migrated;
+
+        PnpmOverridesStore(ObjectNode packageJson) {
+            this.packageJson = packageJson;
+        }
+
+        @Override
+        public Map<String, String> load() throws IOException {
+            workspace = new PnpmWorkspaceFile(options.getNpmFolder());
+            final Map<String, String> overrides = new LinkedHashMap<>(
+                    workspace.getOverrides());
+            // Fold in overrides still living in legacy package.json locations.
+            migrated = foldLegacyPnpmOverrides(packageJson, overrides);
+            final JsonNode legacyNpmOverrides = packageJson.get(OVERRIDES);
+            if (legacyNpmOverrides instanceof ObjectNode object) {
+                overrides.putAll(flattenOverrides(object));
+                packageJson.remove(OVERRIDES);
+                migrated = true;
+            }
+            return overrides;
+        }
+
+        @Override
+        public boolean save(Map<String, String> overrides) throws IOException {
+            workspace.setOverrides(toSortedMap(overrides));
+            return workspace.save();
+        }
+
+        @Override
+        public boolean migrated() {
+            return migrated;
+        }
+    }
+
+    /**
+     * Folds overrides left in {@code package.json.pnpm.overrides} by an older
+     * Flow/pnpm into the given flat map and removes the obsolete {@code pnpm}
+     * field once emptied.
+     *
+     * @return {@code true} if package.json was changed
+     */
+    private boolean foldLegacyPnpmOverrides(ObjectNode packageJson,
+            Map<String, String> overrides) {
+        if (!packageJson.has(PNPM)) {
+            return false;
+        }
+        boolean changed = false;
+        final ObjectNode pnpm = (ObjectNode) packageJson.get(PNPM);
+        final JsonNode legacy = pnpm.get(OVERRIDES);
+        if (legacy instanceof ObjectNode object) {
+            overrides.putAll(flattenOverrides(object));
+            pnpm.remove(OVERRIDES);
+            changed = true;
+        }
+        if (pnpm.isEmpty()) {
+            packageJson.remove(PNPM);
+            changed = true;
+        }
+        return changed;
+    }
+
+    /**
+     * Collects the versions to pin the npm packages to, from the two places
+     * they are declared in.
+     * <p>
+     * Every package of the versions files is taken first, so that a package is
+     * pinned to the version Vaadin ships even when it is only used
+     * transitively. What {@link #versionsJson} declares is then filled in for
+     * the packages the versions files do not cover. That is the same set of
+     * packages narrowed down to the current mode and without the SNAPSHOT and
+     * unparsable versions, plus the version package.json declares for each of
+     * its dependencies that is not pinned by a versions file.
+     * <p>
+     * A version the user changed in package.json does not replace the one the
+     * versions files declare; it only produces a warning when the user pinned
+     * an older version than Vaadin ships.
+     * <p>
+     * This is not about what package.json currently pins through overrides:
+     * those are read separately and are replaced by what this returns.
+     *
+     * @return the version to pin each npm package to, by package name
+     * @throws IOException
+     *             if the versions files cannot be read
+     */
+    private Map<String, String> collectPinnedNpmVersions() throws IOException {
+        final Map<String, String> pinnedNpmVersions = new HashMap<>();
+        final ObjectNode allPinnedNpmDependencies = getAllPinnedNpmDependencies();
+        for (String dependency : JacksonUtils
+                .getKeys(allPinnedNpmDependencies)) {
+            pinnedNpmVersions.put(dependency,
+                    allPinnedNpmDependencies.get(dependency).asString());
+        }
+        for (String dependency : JacksonUtils.getKeys(versionsJson)) {
+            pinnedNpmVersions.putIfAbsent(dependency,
+                    versionsJson.get(dependency).asString());
+        }
+        return pinnedNpmVersions;
+    }
+
+    /**
+     * Builds the overrides Vaadin wants to enforce for the packages of
+     * {@link #collectPinnedNpmVersions()}: a dependency reference
+     * ({@code $dependency}) when the package is declared directly in
+     * package.json, the version to pin it to otherwise.
+     */
+    private ObjectNode computeVaadinOverrides(
+            Map<String, String> pinnedNpmVersions, JsonNode dependencies,
+            JsonNode devDependencies) {
+        final ObjectNode vaadinOverrides = getDefaultOverrides();
+        for (Map.Entry<String, String> pinnedEntry : pinnedNpmVersions
+                .entrySet()) {
+            final String dependency = pinnedEntry.getKey();
+            if (vaadinOverrides.has(dependency)) {
+                // Already provided by the default (e.g. workbox) overrides.
+                continue;
+            }
+            final String pinnedVersion = getPinnableVersion(
+                    pinnedEntry.getValue());
+            if (pinnedVersion == null) {
+                continue;
+            }
+            final String directVersion = directDependencyVersion(dependencies,
+                    devDependencies, dependency);
+            if (directVersion == null) {
+                // Not declared directly, pin to the pinned version.
+                vaadinOverrides.put(dependency, pinnedVersion);
+            } else if (isNumericVersion(directVersion)
+                    || FrontendBuildUtils.isUrlVersion(directVersion)) {
+                // Pinned by a dependency/devDependency; reference it so the
+                // declared version is enforced for transitive uses too.
+                vaadinOverrides.put(dependency, "$" + dependency);
+            }
+            // A non-numeric direct dependency (e.g. a folder link) is left as
+            // is, without an override.
+        }
+        return vaadinOverrides;
+    }
+
+    /**
+     * Gets the version an npm package can be pinned to.
+     *
+     * @param version
+     *            the version declared for the package
+     * @return the version to pin the package to, which is a numeric version or
+     *         a URL, or {@code null} if it cannot be pinned, which is the case
+     *         for a package that points at the build folder and for a SNAPSHOT
+     *         or otherwise non-numeric version
+     */
+    private String getPinnableVersion(String version) {
+        if (isInternalPseudoDependency(version)) {
+            return null;
+        }
+        if (FrontendBuildUtils.isUrlVersion(version)) {
+            return version;
+        }
+        try {
+            final FrontendVersion frontendVersion = new FrontendVersion(
+                    version);
+            return "SNAPSHOT".equals(frontendVersion.getBuildIdentifier())
+                    ? null
+                    : frontendVersion.getFullVersion();
+        } catch (NumberFormatException nfe) {
+            return null;
+        }
+    }
+
+    /**
+     * Top-level override keys Vaadin manages, which are the ones it removes
+     * from package.json once they are no longer pinned: the packages of
+     * {@link #collectPinnedNpmVersions()} and the default overrides Vaadin may
+     * add (e.g. workbox).
+     */
+    private Set<String> managedOverrideKeys(
+            Map<String, String> pinnedNpmVersions) {
+        final Set<String> managedKeys = new HashSet<>(
+                pinnedNpmVersions.keySet());
+        managedKeys.addAll(JacksonUtils.getKeys(getManagedDefaultOverrides()));
+        return managedKeys;
+    }
+
+    /**
+     * Removes the overrides Vaadin manages and any dependency reference whose
+     * target is no longer a dependency. User-defined overrides are kept.
+     */
+    private void removeManagedOverrides(Map<String, String> overrides,
+            Set<String> managedKeys, JsonNode dependencies,
+            JsonNode devDependencies) {
+        overrides.entrySet().removeIf(entry -> {
+            final String topLevelKey = entry.getKey().split(">", 2)[0];
+            return managedKeys.contains(topLevelKey) || isDanglingReference(
+                    entry.getValue(), dependencies, devDependencies);
+        });
+    }
+
+    /**
+     * A dependency reference ({@code $dependency}) is dangling when the
+     * referenced package is not declared as a dependency or devDependency.
+     */
+    private static boolean isDanglingReference(String value,
+            JsonNode dependencies, JsonNode devDependencies) {
+        return value.startsWith("$") && directDependencyVersion(dependencies,
+                devDependencies, value.substring(1)) == null;
+    }
+
+    /**
+     * Removes the obsolete {@code vaadin.overrides} tracking section written by
+     * earlier Flow versions.
+     *
+     * @return {@code true} if the section was present and removed
+     */
+    private static boolean removeLegacyVaadinOverrides(ObjectNode packageJson) {
+        final ObjectNode vaadinSection = (ObjectNode) packageJson
+                .get(VAADIN_DEP_KEY);
+        if (vaadinSection.has(OVERRIDES)) {
+            vaadinSection.remove(OVERRIDES);
+            return true;
+        }
+        return false;
+    }
+
+    private static String directDependencyVersion(JsonNode dependencies,
+            JsonNode devDependencies, String pkg) {
+        if (dependencies != null && dependencies.has(pkg)) {
+            return dependencies.get(pkg).asString();
+        }
+        if (devDependencies != null && devDependencies.has(pkg)) {
+            return devDependencies.get(pkg).asString();
+        }
+        return null;
+    }
+
+    private static boolean isNumericVersion(String version) {
+        try {
+            new FrontendVersion(version);
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    private void putNestedOverride(ObjectNode overrides, List<String> keyPath,
+            String value) {
+        JsonNode existingNode = JacksonUtils.getNestedKey(overrides, keyPath);
+        if (existingNode != null && existingNode.isObject()) {
+            // Add as a "." property in existing object
+            ((ObjectNode) existingNode).put(".", value);
+            return;
+        }
+        JacksonUtils.setNestedKey(overrides, keyPath, StringNode.valueOf(value),
+                (plainValueNode) -> {
+                    // Create and use an intermediate nested object
+                    final ObjectNode objectNode = JacksonUtils
+                            .createObjectNode();
+                    if (plainValueNode != null && plainValueNode.isString()) {
+                        // Upgrade plain string override to nested object
+                        // { "dep": "1.0" } => { "dep" : { ".": "1.0" } }
+                        objectNode.set(".", plainValueNode);
+                    }
+                    return objectNode;
+                });
+    }
+
+    /**
+     * Collect all npm dependencies the versions files declare, that is the json
+     * files of the versions folders on the classpath, regardless of the mode
+     * they apply to, so that any component version gets pinned even when it is
+     * only used transitively.
+     *
+     * @return the version each versions file declares, by npm package name
+     * @throws IOException
+     *             if the versions files cannot be read
+     * @see PinnedNpmVersions
+     */
+    private ObjectNode getAllPinnedNpmDependencies() throws IOException {
+        // Read once per run, as merging the versions files warns about the
+        // packages they disagree on
+        if (allPinnedNpmDependencies == null) {
+            allPinnedNpmDependencies = getPinnedNpmVersions()
+                    .getAllDependencies();
+        }
+        return allPinnedNpmDependencies;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * Read once per run, as merging the versions files warns about the packages
+     * they disagree on and about the ones package.json pins to an older
+     * version.
+     */
+    @Override
+    ObjectNode getPinnedNpmDependencies() throws IOException {
+        if (pinnedNpmDependencies == null) {
+            pinnedNpmDependencies = super.getPinnedNpmDependencies();
+        }
+        // A copy, as the callers add to what they get
+        return pinnedNpmDependencies.deepCopy();
+    }
+
+    private boolean isInternalPseudoDependency(String dependencyVersion) {
+        return dependencyVersion != null && dependencyVersion
+                .startsWith("./" + options.getBuildDirectoryName());
+    }
+
+    /**
+     * Returns the overrides sorted by key (case-insensitive) so serialized
+     * output is stable across runs.
+     */
+    private static Map<String, String> toSortedMap(
+            Map<String, String> overrides) {
+        final Map<String, String> sorted = new LinkedHashMap<>();
+        overrides.keySet().stream().sorted(String::compareToIgnoreCase)
+                .forEach(key -> sorted.put(key, overrides.get(key)));
+        return sorted;
+    }
+
+    /**
+     * Converts npm nested overrides to pnpm flat format. pnpm uses a different
+     * syntax for nested dependency overrides, using '&gt;' as a separator.
+     * <p>
+     * Example: {"workbox-build": {"dep": "1.0"}} becomes
+     * {"workbox-build&gt;dep": "1.0"}
+     *
+     * @param nestedOverrides
+     *            the nested override structure (npm format)
+     * @return flattened override structure (pnpm format)
+     */
+    private Map<String, String> flattenOverrides(ObjectNode nestedOverrides) {
+        final Map<String, String> flatOverrides = new HashMap<>();
+        for (String key : JacksonUtils.getKeys(nestedOverrides)) {
+            JsonNode value = nestedOverrides.get(key);
+            if (value.isObject()) {
+                // "." refers to key dependency
+                if (value.has(".")) {
+                    flatOverrides.put(key, value.get(".").stringValue());
+                    // Use a shallow value object copy without the "." property
+                    ObjectNode filtered = JacksonUtils.createObjectNode();
+                    for (String nestedProp : value.propertyNames()) {
+                        if (nestedProp.equals(".")) {
+                            continue;
+                        }
+                        filtered.set(nestedProp, value.get(nestedProp));
+                    }
+                    value = filtered;
+                }
+                // Nested override: {"workbox-build": {"dep": "1.0"}}
+                final Map<String, String> childOverrides = flattenOverrides(
+                        (ObjectNode) value);
+                for (Map.Entry<String, String> childEntry : childOverrides
+                        .entrySet()) {
+                    flatOverrides.put(key + ">" + childEntry.getKey(),
+                            childEntry.getValue());
+                }
+            } else {
+                // Already flat, keep as-is
+                flatOverrides.put(key, value.stringValue());
+            }
+        }
+        return flatOverrides;
+    }
+
+    @Override
+    String writePackageFile(JsonNode json) throws IOException {
+        sortObject(json, DEPENDENCIES);
+        sortObject(json, DEV_DEPENDENCIES);
+        sortObject(json, VAADIN_DEP_KEY);
+        return super.writePackageFile(json);
+    }
+
+    private void sortObject(JsonNode json, String key) {
+        if (!json.has(key)) {
+            return;
+        }
+        ObjectNode object = (ObjectNode) json.get(key);
+        ObjectNode ordered = orderKeys(object);
+        JacksonUtils.getKeys(object).forEach(object::remove);
+        // add ordered keys back
+        JacksonUtils.getKeys(ordered).forEach(prop -> {
+            JsonNode value = ordered.get(prop);
+            object.set(prop, value);
+        });
+    }
+
+    private ObjectNode orderKeys(JsonNode object) {
+        String[] keys = JacksonUtils.getKeys(object).toArray(String[]::new);
+        Arrays.sort(keys);
+        ObjectNode result = JacksonUtils.createObjectNode();
+        for (String key : keys) {
+            JsonNode value = object.get(key);
+            if (value instanceof ObjectNode) {
+                value = orderKeys(value);
+            }
+            result.set(key, value);
+        }
+        return result;
+    }
+
+    @SuppressWarnings("squid:S134")
+    private boolean updatePackageJsonDependencies(ObjectNode packageJson,
+            Map<String, String> applicationDependencies,
+            Map<String, String> applicationDevDependencies) throws IOException {
+        int added = 0;
+
+        Map<String, String> filteredApplicationDependencies = new ExclusionFilter(
+                options,
+                options.isReactEnabled()
+                        && FrontendBuildUtils.isReactModuleAvailable(options),
+                options.isNpmExcludeWebComponents())
+                .exclude(applicationDependencies);
+
+        // Add application dependencies
+        for (Entry<String, String> dep : filteredApplicationDependencies
+                .entrySet()) {
+            added += addDependency(packageJson, DEPENDENCIES, dep.getKey(),
+                    dep.getValue());
+        }
+
+        // Add application dev dependencies.
+        int addedDev = 0;
+        for (Entry<String, String> devDep : applicationDevDependencies
+                .entrySet()) {
+            addedDev += addDependency(packageJson, DEV_DEPENDENCIES,
+                    devDep.getKey(), devDep.getValue());
+        }
+
+        /*
+         * #10572 pin all internal versions
+         */
+        List<String> pinnedNpmDependencyNames = new ArrayList<>();
+        final ObjectNode pinnedNpmDependencies = getPinnedNpmDependencies();
+        for (String key : JacksonUtils.getKeys(pinnedNpmDependencies)) {
+            // need to double check that not overriding a scanned
+            // dependency since add-ons should be able to downgrade
+            // version through exclusion
+            if (!filteredApplicationDependencies.containsKey(key)
+                    && pinNpmDependency(packageJson, pinnedNpmDependencies,
+                            key)) {
+                added++;
+            }
+            // make sure pinned npm dependency is not cleared
+            pinnedNpmDependencyNames.add(key);
+        }
+
+        if (added > 0) {
+            log().debug("Added {} dependencies to main package.json", added);
+        }
+
+        if (addedDev > 0) {
+            log().debug("Added {} devDependencies to main package.json", added);
+        }
+
+        // Remove obsolete dependencies
+        List<String> dependencyCollection = Stream
+                .concat(filteredApplicationDependencies.entrySet().stream(),
+                        getDefaultDependencies().entrySet().stream())
+                .map(Entry::getKey).collect(Collectors.toList());
+        dependencyCollection.addAll(pinnedNpmDependencyNames);
+
+        boolean doCleanUp = forceCleanUp; // forced only in tests
+        int removed = removeLegacyProperties(packageJson);
+        removed += cleanDependencies(dependencyCollection, packageJson,
+                DEPENDENCIES);
+
+        // FIXME do not do cleanup of node_modules every time platform is
+        // updated ?
+        doCleanUp = doCleanUp || (!enablePnpm && FrontendBuildUtils
+                .isPlatformVersionUpdated(options, options.getNpmFolder(),
+                        options.getNodeModulesFolder()));
+
+        // Remove obsolete devDependencies
+        dependencyCollection = new ArrayList<>(
+                getDefaultDevDependencies().keySet());
+        dependencyCollection.addAll(applicationDevDependencies.keySet());
+
+        int removedDev = 0;
+        removedDev = cleanDependencies(dependencyCollection, packageJson,
+                DEV_DEPENDENCIES);
+
+        if (removed > 0) {
+            log().debug("Removed {} dependencies", removed);
+        }
+        if (removedDev > 0) {
+            log().debug("Removed {} devDependencies", removedDev);
+        }
+
+        if (doCleanUp) {
+            cleanUp();
+        }
+
+        return added > 0 || addedDev > 0 || removed > 0 || removedDev > 0;
+    }
+
+    private int cleanDependencies(List<String> dependencyCollection,
+            JsonNode packageJson, String dependencyKey) {
+        int removed = 0;
+
+        ObjectNode dependencyObject = (ObjectNode) packageJson
+                .get(dependencyKey);
+        ObjectNode vaadinDependencyObject = (ObjectNode) packageJson
+                .get(VAADIN_DEP_KEY).get(dependencyKey);
+        if (dependencyObject != null) {
+            for (String key : JacksonUtils.getKeys(dependencyObject)) {
+                if (!dependencyCollection.contains(key)
+                        && vaadinDependencyObject.has(key)) {
+                    dependencyObject.remove(key);
+                    vaadinDependencyObject.remove(key);
+                    log().debug("Removed \"{}\".", key);
+                    removed++;
+                }
+            }
+        }
+        return removed;
+    }
+
+    protected static boolean pinNpmDependency(JsonNode packageJson,
+            JsonNode pinnedNpmVersions, String pkg) {
+        final String pinnedVersion = getPinnedVersion(pinnedNpmVersions, pkg);
+        if (pinnedVersion == null) {
+            return false;
+        }
+
+        final ObjectNode vaadinDeps = (ObjectNode) packageJson
+                .get(VAADIN_DEP_KEY).get(DEPENDENCIES);
+        final ObjectNode packageJsonDeps = (ObjectNode) packageJson
+                .get(DEPENDENCIES);
+        // packages exist at this point
+        assert vaadinDeps != null : "vaadin{ dependencies { } } should exist";
+        assert packageJsonDeps != null : "dependencies { } should exist";
+
+        final String packageJsonVersion = packageJsonDeps.has(pkg)
+                ? packageJsonDeps.get(pkg).asString()
+                : null;
+        final String vaadinDepsVersion = vaadinDeps.has(pkg)
+                ? vaadinDeps.get(pkg).asString()
+                : null;
+
+        if (packageJsonVersion != null && vaadinDepsVersion == null
+                && !isNumericVersion(packageJsonVersion)) {
+            // The user declared a non-numeric version, such as a file link, a
+            // URL or a dist-tag, which is not compared and so not changed
+            return false;
+        }
+        if (packageJsonVersion != null && vaadinDepsVersion != null
+                && !isSameDependency(vaadinDepsVersion, packageJsonVersion)) {
+            // The user has overridden the version, use that
+            return false;
+        }
+        if (isSameDependency(pinnedVersion, packageJsonVersion)
+                && isSameDependency(pinnedVersion, vaadinDepsVersion)) {
+            return false;
+        }
+
+        packageJsonDeps.put(pkg, pinnedVersion);
+        vaadinDeps.put(pkg, pinnedVersion);
+        return true;
+    }
+
+    /**
+     * Warns about packages the versions files pin, that the project has
+     * declared in the {@code dependencies} or {@code devDependencies} of
+     * {@code package.json} with a version from a different minor or major range
+     * than the one the current Vaadin version pins them to.
+     * <p>
+     * This is checked once the dependencies have been updated, so that a
+     * version the build overwrites with the one it ships is not reported. Only
+     * values that differ from the ones Vaadin manages (kept in the
+     * {@code vaadin} section) are considered, as those are the explicit
+     * opt-outs that the build leaves untouched. Entries in the
+     * {@code overrides} section are intentionally not reported here, as those
+     * are reconciled with the pinned versions by the override management.
+     * Declaring a package with another maintenance (patch) release of the same
+     * minor is a supported way of picking up a fix early, but using a different
+     * minor or major version is usually a mistake, since the rest of the
+     * platform is built and tested against the pinned version. Such mismatches
+     * can lead to runtime errors or broken generated frontend files (a blank
+     * page).
+     *
+     * @param packageJson
+     *            the package.json with the dependencies updated, before the
+     *            overrides pin the versions
+     * @throws IOException
+     *             if the versions files cannot be read
+     */
+    void warnOnVersionRangeMismatch(ObjectNode packageJson) throws IOException {
+        // With the web components excluded, Vaadin uses none of them, so they
+        // are the project's own to manage. Otherwise even a package pinned for
+        // another mode is checked, as the overrides still force the declared
+        // version on its transitive uses.
+        final ObjectNode expectedVersions = options.isNpmExcludeWebComponents()
+                ? getPinnedNpmDependencies()
+                : getAllPinnedNpmDependencies();
+        final JsonNode vaadin = packageJson.get(VAADIN_DEP_KEY);
+
+        // Collect mismatches into a single warning to avoid flooding the log
+        // when a whole platform worth of packages has drifted.
+        final List<String> mismatches = new ArrayList<>();
+        collectRangeMismatches(sectionToMap(packageJson.get(DEPENDENCIES)),
+                sectionToMap(vaadin == null ? null : vaadin.get(DEPENDENCIES)),
+                expectedVersions, DEPENDENCIES, mismatches);
+        collectRangeMismatches(sectionToMap(packageJson.get(DEV_DEPENDENCIES)),
+                sectionToMap(
+                        vaadin == null ? null : vaadin.get(DEV_DEPENDENCIES)),
+                expectedVersions, DEV_DEPENDENCIES, mismatches);
+
+        if (!mismatches.isEmpty()) {
+            log().warn(
+                    """
+                            The following packages are pinned in package.json to a different \
+                            minor/major version than the version expected by the current Vaadin \
+                            version. Pinning to another maintenance release is supported, but \
+                            using a different minor or major version is usually a mistake and may \
+                            cause runtime errors or a blank page:
+                            {}
+                            Unless these versions are intentional, remove the entries from \
+                            package.json and clean the frontend ('mvn vaadin:clean-frontend' \
+                            with Maven, 'gradle vaadinClean' with Gradle) to reset it to a clean \
+                            state.""",
+                    String.join("\n", mismatches));
+        }
+    }
+
+    private void collectRangeMismatches(Map<String, String> projectSection,
+            Map<String, String> vaadinSection, ObjectNode expectedVersions,
+            String location, List<String> mismatches) {
+        for (Map.Entry<String, String> entry : projectSection.entrySet()) {
+            final String pkg = entry.getKey();
+            final FrontendVersion expected = parseVersion(
+                    expectedVersions.has(pkg)
+                            ? expectedVersions.get(pkg).asString()
+                            : null);
+            if (expected == null) {
+                continue;
+            }
+            // Skip values managed by Vaadin: the build updates those itself, so
+            // any range difference is transient and not a user mistake.
+            if (entry.getValue().equals(vaadinSection.get(pkg))) {
+                continue;
+            }
+            if (resolvesOutsideRange(entry.getValue(), expected)) {
+                mismatches.add(String.format("  - %s: %s (in %s), expected %s",
+                        pkg, entry.getValue(), location,
+                        expected.getFullVersion()));
+            }
+        }
+    }
+
+    private FrontendVersion parseVersion(String version) {
+        if (version == null) {
+            return null;
+        }
+        try {
+            return new FrontendVersion(version);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Tells whether a version declared in package.json resolves to a different
+     * minor or major version than the expected one. An exact version and a
+     * tilde range stay within their minor, while a caret range accepts any
+     * later minor of its major (from 1.0.0 on), so for it only the major is
+     * compared. Versions without a minor or patch, compound and other ranges,
+     * tags, URLs and file links are not reported, as what they resolve to is
+     * not known here.
+     */
+    private boolean resolvesOutsideRange(String declared,
+            FrontendVersion expected) {
+        if (!RANGE_CHECKED_VERSION.matcher(declared).matches()) {
+            return false;
+        }
+        final boolean caret = declared.startsWith("^");
+        final FrontendVersion actual = parseVersion(declared);
+        if (actual == null) {
+            return false;
+        }
+        if (expected.getMajorVersion() != actual.getMajorVersion()) {
+            return true;
+        }
+        final boolean anyMinor = caret && actual.getMajorVersion() > 0;
+        return !anyMinor
+                && expected.getMinorVersion() != actual.getMinorVersion();
+    }
+
+    private Map<String, String> sectionToMap(JsonNode section) {
+        if (section == null) {
+            return Map.of();
+        }
+        // Keeps the package.json order, so that the warning lists the
+        // packages the same way from one build to the next
+        final Map<String, String> map = new LinkedHashMap<>();
+        for (String key : JacksonUtils.getKeys(section)) {
+            map.put(key, section.get(key).asString());
+        }
+        return map;
+    }
+
+    /**
+     * Gets the version a package is pinned to, which is either a numeric
+     * version or a URL, or {@code null} if it has no such version.
+     */
+    private static String getPinnedVersion(JsonNode pinnedNpmVersions,
+            String pkg) {
+        if (pinnedNpmVersions.has(pkg) && FrontendBuildUtils
+                .isUrlVersion(pinnedNpmVersions.get(pkg).asString(null))) {
+            return pinnedNpmVersions.get(pkg).asString();
+        }
+        final FrontendVersion pinnedVersion = FrontendUtils
+                .getPackageVersionFromJson(pinnedNpmVersions, pkg,
+                        "vaadin_dependencies.json");
+        return pinnedVersion == null ? null : pinnedVersion.getFullVersion();
+    }
+
+    /**
+     * Compares two versions as versions when both are numeric, and as is
+     * otherwise, e.g. when one is a URL or a file link.
+     */
+    private static boolean isSameDependency(String version,
+            String otherVersion) {
+        if (version == null || otherVersion == null) {
+            return false;
+        }
+        if (isNumericVersion(version) && isNumericVersion(otherVersion)) {
+            return new FrontendVersion(version)
+                    .isSameDependency(new FrontendVersion(otherVersion));
+        }
+        return version.equals(otherVersion);
+    }
+
+    /**
+     * Cleans up any previous version properties from the packageJson object if
+     * present.
+     *
+     * @param packageJson
+     *            JsonNode of current package.json contents
+     * @return amount of removed properties
+     * @throws IOException
+     *             thrown if removal of package-lock.json fails
+     */
+    private int removeLegacyProperties(ObjectNode packageJson)
+            throws IOException {
+        int result = 0;
+        /*
+         * In modern Flow versions "@vaadin/flow-deps" should not exist.
+         */
+        if (packageJson.has(DEPENDENCIES)) {
+            ObjectNode object = (ObjectNode) packageJson.get(DEPENDENCIES);
+            if (object.has(DEP_NAME_FLOW_DEPS)) {
+                object.remove(DEP_NAME_FLOW_DEPS);
+                log().debug("Removed \"{}\" as it's not generated anymore.",
+                        DEP_NAME_FLOW_DEPS);
+                result++;
+            }
+            if (object.has(DEP_NAME_FLOW_JARS)) {
+                object.remove(DEP_NAME_FLOW_JARS);
+                log().debug("Removed \"{}\" as it's not needed anymore.",
+                        DEP_NAME_FLOW_JARS);
+                result++;
+            }
+        }
+        if (packageJson.has(VAADIN_APP_PACKAGE_HASH)) {
+            packageJson.remove(VAADIN_APP_PACKAGE_HASH);
+            log().debug("Removed \"{}\" as it's not used.",
+                    VAADIN_APP_PACKAGE_HASH);
+            result++;
+        }
+        if (!enablePnpm) {
+            return result;
+        }
+        /*
+         * In case of PNPM tool the package-lock should not be used at all.
+         */
+        File packageLockFile = getPackageLockFile();
+        if (packageLockFile.exists()) {
+            FileIOUtils.delete(getPackageLockFile());
+        }
+        return result;
+    }
+
+    private void cleanUp() throws IOException {
+        try {
+            FrontendUtils.deleteNodeModules(options.getNodeModulesFolder());
+        } catch (IOException exception) {
+            File nodeModules = options.getNodeModulesFolder();
+            log().debug("Exception removing node_modules", exception);
+            StringBuilder messageWithReason = new StringBuilder(
+                    "Removal of '{}'");
+            if (!forceCleanUp) {
+                messageWithReason.append(", due to platform version update,");
+            }
+            messageWithReason.append(
+                    " failed. Remove it manually if there are problems with the build.");
+            log().error(messageWithReason.toString(),
+                    nodeModules.getAbsolutePath());
+        }
+
+        if (jarResourcesFolder != null && jarResourcesFolder.exists()) {
+            // This feels like cleanup done in the wrong place but is left here
+            // for historical reasons
+            for (File file : jarResourcesFolder.listFiles()) {
+                FileIOUtils.deleteQuietly(file);
+            }
+        }
+    }
+
+    /**
+     * Generate hash for package dependencies. This will consider both
+     * 'dependencies' and 'devDependencies' of the packageJson format JsonNode.
+     * <p>
+     * Dependencies will be sorted by key so that different runs for same
+     * dependencies in different order will not trigger npm install.
+     *
+     * @param packageJson
+     *            JsonNode built in the same format as package.json
+     * @param pnpmOverrides
+     *            the pnpm overrides stored in pnpm-workspace.yaml, or an empty
+     *            map when pnpm is not in use
+     * @return has for dependencies and devDependencies
+     */
+    static String generatePackageJsonHash(JsonNode packageJson,
+            Map<String, String> pnpmOverrides) {
+        StringBuilder hashContent = new StringBuilder();
+        if (packageJson.has(DEPENDENCIES)) {
+            JsonNode dependencies = packageJson.get(DEPENDENCIES);
+            hashContent.append("\"dependencies\": {");
+            String sortedDependencies = JacksonUtils.getKeys(dependencies)
+                    .stream().sorted(String::compareToIgnoreCase)
+                    .map(key -> String.format("\"%s\": \"%s\"", key,
+                            dependencies.get(key).asString()))
+                    .collect(Collectors.joining(",\n  "));
+            hashContent.append(sortedDependencies);
+            hashContent.append("}");
+        }
+        if (packageJson.has(DEV_DEPENDENCIES)) {
+            if (!hashContent.isEmpty()) {
+                hashContent.append(",\n");
+            }
+            JsonNode devDependencies = packageJson.get(DEV_DEPENDENCIES);
+            hashContent.append("\"devDependencies\": {");
+            String sortedDevDependencies = JacksonUtils.getKeys(devDependencies)
+                    .stream().sorted(String::compareToIgnoreCase)
+                    .map(key -> String.format("\"%s\": \"%s\"", key,
+                            devDependencies.get(key).asString()))
+                    .collect(Collectors.joining(",\n  "));
+            hashContent.append(sortedDevDependencies);
+            hashContent.append("}");
+        }
+        // Include npm overrides in hash
+        if (packageJson.has(OVERRIDES)) {
+            JsonNode overrides = packageJson.get(OVERRIDES);
+            // Only include overrides in hash if section has actual content
+            if (overrides.isObject() && !overrides.isEmpty()
+                    && !hashContent.isEmpty()) {
+                hashContent.append(",\n");
+                hashContent.append("\"overrides\": ");
+                final ObjectNode sortedOverrides = JacksonUtils
+                        .createObjectNode();
+                JacksonUtils.getKeys(overrides).stream()
+                        .sorted(String::compareToIgnoreCase)
+                        .forEachOrdered(key -> {
+                            sortedOverrides.set(key, overrides.get(key));
+                        });
+                hashContent.append(JacksonUtils.toFileJson(sortedOverrides));
+            }
+        }
+        // Include pnpm overrides in hash (stored in pnpm-workspace.yaml)
+        if (!pnpmOverrides.isEmpty() && !hashContent.isEmpty()) {
+            hashContent.append(",\n");
+            hashContent.append("\"pnpm.overrides\": ");
+            final ObjectNode sortedOverrides = JacksonUtils.createObjectNode();
+            pnpmOverrides.keySet().stream().sorted(String::compareToIgnoreCase)
+                    .forEachOrdered(key -> sortedOverrides.put(key,
+                            pnpmOverrides.get(key)));
+            hashContent.append(JacksonUtils.toFileJson(sortedOverrides));
+        }
+        return StringUtil.getHash(hashContent.toString());
+    }
+
+}

@@ -1,0 +1,141 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.component;
+
+import java.util.Arrays;
+import java.util.stream.Stream;
+
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.dom.Element;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
+
+// The class under test is deprecated for removal in 26; delete this test
+// together with it
+@SuppressWarnings("removal")
+class HasOrderedComponentsTest {
+
+    static class TestOrderedComponents implements HasOrderedComponents {
+
+        @Override
+        public Element getElement() {
+            return null;
+        }
+
+        @Override
+        public Stream<Component> getChildren() {
+            return null;
+        }
+
+    }
+
+    @Tag("div")
+    static class TestComponentContianer extends Component
+            implements HasOrderedComponents {
+
+    }
+
+    @Tag(Tag.A)
+    static class Anchor extends Component {
+
+    }
+
+    private HasOrderedComponents components = spy(TestOrderedComponents.class);
+
+    private TestComponentContianer contianer = new TestComponentContianer();
+
+    @Test
+    void indexOf_componentIsChild_returnsIndexOfChild() {
+        Component comp = mock(Component.class);
+        when(components.getChildren()).thenReturn(Arrays
+                .asList(mock(Component.class), comp, mock(Component.class))
+                .stream());
+
+        assertEquals(1, components.indexOf(comp));
+
+        contianer = new TestComponentContianer();
+        comp = new Anchor();
+        contianer.add(new Text(""), comp);
+        assertEquals(1, contianer.indexOf(comp));
+    }
+
+    @Test
+    void indexOf_componentIsNotChild_returnsNegative() {
+        Component comp = mock(Component.class);
+        when(components.getChildren()).thenReturn(Arrays
+                .asList(mock(Component.class), mock(Component.class)).stream());
+
+        assertEquals(-1, components.indexOf(comp));
+    }
+
+    @Test
+    void indexOf_componentIsNull_throws() {
+        when(components.getChildren()).thenReturn(Stream.empty());
+
+        assertThrows(IllegalArgumentException.class,
+                () -> components.indexOf(null));
+    }
+
+    @Test
+    void getComponentCount_returnsChildrenSize() {
+        when(components.getChildren()).thenReturn(Arrays
+                .asList(mock(Component.class), mock(Component.class)).stream());
+        assertEquals(2, components.getComponentCount());
+
+        contianer = new TestComponentContianer();
+        contianer.add(new Text(""), new Anchor());
+        assertEquals(2, contianer.getComponentCount());
+    }
+
+    @Test
+    void getComponentAt_returnsComponentAtIndex() {
+        Component comp = mock(Component.class);
+        when(components.getChildren()).thenReturn(Arrays
+                .asList(mock(Component.class), comp, mock(Component.class))
+                .stream());
+
+        assertSame(comp, components.getComponentAt(1));
+
+        contianer = new TestComponentContianer();
+        comp = new Anchor();
+        contianer.add(new Text(""), comp);
+        assertSame(comp, contianer.getComponentAt(1));
+    }
+
+    @Test
+    void getComponentAt_negativeIndex_throws() {
+        when(components.getChildren()).thenReturn(Arrays
+                .asList(mock(Component.class), mock(Component.class)).stream());
+
+        assertThrows(IllegalArgumentException.class,
+                () -> components.getComponentAt(-1));
+    }
+
+    @Test
+    void getComponentAt_indexIsGreaterThanSize_throws() {
+        when(components.getChildren())
+                .thenReturn(Stream.of(mock(Component.class)));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> components.getComponentAt(2));
+    }
+}

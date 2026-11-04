@@ -1,0 +1,138 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Properties;
+
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.server.startup.ApplicationConfiguration;
+import com.vaadin.tests.util.AlwaysLockedVaadinSession;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class CustomUIClassLoaderTest {
+
+    /**
+     * Stub root
+     */
+    public static class MyUI extends UI {
+        @Override
+        protected void init(VaadinRequest request) {
+            // Nothing to see here
+        }
+    }
+
+    /**
+     * Dummy ClassLoader that just saves the name of the requested class before
+     * delegating to the default implementation.
+     */
+    public class LoggingClassLoader extends ClassLoader {
+
+        private List<String> requestedClasses = new ArrayList<>();
+
+        @Override
+        protected synchronized Class<?> loadClass(String name, boolean resolve)
+                throws ClassNotFoundException {
+            requestedClasses.add(name);
+            return super.loadClass(name, resolve);
+        }
+    }
+
+    /**
+     * Tests that a UI class can be loaded even if no classloader has been
+     * provided.
+     *
+     * @throws Exception
+     *             if thrown
+     */
+    @Test
+    void testWithDefaultClassLoader() throws Exception {
+        VaadinSession application = createStubApplication();
+
+        Class<? extends UI> uiClass = BootstrapHandler
+                .getUIClass(createRequestMock(getClass().getClassLoader()));
+
+        assertEquals(MyUI.class, uiClass);
+    }
+
+    private static DeploymentConfiguration createConfigurationMock() {
+        Properties properties = new Properties();
+        properties.put(InitParameters.UI_PARAMETER, MyUI.class.getName());
+        VaadinContext context = new MockVaadinContext();
+        ApplicationConfiguration config = mock(ApplicationConfiguration.class);
+        when(config.getPropertyNames())
+                .thenReturn(Collections.emptyEnumeration());
+        when(config.getBuildFolder()).thenReturn(".");
+        when(config.getContext()).thenReturn(context);
+        return new DefaultDeploymentConfiguration(config,
+                CustomUIClassLoaderTest.class, properties);
+    }
+
+    private static VaadinRequest createRequestMock(ClassLoader classloader) {
+        // Mock a VaadinService to give the passed classloader
+        VaadinService configurationMock = mock(VaadinService.class);
+        DeploymentConfiguration deploymentConfiguration = createConfigurationMock();
+        when(configurationMock.getDeploymentConfiguration())
+                .thenReturn(deploymentConfiguration);
+        when(configurationMock.getClassLoader()).thenReturn(classloader);
+
+        // Mock a VaadinRequest to give the mocked vaadin service
+        VaadinRequest requestMock = mock(VaadinRequest.class);
+        when(requestMock.getService()).thenReturn(configurationMock);
+        when(requestMock.getService()).thenReturn(configurationMock);
+        when(requestMock.getService()).thenReturn(configurationMock);
+
+        return requestMock;
+    }
+
+    /**
+     * Tests that the ClassLoader passed in the ApplicationStartEvent is used to
+     * load UI classes.
+     *
+     * @throws Exception
+     *             if thrown
+     */
+    @Test
+    void testWithClassLoader() throws Exception {
+        LoggingClassLoader loggingClassLoader = new LoggingClassLoader();
+
+        Class<? extends UI> uiClass = BootstrapHandler
+                .getUIClass(createRequestMock(loggingClassLoader));
+
+        assertEquals(MyUI.class, uiClass);
+        assertEquals(1, loggingClassLoader.requestedClasses.size());
+        assertEquals(MyUI.class.getName(),
+                loggingClassLoader.requestedClasses.get(0));
+
+    }
+
+    private VaadinSession createStubApplication() {
+        return new AlwaysLockedVaadinSession(new MockVaadinServletService()) {
+            @Override
+            public DeploymentConfiguration getConfiguration() {
+                return createConfigurationMock();
+            }
+        };
+    }
+}

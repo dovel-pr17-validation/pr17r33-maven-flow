@@ -1,0 +1,168 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server;
+
+import java.io.Serializable;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.vaadin.flow.component.dependency.JavaScript;
+import com.vaadin.flow.internal.UrlUtil;
+import com.vaadin.flow.shared.ApplicationConstants;
+
+/**
+ * Resolves the {@code value()} of frontend dependency annotations to a
+ * canonical form that
+ * {@link com.vaadin.flow.server.BootstrapHandler.BootstrapUriResolver} can
+ * expand at render time.
+ * <p>
+ * The same rules are used whether the annotation is on an
+ * {@link com.vaadin.flow.component.page.AppShellConfigurator} or on an ordinary
+ * {@link com.vaadin.flow.component.Component}.
+ * <p>
+ * Used for {@link com.vaadin.flow.component.dependency.StyleSheet} values, and
+ * for the {@link com.vaadin.flow.component.dependency.JavaScript} values that
+ * are loaded at runtime instead of being bundled. Callers should note that a
+ * rejected value (see the rules below) yields {@code null} rather than an
+ * exception, and that the dependency is then skipped.
+ * <p>
+ * For internal framework use only.
+ * 
+ * @since 25.1.19
+ */
+public final class FrontendDependencyUrlResolver implements Serializable {
+
+    private static final Logger LOGGER = LoggerFactory
+            .getLogger(FrontendDependencyUrlResolver.class);
+
+    private FrontendDependencyUrlResolver() {
+    }
+
+    /**
+     * Normalizes a frontend-dependency URL value to a form that the bootstrap
+     * URI resolver can expand.
+     * <p>
+     * Rules, in order:
+     * <ol>
+     * <li>{@code null} or blank values return {@code null}.</li>
+     * <li>Values containing path traversals ({@code ..}) are rejected with a
+     * warning and {@code null} is returned.</li>
+     * <li>{@code http://}, {@code https://}, {@code //}, {@code context://} and
+     * {@code base://} prefixes, and URLs with any other scheme (a value
+     * containing {@code ://}), are returned unchanged.</li>
+     * <li>A leading {@code ./} is stripped.</li>
+     * <li>If the value (after the previous step) starts with {@code /}, it is
+     * returned unchanged.</li>
+     * <li>Otherwise, {@code context://} is prepended so the value resolves
+     * against the servlet context root.</li>
+     * </ol>
+     *
+     * @param rawValue
+     *            the raw annotation value
+     * @return the normalized value, or {@code null} if rejected
+     */
+    public static String resolveToContextRoot(String rawValue) {
+        if (rawValue == null || rawValue.isBlank()) {
+            return null;
+        }
+        String value = rawValue.trim();
+        String pathForCheck = value.startsWith("/") ? value : "/" + value;
+        if (HandlerHelper.isPathUnsafe(pathForCheck)) {
+            LOGGER.warn(
+                    "Frontend dependency value containing traversals ('../') is not allowed, ignored: {}",
+                    value);
+            return null;
+        }
+        if (isRuntimeDependencyUrl(value)) {
+            return value;
+        }
+        if (value.startsWith("./")) {
+            value = value.substring(2);
+        }
+        if (value.startsWith("/")) {
+            return value;
+        }
+        return ApplicationConstants.CONTEXT_PROTOCOL_PREFIX + value;
+    }
+
+    /**
+     * Tells whether the given value is a runtime-loaded URL — i.e. should be
+     * served by the servlet container at runtime rather than passed to the
+     * frontend bundler.
+     * <p>
+     * Returns {@code true} for values starting with any of: {@code http://},
+     * {@code https://}, {@code //}, {@code context://}, {@code base://}, or
+     * {@code /}, and for URLs with any other scheme (a value containing
+     * {@code ://}), which the bundler skips as well (see
+     * {@link UrlUtil#isExternal}). Returns {@code false} for {@code null},
+     * blank, or any other value (e.g. bare relative paths and bundler import
+     * specifiers).
+     *
+     * @param value
+     *            the raw annotation value
+     * @return {@code true} if the value is a runtime URL
+     * @since 25.4
+     */
+    public static boolean isRuntimeDependencyUrl(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        String trimmed = value.trim();
+        // A leading '/' also covers protocol-relative '//' URLs, and every
+        // scheme, including context:// and base://, contains '://'
+        return trimmed.startsWith("/") || UrlUtil.isExternal(trimmed);
+    }
+
+    /**
+     * Tells whether the given {@link JavaScript} annotation is loaded at
+     * runtime as a {@code script} element rather than bundled.
+     * <p>
+     * That is the case for {@link JavaScript.Type#MODULE} values and for
+     * runtime URLs (see {@link #isRuntimeDependencyUrl(String)}).
+     *
+     * @param javaScript
+     *            the annotation to check, not {@code null}
+     * @return {@code true} if the value is loaded at runtime
+     * @since 25.4
+     */
+    public static boolean isRuntimeJavaScript(JavaScript javaScript) {
+        return javaScript.type() == JavaScript.Type.MODULE
+                || isRuntimeDependencyUrl(javaScript.value());
+    }
+
+    /**
+     * Normalizes the value of a {@link JavaScript} annotation that is loaded at
+     * runtime (see {@link #isRuntimeJavaScript(JavaScript)}) so that the
+     * bootstrap URI resolver can expand it.
+     * <p>
+     * Values with a protocol (external URLs but also {@code context://} and
+     * {@code base://}) are returned unchanged. All other values, such as
+     * absolute paths or bare relative {@link JavaScript.Type#MODULE} values, go
+     * through {@link #resolveToContextRoot(String)}.
+     *
+     * @param value
+     *            the raw annotation value
+     * @return the normalized value, or {@code null} if the value was rejected
+     * @since 25.4
+     */
+    public static String resolveRuntimeJavaScript(String value) {
+        if (UrlUtil.isExternal(value)) {
+            return value;
+        }
+        return resolveToContextRoot(value);
+    }
+}

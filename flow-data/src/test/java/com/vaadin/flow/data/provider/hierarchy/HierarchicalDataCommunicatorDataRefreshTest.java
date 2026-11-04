@@ -1,0 +1,434 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.data.provider.hierarchy;
+
+import java.util.Arrays;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.flow.data.provider.CompositeDataGenerator;
+import com.vaadin.flow.data.provider.DataGenerator;
+import com.vaadin.flow.data.provider.DataKeyMapper;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.only;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+
+class HierarchicalDataCommunicatorDataRefreshTest
+        extends AbstractHierarchicalDataCommunicatorTest {
+    private TreeData<Item> treeData = new TreeData<>();
+    private TreeDataProvider<Item> treeDataProvider = new TreeDataProvider<>(
+            treeData);
+
+    private CompositeDataGenerator<Item> compositeDataGenerator = new CompositeDataGenerator<>();
+    private HierarchicalDataCommunicator<Item> dataCommunicator;
+    private DataKeyMapper<Item> keyMapper;
+
+    @BeforeEach
+    void init() {
+        super.init();
+
+        dataCommunicator = new HierarchicalDataCommunicator<>(
+                compositeDataGenerator, arrayUpdater, ui.getElement().getNode(),
+                () -> null);
+        dataCommunicator.setDataProvider(treeDataProvider, null);
+
+        keyMapper = dataCommunicator.getKeyMapper();
+
+        compositeDataGenerator.addDataGenerator((item, json) -> {
+            json.put("name", item.getName());
+            json.put("state", item.getState());
+        });
+    }
+
+    @Test
+    void refreshItemThroughDataProvider_refreshMethodCalled() {
+        var dataCommunicatorSpy = spy(dataCommunicator);
+
+        // Set data provider again to ensure spied DataCommunicator
+        // registers data provider listeners with the spied handlers,
+        // as the original listeners hold a reference to the original
+        // DataCommunicator methods, which aren't spied.
+        dataCommunicatorSpy.setDataProvider(treeDataProvider, null);
+
+        var item = new Item("Item 0");
+        treeDataProvider.refreshItem(item);
+        verify(dataCommunicatorSpy).refresh(item, false);
+
+        treeDataProvider.refreshItem(item, true);
+        verify(dataCommunicatorSpy).refresh(item, true);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void refreshAllThroughDataProvider_resetMethodCalled() {
+        var dataCommunicatorSpy = spy(dataCommunicator);
+
+        // Set data provider again to ensure spied DataCommunicator
+        // registers data provider listeners with the spied handlers,
+        // as the original listeners hold a reference to the original
+        // DataCommunicator methods, which aren't spied.
+        dataCommunicatorSpy.setDataProvider(treeDataProvider, null);
+
+        // setDataProvider() calls reset() internally which is not what
+        // we want to test here
+        clearInvocations(dataCommunicatorSpy);
+
+        treeDataProvider.refreshAll();
+        verify(dataCommunicatorSpy).reset();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void refreshNullItem_refreshChildrenCallsReset_withoutRefreshChildrenThrows() {
+        // The virtual root (null) with refreshChildren maps to reset()
+        // (#19377). Without refreshChildren it is not supported, as the root
+        // itself is not a rendered item.
+        var dataCommunicatorSpy = spy(dataCommunicator);
+        dataCommunicatorSpy.setDataProvider(treeDataProvider, null);
+        clearInvocations(dataCommunicatorSpy);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> dataCommunicatorSpy.refresh(null, false));
+        verify(dataCommunicatorSpy, never()).reset();
+
+        clearInvocations(dataCommunicatorSpy);
+        dataCommunicatorSpy.refresh(null, true);
+        verify(dataCommunicatorSpy).reset();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void refreshItemNullThroughDataProvider_refreshChildrenCallsReset_withoutRefreshChildrenThrows() {
+        var dataCommunicatorSpy = spy(dataCommunicator);
+        dataCommunicatorSpy.setDataProvider(treeDataProvider, null);
+        clearInvocations(dataCommunicatorSpy);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> treeDataProvider.refreshItem(null));
+        verify(dataCommunicatorSpy, never()).reset();
+
+        treeDataProvider.refreshItem(null, true);
+        verify(dataCommunicatorSpy).reset();
+    }
+
+    @Test
+    void refreshRootItems_updatedRangeSent() {
+        populateTreeData(treeData, 4);
+        dataCommunicator.expand(treeData.getRootItems());
+        dataCommunicator.setViewportRange(0, 4);
+        fakeClientCommunication();
+        assertArrayUpdateItems("name", Map.of( //
+                0, "Item 0", //
+                1, "Item 1", //
+                2, "Item 2", //
+                3, "Item 3"));
+        assertArrayUpdateItems("state", Map.of( //
+                0, "initial", //
+                1, "initial", //
+                2, "initial", //
+                3, "initial"));
+
+        clearInvocations(arrayUpdater, arrayUpdate);
+
+        Item item0 = new Item("Item 0", "refreshed");
+        dataCommunicator.refresh(item0);
+
+        Item item2 = new Item("Item 2", "refreshed");
+        dataCommunicator.refresh(item2);
+
+        fakeClientCommunication();
+        assertArrayUpdateItems("name", Map.of( //
+                0, "Item 0", //
+                2, "Item 2" //
+        ));
+        assertArrayUpdateItems("state", Map.of( //
+                0, "refreshed", //
+                2, "refreshed"));
+    }
+
+    @Test
+    void refreshNestedItems_updatedRangeSent() {
+        populateTreeData(treeData, 2, 1, 1);
+        dataCommunicator.expand(
+                Arrays.asList(new Item("Item 0"), new Item("Item 0-0")));
+        dataCommunicator.setViewportRange(0, 4);
+        fakeClientCommunication();
+        assertArrayUpdateItems("name", Map.of( //
+                0, "Item 0", //
+                1, "Item 0-0", //
+                2, "Item 0-0-0", //
+                3, "Item 1"));
+        assertArrayUpdateItems("state", Map.of( //
+                0, "initial", //
+                1, "initial", //
+                2, "initial", //
+                3, "initial"));
+
+        clearInvocations(arrayUpdater, arrayUpdate);
+
+        Item item0_0 = new Item("Item 0-0", "refreshed");
+        dataCommunicator.refresh(item0_0);
+
+        Item item0_0_0 = new Item("Item 0-0-0", "refreshed");
+        dataCommunicator.refresh(item0_0_0);
+
+        fakeClientCommunication();
+        assertArrayUpdateItems("name", Map.of( //
+                1, "Item 0-0", //
+                2, "Item 0-0-0"));
+        assertArrayUpdateItems("state", Map.of( //
+                1, "refreshed", //
+                2, "refreshed"));
+    }
+
+    @Test
+    void refreshItemsOutOfViewport_updatedRangeSentOnlyAfterItemEntersViewport() {
+        populateTreeData(treeData, 50, 1);
+        dataCommunicator.expand(new Item("Item 49"));
+        dataCommunicator.setViewportRange(0, 3);
+        fakeClientCommunication();
+        clearInvocations(arrayUpdater, arrayUpdate);
+
+        var item = treeData.getRootItems().get(49);
+        item.setState("refreshed");
+        dataCommunicator.refresh(item);
+
+        fakeClientCommunication();
+        verifyNoInteractions(arrayUpdater, arrayUpdate);
+
+        dataCommunicator.setViewportRange(48, 3);
+        fakeClientCommunication();
+        assertArrayUpdateItems("name", Map.of( //
+                48, "Item 48", //
+                49, "Item 49", //
+                50, "Item 49-0"));
+        assertArrayUpdateItems("state", Map.of( //
+                48, "initial", //
+                49, "refreshed", //
+                50, "initial"));
+    }
+
+    @Test
+    void refreshItems_dataGeneratorRefreshItemCalled() {
+        populateTreeData(treeData, 2, 1, 1);
+
+        var dataGenerator = spy(new DataGenerator<Item>() {
+            @Override
+            public void generateData(Item item, ObjectNode json) {
+                // NO-OP
+            }
+        });
+        compositeDataGenerator.addDataGenerator(dataGenerator);
+
+        Item item = new Item("Item 0", "refreshed");
+        dataCommunicator.refresh(item);
+        verify(dataGenerator, only()).refreshData(item);
+    }
+
+    @Test
+    void refreshItems_itemRefreshedInKeyMapper() {
+        populateTreeData(treeData, 2, 1, 1);
+        dataCommunicator.expand(
+                Arrays.asList(new Item("Item 0"), new Item("Item 0-0")));
+        dataCommunicator.setViewportRange(0, 4);
+        fakeClientCommunication();
+
+        var keys = captureArrayUpdateItems().values().stream()
+                .map((item) -> item.get("key").asString()).toList();
+        assertEquals("initial", keyMapper.get(keys.get(0)).getState());
+        assertEquals("initial", keyMapper.get(keys.get(1)).getState());
+        assertEquals("initial", keyMapper.get(keys.get(2)).getState());
+        assertEquals("initial", keyMapper.get(keys.get(3)).getState());
+
+        Item item0_0 = new Item("Item 0-0", "refreshed");
+        dataCommunicator.refresh(item0_0);
+
+        Item item0_0_0 = new Item("Item 0-0-0", "refreshed");
+        dataCommunicator.refresh(item0_0_0);
+
+        assertEquals("initial", keyMapper.get(keys.get(0)).getState());
+        assertEquals("refreshed", keyMapper.get(keys.get(1)).getState());
+        assertEquals("refreshed", keyMapper.get(keys.get(2)).getState());
+        assertEquals("initial", keyMapper.get(keys.get(3)).getState());
+    }
+
+    @Test
+    void refreshItemsWithChildren_updatedRangeSent() {
+        populateTreeData(treeData, 2, 1, 1);
+        dataCommunicator
+                .expand(Arrays.asList(new Item("Item 0"), new Item("Item 0-0"),
+                        new Item("Item 1"), new Item("Item 1-0")));
+        dataCommunicator.setViewportRange(0, 6);
+        fakeClientCommunication();
+        assertArrayUpdateItems("name", Map.of( //
+                0, "Item 0", //
+                1, "Item 0-0", //
+                2, "Item 0-0-0", //
+                3, "Item 1", //
+                4, "Item 1-0", //
+                5, "Item 1-0-0"));
+
+        clearInvocations(arrayUpdater, arrayUpdate);
+
+        treeData.setParent(new Item("Item 0-0"), new Item("Item 1"));
+        dataCommunicator.refresh(new Item("Item 0"), true);
+        dataCommunicator.refresh(new Item("Item 1"), true);
+
+        fakeClientCommunication();
+        assertArrayUpdateItems("name", Map.of( //
+                0, "Item 0", //
+                1, "Item 1", //
+                2, "Item 1-0", //
+                3, "Item 1-0-0", //
+                4, "Item 0-0", //
+                5, "Item 0-0-0"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void refreshItemsWithChildren_dataGeneratorDestroyItemCalledForChildren() {
+        populateTreeData(treeData, 1, 1, 1);
+        dataCommunicator.expand(
+                Arrays.asList(new Item("Item 0"), new Item("Item 0-0")));
+        dataCommunicator.setViewportRange(0, 3);
+        fakeClientCommunication();
+
+        var dataGenerator = spy(DataGenerator.class);
+        compositeDataGenerator.addDataGenerator(dataGenerator);
+
+        dataCommunicator.refresh(new Item("Item 0"), true);
+
+        verify(dataGenerator, never()).destroyData(new Item("Item 0"));
+        verify(dataGenerator) //
+                .destroyData(new Item("Item 0-0"));
+        verify(dataGenerator) //
+                .destroyData(new Item("Item 0-0-0"));
+    }
+
+    @Test
+    void refreshItemsWithChildren_childrenRemovedFromKeyMapper() {
+        populateTreeData(treeData, 1, 1, 1);
+        dataCommunicator.expand(
+                Arrays.asList(new Item("Item 0"), new Item("Item 0-0")));
+        dataCommunicator.setViewportRange(0, 3);
+        fakeClientCommunication();
+
+        dataCommunicator.refresh(new Item("Item 0"), true);
+
+        assertTrue(keyMapper.has(new Item("Item 0")));
+        assertFalse(keyMapper.has(new Item("Item 0-0")));
+        assertFalse(keyMapper.has(new Item("Item 0-0-0")));
+    }
+
+    @Test
+    void refreshAllItems_updatedRangeSent() {
+        populateTreeData(treeData, 6, 1, 1);
+        dataCommunicator.expand(
+                Arrays.asList(new Item("Item 1"), new Item("Item 1-0")));
+        dataCommunicator.setViewportRange(0, 6);
+        fakeClientCommunication();
+        assertArrayUpdateItems("name", Map.of( //
+                0, "Item 0", //
+                1, "Item 1", //
+                2, "Item 1-0", //
+                3, "Item 1-0-0", //
+                4, "Item 2", //
+                5, "Item 3"));
+
+        clearInvocations(arrayUpdater, arrayUpdate);
+
+        treeData.removeItem(new Item("Item 0"));
+        treeData.removeItem(new Item("Item 1-0"));
+        dataCommunicator.reset();
+        fakeClientCommunication();
+        assertArrayUpdateItems("name", Map.of( //
+                0, "Item 1", //
+                1, "Item 2", //
+                2, "Item 3", //
+                3, "Item 4", //
+                4, "Item 5"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void refreshAllItems_dataGeneratorDestroyAllDataCalled() {
+        populateTreeData(treeData, 6, 1, 1);
+        dataCommunicator.expand(
+                Arrays.asList(new Item("Item 1"), new Item("Item 1-0")));
+        dataCommunicator.setViewportRange(0, 6);
+        fakeClientCommunication();
+
+        var dataGenerator = spy(DataGenerator.class);
+        compositeDataGenerator.addDataGenerator(dataGenerator);
+
+        dataCommunicator.reset();
+        verify(dataGenerator).destroyAllData();
+        verify(dataGenerator, never()).destroyData(any());
+    }
+
+    @Test
+    void refreshAllItems_allItemsRemovedFromKeyMapper() {
+        populateTreeData(treeData, 1, 1, 1);
+        dataCommunicator.expand(
+                Arrays.asList(new Item("Item 0"), new Item("Item 0-0")));
+        dataCommunicator.setViewportRange(0, 3);
+        fakeClientCommunication();
+
+        dataCommunicator.reset();
+        assertFalse(keyMapper.has(new Item("Item 0")));
+        assertFalse(keyMapper.has(new Item("Item 0-0")));
+        assertFalse(keyMapper.has(new Item("Item 0-0-0")));
+    }
+
+    @Test
+    void refreshViewport_updatedRangeSent() {
+        populateTreeData(treeData, 6, 1, 1);
+        dataCommunicator.expand(
+                Arrays.asList(new Item("Item 1"), new Item("Item 1-0")));
+        dataCommunicator.setViewportRange(0, 6);
+
+        var count = new AtomicInteger(0);
+        compositeDataGenerator.addDataGenerator(new DataGenerator<Item>() {
+            @Override
+            public void generateData(Item item, ObjectNode json) {
+                json.put("count", String.valueOf(count.get()));
+            }
+        });
+
+        fakeClientCommunication();
+        assertArrayUpdateItems("count", "0", "0", "0", "0", "0", "0");
+
+        clearInvocations(arrayUpdater, arrayUpdate);
+
+        count.incrementAndGet();
+        dataCommunicator.refreshViewport();
+        fakeClientCommunication();
+        assertArrayUpdateItems("count", "1", "1", "1", "1", "1", "1");
+    }
+}

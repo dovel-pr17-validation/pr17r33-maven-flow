@@ -1,0 +1,246 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.frontend;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+
+import org.apache.commons.io.IOUtils;
+import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.flow.internal.FrontendVersion;
+import com.vaadin.flow.internal.JacksonUtils;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class VersionsJsonFilterTest {
+
+    private static final ObjectNode TEST_VERSION_JSON;
+
+    static {
+        TEST_VERSION_JSON = JacksonUtils.readTree("""
+                {
+                    "@vaadin/vaadin-progress-bar": "1.1.2",
+                    "@vaadin/vaadin-upload":  "4.2.2",
+                    "@polymer/iron-list":  "2.0.19",
+                    "enforced": "1.5.0",
+                    "platform": "foo"
+                  }
+
+                """);
+    }
+
+    @Test
+    void filterPinnedNpmVersions_dependencies() throws IOException {
+        assertFilterPinnedNpmVersions(NodeUpdater.DEPENDENCIES);
+    }
+
+    @Test
+    void filterPinnedNpmVersions_devDependencies() throws IOException {
+        assertFilterPinnedNpmVersions(NodeUpdater.DEV_DEPENDENCIES);
+    }
+
+    @Test
+    void filterPinnedNpmDependenciesVersions_multipleUserChanged_correctlyIgnored()
+            throws IOException {
+        assertFilterPinnedNpmVersions_multipleUserChanged_correctlyIgnored(
+                NodeUpdater.DEPENDENCIES);
+    }
+
+    @Test
+    void filterPinnedNpmDevDependenciesVersions_multipleUserChanged_correctlyIgnored()
+            throws IOException {
+        assertFilterPinnedNpmVersions_multipleUserChanged_correctlyIgnored(
+                NodeUpdater.DEV_DEPENDENCIES);
+    }
+
+    @Test
+    void missingVaadinDependencies_allDependenciesShouldBeUserHandled()
+            throws IOException {
+        assertMissingVaadinDependencies_allDependenciesSholdBeUserHandled(
+                NodeUpdater.DEPENDENCIES);
+    }
+
+    @Test
+    void missingVaadinDevDependencies_allDependenciesSholdBeUserHandled()
+            throws IOException {
+        assertMissingVaadinDependencies_allDependenciesSholdBeUserHandled(
+                NodeUpdater.DEV_DEPENDENCIES);
+    }
+
+    @Test
+    void testGetFilteredVersions_whenErrorHappens_versionOriginParameterIsUsedInErrorLogs()
+            throws IOException {
+        String pkgJson = IOUtils.toString(
+                Objects.requireNonNull(
+                        getClass().getClassLoader().getResourceAsStream(
+                                "versions/no_vaadin_package.json")),
+                StandardCharsets.UTF_8);
+        ObjectNode packageJson = JacksonUtils.readTree(pkgJson);
+        VersionsJsonFilter filter = new VersionsJsonFilter(packageJson,
+                NodeUpdater.DEPENDENCIES);
+        String versionOrigin = "dummy-origin.json";
+
+        Logger logger = spy(Logger.class);
+        try (MockedStatic<LoggerFactory> loggerFactoryMocked = mockStatic(
+                LoggerFactory.class)) {
+            loggerFactoryMocked
+                    .when(() -> LoggerFactory.getLogger(FrontendVersion.class))
+                    .thenReturn(logger);
+
+            ObjectNode sourceJsonMocked = getMockedJsonNode();
+
+            JsonNode versionMocked = mock(JsonNode.class);
+            when(versionMocked.asString()).thenThrow(new ClassCastException());
+            when(sourceJsonMocked.get(anyString())).thenReturn(versionMocked);
+            filter.getFilteredVersions(sourceJsonMocked, versionOrigin);
+            verify(logger, times(1)).warn(
+                    "Ignoring error while parsing frontend dependency version for package '{}' in '{}'",
+                    "test", versionOrigin);
+
+            sourceJsonMocked = getMockedJsonNode();
+
+            String nfeMessage = "NFE MSG";
+            versionMocked = mock(JsonNode.class);
+            when(versionMocked.asString())
+                    .thenThrow(new NumberFormatException(nfeMessage));
+            when(sourceJsonMocked.get(anyString())).thenReturn(versionMocked);
+            filter.getFilteredVersions(sourceJsonMocked, versionOrigin);
+            verify(logger, times(1)).warn(
+                    "Ignoring error while parsing frontend dependency version in {}: {}",
+                    versionOrigin, nfeMessage);
+        }
+    }
+
+    private ObjectNode getMockedJsonNode() {
+        ObjectNode jsonObject = mock(ObjectNode.class);
+        when(jsonObject.propertyNames())
+                .thenReturn(Arrays.stream(new String[] { "test" }).toList());
+        when(jsonObject.has("test")).thenReturn(true);
+        return jsonObject;
+    }
+
+    private void assertMissingVaadinDependencies_allDependenciesSholdBeUserHandled(
+            String depKey) throws IOException {
+        String pkgJson = IOUtils.toString(
+                Objects.requireNonNull(
+                        getClass().getClassLoader().getResourceAsStream(
+                                "versions/no_vaadin_package.json")),
+                StandardCharsets.UTF_8);
+
+        VersionsJsonFilter filter = new VersionsJsonFilter(
+                JacksonUtils.readTree(pkgJson), depKey);
+        JsonNode filteredJson = filter.getFilteredVersions(TEST_VERSION_JSON,
+                "versions/versions.json");
+        assertTrue(filteredJson.has("@vaadin/vaadin-progress-bar"));
+        assertTrue(filteredJson.has("@vaadin/vaadin-upload"));
+        assertTrue(filteredJson.has("@polymer/iron-list"));
+
+        assertEquals("1.1.2",
+                filteredJson.get("@vaadin/vaadin-progress-bar").asString());
+    }
+
+    private void assertFilterPinnedNpmVersions_multipleUserChanged_correctlyIgnored(
+            String depKey) throws IOException {
+        String versions = IOUtils.toString(
+                Objects.requireNonNull(getClass().getClassLoader()
+                        .getResourceAsStream("versions/user_versions.json")),
+                StandardCharsets.UTF_8);
+        String pkgJson = IOUtils.toString(
+                Objects.requireNonNull(getClass().getClassLoader()
+                        .getResourceAsStream("versions/user_package.json")),
+                StandardCharsets.UTF_8);
+
+        VersionsJsonFilter filter = new VersionsJsonFilter(
+                JacksonUtils.readTree(pkgJson), depKey);
+        JsonNode filteredJson = filter.getFilteredVersions(
+                JacksonUtils.readTree(versions), "versions/user_versions.json");
+        List<String> expectedKeys = Arrays.asList("@vaadin/vaadin-notification",
+                "@vaadin/vaadin-overlay", "@vaadin/vaadin-select",
+                "@vaadin/vaadin-split-layout", "@vaadin/vaadin-tabs");
+
+        for (String key : expectedKeys) {
+            assertTrue(filteredJson.has(key),
+                    String.format("Key '%s' was expected, but not found", key));
+        }
+
+        List<String> droppedKeys = Arrays.asList("flow", "core", "platform");
+        for (String key : droppedKeys) {
+            assertFalse(filteredJson.has(key),
+                    String.format("User managed key '%s' was found.", key));
+        }
+
+        Map<String, String> expectedValues = new HashMap<>();
+        expectedValues.put("@vaadin/vaadin-notification", "1.4.0");
+        expectedValues.put("@vaadin/vaadin-overlay", "3.2.19");
+        expectedValues.put("@vaadin/vaadin-select", "2.1.7");
+        expectedValues.put("@vaadin/vaadin-split-layout", "4.1.1");
+        expectedValues.put("@vaadin/vaadin-tabs", "3.0.5");
+
+        for (Map.Entry<String, String> entry : expectedValues.entrySet()) {
+            assertEquals(entry.getValue(),
+                    filteredJson.get(entry.getKey()).asString(), String.format(
+                            "Got wrong version for '%s'", entry.getKey()));
+        }
+    }
+
+    private void assertFilterPinnedNpmVersions(String depKey)
+            throws IOException {
+        String pkgJson = IOUtils.toString(
+                Objects.requireNonNull(getClass().getClassLoader()
+                        .getResourceAsStream("versions/package.json")),
+                StandardCharsets.UTF_8);
+
+        VersionsJsonFilter filter = new VersionsJsonFilter(
+                JacksonUtils.readTree(pkgJson), depKey);
+        JsonNode filteredJson = filter.getFilteredVersions(TEST_VERSION_JSON,
+                "versions/versions.json");
+        assertTrue(filteredJson.has("@vaadin/vaadin-progress-bar"));
+        assertTrue(filteredJson.has("@vaadin/vaadin-upload"));
+        assertTrue(filteredJson.has("@polymer/iron-list"));
+
+        assertEquals("1.1.2",
+                filteredJson.get("@vaadin/vaadin-progress-bar").asString(),
+                "'progress-bar' should be the same in package and versions");
+        assertEquals("4.2.2",
+                filteredJson.get("@vaadin/vaadin-upload").asString(),
+                "'upload' should be the same in package and versions");
+        assertEquals("1.5.0", filteredJson.get("enforced").asString(),
+                "'enforced' version should come from platform (upgrade)");
+        assertEquals("2.0.19",
+                filteredJson.get("@polymer/iron-list").asString(),
+                "'iron-list' version should come from platform (downgrade)");
+    }
+}

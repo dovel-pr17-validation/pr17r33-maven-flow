@@ -1,0 +1,90 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.internal.nodefeature;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.dom.ChildElementConsumer;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.dom.Node;
+import com.vaadin.flow.internal.StateNode;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+
+class AttachExistingElementFeatureTest {
+
+    @Test
+    void register_dataIsAvailaleByNode() {
+        StateNode node = new StateNode();
+        AttachExistingElementFeature feature = new AttachExistingElementFeature(
+                node);
+
+        Element element = mock(Element.class);
+        StateNode child = mock(StateNode.class);
+        ChildElementConsumer callback = mock(ChildElementConsumer.class);
+        Node<?> parent = mock(Node.class);
+        feature.register(parent, element, child, callback);
+
+        verify(child).setParent(node);
+
+        assertEquals(callback, feature.getCallback(child));
+        assertEquals(parent, feature.getParent(child));
+        assertEquals(element, feature.getPreviousSibling(child));
+    }
+
+    @Test
+    void forEachChild_register_registeredStatNodeIsAChild() {
+        StateNode node = new StateNode();
+        AttachExistingElementFeature feature = new AttachExistingElementFeature(
+                node);
+
+        Element element = mock(Element.class);
+        StateNode child = mock(StateNode.class);
+        ChildElementConsumer callback = mock(ChildElementConsumer.class);
+        Node<?> parent = mock(Node.class);
+        feature.register(parent, element, child, callback);
+
+        List<StateNode> children = new ArrayList<>(1);
+        feature.forEachChild(children::add);
+        assertEquals(1, children.size());
+        assertEquals(child, children.get(0));
+    }
+
+    @Test
+    void unregister_dataIsNotAvailaleByNode() {
+        StateNode node = new StateNode();
+        AttachExistingElementFeature feature = new AttachExistingElementFeature(
+                node);
+
+        Element element = mock(Element.class);
+        StateNode child = mock(StateNode.class);
+        ChildElementConsumer callback = mock(ChildElementConsumer.class);
+        Node<?> parent = mock(Node.class);
+        feature.register(parent, element, child, callback);
+
+        feature.unregister(child);
+
+        assertNull(feature.getCallback(child));
+        assertNull(feature.getParent(child));
+        assertNull(feature.getPreviousSibling(child));
+    }
+}

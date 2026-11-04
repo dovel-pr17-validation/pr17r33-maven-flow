@@ -1,0 +1,181 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.base.devserver;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.regex.Pattern;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.vaadin.flow.internal.CssBundler;
+import com.vaadin.flow.internal.FrontendUtils;
+import com.vaadin.flow.shared.ApplicationConstants;
+
+/**
+ * Utility that resolves and bundles public stylesheet resources referenced by
+ * {@code @StyleSheet} URLs, in development time.
+ * <p>
+ * It locates the CSS entry file under common source roots that map to the
+ * servlet context, and returns a single inlined CSS string with {@code @import}
+ * rules resolved, using {@link CssBundler}.
+ * <p>
+ * The following source roots are searched under the current project folder:
+ * <ul>
+ * <li>src/main/resources/META-INF/resources</li>
+ * <li>src/main/resources/resources</li>
+ * <li>src/main/resources/static</li>
+ * <li>src/main/resources/public</li>
+ * <li>src/main/webapp</li>
+ * </ul>
+ * For internal use only. May be renamed or removed in a future release.
+ * 
+ * @since 25.0
+ */
+public final class PublicStyleSheetBundler {
+
+    /** Collapsed so a joined path never reads as a protocol-relative URL. */
+    private static final Pattern DUPLICATE_SLASHES = Pattern.compile("/{2,}");
+
+    private final List<File> sourceRoots;
+
+    private PublicStyleSheetBundler(List<File> sourceRoots) {
+        this.sourceRoots = sourceRoots;
+    }
+
+    /**
+     * Creates a new bundler instance configured with an explicit list of source
+     * roots. Only existing directories are included.
+     *
+     * @param roots
+     *            list of root directories to search in
+     * @return a configured {@link PublicStyleSheetBundler}
+     */
+    public static PublicStyleSheetBundler forResourceLocations(
+            List<File> roots) {
+        Objects.requireNonNull(roots, "roots cannot be null");
+        return new PublicStyleSheetBundler(roots);
+    }
+
+    /**
+     * Bundles the CSS content for the given stylesheet URL by resolving it
+     * against known public source roots and inlining any {@code @import}
+     * statements.
+     *
+     * @param url
+     *            the stylesheet URL as used in {@code @StyleSheet}; may start
+     *            with {@code context://} or a leading '/'
+     * @param contextPath
+     *            the servlet context path
+     * @return the bundled CSS content if the entry file was found and bundled;
+     *         otherwise, {@link Optional#empty()}
+     */
+    public Optional<String> bundle(String url, String contextPath) {
+        if (url == null || url.isBlank()) {
+            return Optional.empty();
+        }
+        String normalized = normalizeUrl(url);
+        for (File root : sourceRoots) {
+            String relativePath = normalized;
+            if (relativePath.startsWith("frontend/")
+                    && isCopiedJarResourcesRoot(root)) {
+                // Addon resources under META-INF/resources/frontend/ are
+                // copied to jar-resources with the frontend/ prefix stripped
+                // by TaskCopyFrontendFiles, so look up without it
+                relativePath = relativePath.substring("frontend/".length());
+            }
+            File entry = new File(root, relativePath);
+            if (entry.exists() && entry.isFile()) {
+                try {
+                    String bundled = CssBundler.inlineImportsForPublicResources(
+                            root, entry, contextPath);
+                    return Optional.ofNullable(bundled);
+                } catch (IOException e) {
+                    getLogger().debug(
+                            "Failed to inline CSS imports for {} in root {}",
+                            entry, root, e);
+                    return Optional.empty();
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Whether the given root is the {@code jar-resources} folder the build
+     * fills with copies of classpath resources, rather than a source root.
+     *
+     * @param root
+     *            the root to check
+     * @return {@code true} if the root is the copied jar-resources folder
+     */
+    static boolean isCopiedJarResourcesRoot(File root) {
+        String path = FrontendUtils.getUnixPath(root.toPath());
+        return path.endsWith("generated/jar-resources");
+    }
+
+    /**
+     * Normalize an incoming stylesheet URL from {@code @StyleSheet} into a
+     * relative path under the servlet context.
+     *
+     * @param url
+     *            the URL to normalize
+     * @return the path relative to the servlet context
+     */
+    public static String normalizeUrl(String url) {
+        url = url.trim();
+        if (url.startsWith(ApplicationConstants.CONTEXT_PROTOCOL_PREFIX)) {
+            url = url.substring(
+                    ApplicationConstants.CONTEXT_PROTOCOL_PREFIX.length());
+        }
+        if (url.startsWith("/")) {
+            url = url.substring(1);
+        }
+        url = toUnixSeparators(url);
+        if (url.startsWith("./")) {
+            url = url.substring(2);
+        }
+        return url;
+    }
+
+    /**
+     * Normalizes the separators of a stylesheet URL.
+     * <p>
+     * Done as string surgery rather than through {@code File}/{@code Path}: a
+     * stylesheet URL can still carry its scheme at this point
+     * ({@code base://css/app.css}), and a colon is illegal in a Windows path -
+     * so {@code new File(url).toPath()} threw {@code InvalidPathException} for
+     * every such URL there, which degraded an in-place CSS update to a full
+     * page reload. The result is what the path round-trip produced on a
+     * platform where it did not throw.
+     *
+     * @param url
+     *            the URL to normalize
+     * @return the URL with forward separators and no repeated slashes
+     */
+    static String toUnixSeparators(String url) {
+        return DUPLICATE_SLASHES.matcher(url.replace('\\', '/'))
+                .replaceAll("/");
+    }
+
+    private static Logger getLogger() {
+        return LoggerFactory.getLogger(PublicStyleSheetBundler.class);
+    }
+}

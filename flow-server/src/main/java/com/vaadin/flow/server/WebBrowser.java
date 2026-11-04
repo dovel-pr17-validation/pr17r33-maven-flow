@@ -1,0 +1,386 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server;
+
+import java.io.Serializable;
+import java.util.Locale;
+
+import org.slf4j.LoggerFactory;
+
+import com.vaadin.flow.shared.BrowserDetails;
+
+/**
+ * Provides information about the web browser the user is using that is directly
+ * available in the request, for instance browser name and version and IP
+ * address.
+ *
+ * Note! browser details rely on the user agent from the browser and thus the
+ * details are not always correct.
+ *
+ * @author Vaadin Ltd
+ * @since 1.0.
+ */
+public class WebBrowser implements Serializable {
+
+    private String userAgent = null;
+    private Locale locale = null;
+    private String address = null;
+    private boolean secureConnection = false;
+
+    private BrowserDetails browserDetails = null;
+
+    /**
+     * For internal use only. Configures all properties for the initial empty
+     * state.
+     */
+    WebBrowser() {
+    }
+
+    /**
+     * For internal use only. Configures all properties in the class according
+     * to the given information.
+     *
+     * @param request
+     *            the Vaadin request to read the information from
+     */
+    WebBrowser(VaadinRequest request) {
+        locale = request.getLocale();
+        address = request.getRemoteAddr();
+        secureConnection = request.isSecure();
+        // Headers are case insensitive according to the specification but are
+        // case sensitive in Weblogic portal...
+        userAgent = request.getHeader("User-Agent");
+    }
+
+    /**
+     * Get the User-Agent header for handling. Could be used with
+     * ua-parser/uap-java for instance.
+     *
+     * @return request User-Agent header
+     * @since 25.0
+     */
+    public String getUserAgent() {
+        return userAgent;
+    }
+
+    private BrowserDetails getBrowserDetails() {
+        if (userAgent != null && browserDetails == null) {
+            browserDetails = new BrowserDetails(userAgent) {
+                @Override
+                protected void log(String error, Exception e) {
+                    LoggerFactory.getLogger(BrowserDetails.class).debug(error);
+                }
+            };
+        }
+        return browserDetails;
+    }
+
+    /**
+     * Get the browser user-agent string.
+     *
+     * @return The raw browser userAgent string
+     * @deprecated use {@link #getUserAgent()} method to get user-agent string
+     */
+    @Deprecated(since = "25.0")
+    public String getBrowserApplication() {
+        return userAgent;
+    }
+
+    /**
+     * Gets the IP-address of the web browser, if available.
+     *
+     * @return IP-address in 1.12.123.123 -format or null if the address is not
+     *         available
+     */
+    public String getAddress() {
+        return address;
+    }
+
+    /**
+     * Gets the locale reported by the browser.
+     *
+     * @return the browser reported locale
+     */
+    public Locale getLocale() {
+        return locale;
+    }
+
+    /**
+     * Checks if the connection was established using HTTPS.
+     *
+     * @return true if HTTPS was used, false otherwise
+     */
+    public boolean isSecureConnection() {
+        return secureConnection;
+    }
+
+    /**
+     * Tests whether the user is using Firefox.
+     *
+     * @return true if the user is using Firefox, false if the user is not using
+     *         Firefox or if no information on the browser is present
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public boolean isFirefox() {
+        if (getBrowserDetails() == null) {
+            return false;
+        }
+
+        return browserDetails.isFirefox();
+    }
+
+    /**
+     * Tests whether the user is using Internet Explorer.
+     *
+     * @return true if the user is using Internet Explorer, false if the user is
+     *         not using Internet Explorer or if no information on the browser
+     *         is present
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public boolean isIE() {
+        if (getBrowserDetails() == null) {
+            return false;
+        }
+
+        return browserDetails.isIE();
+    }
+
+    /**
+     * Tests whether the user is using Edge.
+     *
+     * @return true if the user is using Edge, false if the user is not using
+     *         Edge or if no information on the browser is present
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public boolean isEdge() {
+        if (getBrowserDetails() == null) {
+            return false;
+        }
+
+        return browserDetails.isEdge();
+    }
+
+    /**
+     * Tests whether the user is using Safari. Note that Chrome on iOS is not
+     * detected as Safari but as Chrome although the underlying browser engine
+     * is the same.
+     *
+     * @return true if the user is using Safari, false if the user is not using
+     *         Safari or if no information on the browser is present
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public boolean isSafari() {
+        if (getBrowserDetails() == null) {
+            return false;
+        }
+
+        return browserDetails.isSafari();
+    }
+
+    /**
+     * Tests whether the user is using Opera.
+     *
+     * @return true if the user is using Opera, false if the user is not using
+     *         Opera or if no information on the browser is present
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public boolean isOpera() {
+        if (getBrowserDetails() == null) {
+            return false;
+        }
+
+        return browserDetails.isOpera();
+    }
+
+    /**
+     * Tests whether the user is using Chrome.
+     *
+     * @return true if the user is using Chrome, false if the user is not using
+     *         Chrome or if no information on the browser is present
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public boolean isChrome() {
+        if (getBrowserDetails() == null) {
+            return false;
+        }
+
+        return browserDetails.isChrome();
+    }
+
+    /**
+     * Gets the major version of the browser the user is using.
+     *
+     * <p>
+     * Note that Internet Explorer in IE7 compatibility mode might return 8 in
+     * some cases even though it should return 7.
+     *
+     * @return The major version of the browser or -1 if not known.
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public int getBrowserMajorVersion() {
+        if (getBrowserDetails() == null) {
+            return -1;
+        }
+
+        return browserDetails.getBrowserMajorVersion();
+    }
+
+    /**
+     * Gets the minor version of the browser the user is using.
+     *
+     * @see #getBrowserMajorVersion()
+     *
+     * @return The minor version of the browser or -1 if not known.
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public int getBrowserMinorVersion() {
+        if (getBrowserDetails() == null) {
+            return -1;
+        }
+
+        return browserDetails.getBrowserMinorVersion();
+    }
+
+    /**
+     * Tests whether the user is using Linux.
+     *
+     * @return true if the user is using Linux, false if the user is not using
+     *         Linux or if no information on the browser is present
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public boolean isLinux() {
+        if (getBrowserDetails() == null) {
+            return false;
+        }
+        return browserDetails.isLinux();
+    }
+
+    /**
+     * Tests whether the user is using Mac OS X.
+     *
+     * @return true if the user is using Mac OS X, false if the user is not
+     *         using Mac OS X or if no information on the browser is present
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public boolean isMacOSX() {
+        if (getBrowserDetails() == null) {
+            return false;
+        }
+        return browserDetails.isMacOSX();
+    }
+
+    /**
+     * Tests whether the user is using Windows.
+     *
+     * @return true if the user is using Windows, false if the user is not using
+     *         Windows or if no information on the browser is present
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public boolean isWindows() {
+        if (getBrowserDetails() == null) {
+            return false;
+        }
+        return browserDetails.isWindows();
+    }
+
+    /**
+     * Tests whether the user is using Windows Phone.
+     *
+     * @return true if the user is using Windows Phone, false if the user is not
+     *         using Windows Phone or if no information on the browser is
+     *         present
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public boolean isWindowsPhone() {
+        if (getBrowserDetails() == null) {
+            return false;
+        }
+        return browserDetails.isWindowsPhone();
+    }
+
+    /**
+     * Tests if the browser is run on Android.
+     *
+     * @return true if run on Android false if the user is not using Android or
+     *         if no information on the browser is present
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public boolean isAndroid() {
+        if (getBrowserDetails() == null) {
+            return false;
+        }
+        return browserDetails.isAndroid();
+    }
+
+    /**
+     * Tests if the browser is run on IPhone.
+     *
+     * @return true if run on IPhone false if the user is not using IPhone or if
+     *         no information on the browser is present
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.3")
+    public boolean isIPhone() {
+        if (getBrowserDetails() == null) {
+            return false;
+        }
+        return browserDetails.isIPhone();
+    }
+
+    /**
+     * Tests if the browser is run on ChromeOS (e.g. a Chromebook).
+     *
+     * @return true if run on ChromeOS false if the user is not using ChromeOS
+     *         or if no information on the browser is present
+     * @deprecated use a parsing library like ua-parser/uap-java to parse the
+     *             user agent from {@link #getUserAgent()}
+     */
+    @Deprecated(since = "25.0")
+    public boolean isChromeOS() {
+        if (getBrowserDetails() == null) {
+            return false;
+        }
+        return browserDetails.isChromeOS();
+    }
+
+}

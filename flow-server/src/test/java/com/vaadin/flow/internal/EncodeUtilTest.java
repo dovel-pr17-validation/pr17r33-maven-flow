@@ -1,0 +1,121 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.internal;
+
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class EncodeUtilTest {
+
+    @Test
+    void rfc5987Encode_withNull_nullPointerException() {
+        assertThrows(NullPointerException.class, () -> {
+            EncodeUtil.rfc5987Encode(null);
+        });
+    }
+
+    @Test
+    void rfc2047Encode_withNull_nullPointerException() {
+        assertThrows(NullPointerException.class, () -> {
+            EncodeUtil.rfc2047Encode(null);
+        });
+    }
+
+    @Test
+    void rfc5987Encode_asciiCharacters() {
+        String input = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$&'*+-.^_`|~";
+        assertEquals(
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$&%27%2A+-.^_`|~",
+                EncodeUtil.rfc5987Encode(input));
+    }
+
+    // UTF-8 Basic Latin & Controls
+    @Test
+    void rfc5987Encode_unicodeCharacters0to126() throws Exception {
+        StringBuilder text = new StringBuilder();
+        for (int codePoint = 0; codePoint <= 126; codePoint++) {
+            text.append(new String(new int[] { codePoint }, 0, 1));
+        }
+        assertEquals(
+                "%00%01%02%03%04%05%06%07%08%09%0A%0B%0C%0D%0E%0F%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F%20!%22#$%25&%27%28%29%2A+%2C-.%2F0123456789%3A%3B%3C%3D%3E%3F%40ABCDEFGHIJKLMNOPQRSTUVWXYZ%5B%5C%5D^_`abcdefghijklmnopqrstuvwxyz%7B|%7D~",
+                EncodeUtil.rfc5987Encode(text.toString()));
+    }
+
+    // UTF-8 Latin-1 Supplement
+    @Test
+    void rfc5987Encode_unicodeLatin1SupplementCharacters() throws Exception {
+        assertEquals("%E2%82%AC%20%C3%BF", EncodeUtil.rfc5987Encode("€ ÿ"));
+    }
+
+    // UTF-8 Latin Extended A
+    @Test
+    void rfc5987Encode_unicodeLatinExtendACharacters() throws Exception {
+        assertEquals("%C4%80%C4%81", EncodeUtil.rfc5987Encode("Āā"));
+    }
+
+    @Test
+    void rfc2047Encode_asciiCharacters() {
+        String input = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$&'*+-.^_`|~ ?=\"\\";
+        assertEquals(
+                "=?UTF-8?Q?abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$&'*+-.^=5F`|~_=3F=3D=22=5C?=",
+                EncodeUtil.rfc2047Encode(input));
+    }
+
+    @Test
+    void rfc2047Encode_nonAsciiCharacters() {
+        String input = "Řřüñîçødë 1中文 € ÿĀā";
+        assertEquals(
+                "=?UTF-8?Q?=C5=98=C5=99=C3=BC=C3=B1=C3=AE=C3=A7=C3=B8d=C3=AB_1=E4=B8=AD=E6=96=87_=E2=82=AC_=C3=BF=C4=80=C4=81?=",
+                EncodeUtil.rfc2047Encode(input));
+    }
+
+    @Test
+    void quotedStringEscape_escapesQuotesAndBackslashes() {
+        assertEquals("a\\\"b\\\\c d.txt",
+                EncodeUtil.quotedStringEscape("a\"b\\c d.txt"));
+    }
+
+    @Test
+    void quotedStringEscape_removesControlCharacters() {
+        assertEquals("ab.txt",
+                EncodeUtil.quotedStringEscape("a\r\n\t\u0000b\u007F.txt"));
+    }
+
+    @Test
+    void removeControlCharacters_removesC0AndC1ControlCharacters() {
+        assertEquals("äb.txt", EncodeUtil
+                .removeControlCharacters("ä\r\n\t\u0000\u007F\u0085b.txt"));
+    }
+
+    @Test
+    void isPureUSASCII_withAsciiOnly_returnTrue() {
+        String input = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$&'*+-.^_`|~ ?=\"";
+        assertTrue(EncodeUtil.isPureUSASCII(input));
+    }
+
+    @Test
+    void isPureUSASCII_withNonAscii_returnFalse() {
+        String input = "Řřüñîçøë中文€ÿĀā";
+        input.chars().forEach(c -> {
+            assertFalse(EncodeUtil.isPureUSASCII(Character.toString((char) c)),
+                    "Character " + (char) c + " should not be US-ASCII");
+        });
+    }
+}

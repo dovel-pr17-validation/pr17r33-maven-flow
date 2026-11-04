@@ -1,0 +1,152 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.data.provider.hierarchy;
+
+import java.util.Arrays;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mock;
+
+import com.vaadin.flow.data.provider.CompositeDataGenerator;
+import com.vaadin.flow.data.provider.DataGenerator;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+
+class HierarchicalDataCommunicatorDataGenerationTest
+        extends AbstractHierarchicalDataCommunicatorTest {
+    private TreeData<Item> treeData = new TreeData<>();
+    private TreeDataProvider<Item> treeDataProvider = new TreeDataProvider<>(
+            treeData);
+
+    private HierarchicalDataCommunicator<Item> dataCommunicator;
+
+    @Mock
+    private DataGenerator<Item> dataGenerator;
+
+    @BeforeEach
+    void init() {
+        super.init();
+
+        var compositeDataGenerator = new CompositeDataGenerator<Item>();
+
+        dataCommunicator = new HierarchicalDataCommunicator<>(
+                compositeDataGenerator, arrayUpdater, ui.getElement().getNode(),
+                () -> null);
+        dataCommunicator.setDataProvider(treeDataProvider, null);
+
+        compositeDataGenerator.addDataGenerator(dataGenerator);
+
+        doAnswer((invocation) -> {
+            Item item = invocation.getArgument(0);
+
+            assertTrue(dataCommunicator.getKeyMapper().has(item),
+                    "Item should be in keyMapper when generateData is called");
+
+            return null;
+        }).when(dataGenerator).destroyData(any());
+    }
+
+    @Test
+    void changeViewportRangeBackAndForth_generateDataCalledForVisibleItems() {
+        populateTreeData(treeData, 100, 2);
+        dataCommunicator.expand(new Item("Item 0"));
+        dataCommunicator.setViewportRange(0, 4);
+        fakeClientCommunication();
+
+        verify(dataGenerator).generateData(eq(new Item("Item 0")), any());
+        verify(dataGenerator).generateData(eq(new Item("Item 0-0")), any());
+        verify(dataGenerator).generateData(eq(new Item("Item 0-1")), any());
+        verify(dataGenerator).generateData(eq(new Item("Item 1")), any());
+        verify(dataGenerator, never()).generateData(eq(new Item("Item 2")),
+                any());
+
+        dataCommunicator.setViewportRange(98, 4);
+        fakeClientCommunication();
+
+        verify(dataGenerator, never()).generateData(eq(new Item("Item 95")),
+                any());
+        verify(dataGenerator).generateData(eq(new Item("Item 96")), any());
+        verify(dataGenerator).generateData(eq(new Item("Item 97")), any());
+        verify(dataGenerator).generateData(eq(new Item("Item 98")), any());
+        verify(dataGenerator).generateData(eq(new Item("Item 99")), any());
+    }
+
+    @Test
+    void changeViewportRangeBackAndForth_destroyDataCalledForNoLongerVisibleItemsAfterConfirmation() {
+        populateTreeData(treeData, 100, 2);
+        dataCommunicator.expand(new Item("Item 0"));
+
+        dataCommunicator.setViewportRange(0, 4);
+        fakeClientCommunication();
+        dataCommunicator.confirmUpdate(captureArrayUpdateId());
+        verify(dataGenerator, never()).destroyData(any());
+
+        clearInvocations(dataGenerator, arrayUpdater, arrayUpdate);
+
+        dataCommunicator.setViewportRange(2, 4);
+        fakeClientCommunication();
+        verify(dataGenerator, never()).destroyData(any()); // not confirmed yet
+
+        dataCommunicator.confirmUpdate(captureArrayUpdateId());
+        verify(dataGenerator) //
+                .destroyData(new Item("Item 0"));
+        verify(dataGenerator) //
+                .destroyData(new Item("Item 0-0"));
+        verify(dataGenerator, never()).destroyData(new Item("Item 0-1"));
+        verify(dataGenerator, never()).destroyData(new Item("Item 1"));
+
+        clearInvocations(dataGenerator, arrayUpdater, arrayUpdate);
+
+        dataCommunicator.setViewportRange(0, 4);
+        fakeClientCommunication();
+        verify(dataGenerator, never()).destroyData(any()); // not confirmed yet
+
+        dataCommunicator.confirmUpdate(captureArrayUpdateId());
+        verify(dataGenerator, never()).destroyData(new Item("Item 0"));
+        verify(dataGenerator, never()).destroyData(new Item("Item 0-0"));
+        verify(dataGenerator, never()).destroyData(new Item("Item 0-1"));
+        verify(dataGenerator, never()).destroyData(new Item("Item 1"));
+        verify(dataGenerator) //
+                .destroyData(new Item("Item 2"));
+        verify(dataGenerator) //
+                .destroyData(new Item("Item 3"));
+    }
+
+    @Test
+    void collapseItems_destroyDataCalledForCollapsedChildrenInKeyMapper() {
+        populateTreeData(treeData, 4, 2, 2);
+        dataCommunicator.expand(
+                Arrays.asList(new Item("Item 0"), new Item("Item 0-0")));
+        dataCommunicator.setViewportRange(0, 4);
+        fakeClientCommunication();
+
+        dataCommunicator.collapse(new Item("Item 0"));
+
+        verify(dataGenerator, never()).destroyData(new Item("Item 0"));
+        verify(dataGenerator).destroyData(new Item("Item 0-0"));
+        verify(dataGenerator).destroyData(new Item("Item 0-0-0"));
+        verify(dataGenerator).destroyData(new Item("Item 0-0-1"));
+        verify(dataGenerator, never()).destroyData(new Item("Item 0-1"));
+        verify(dataGenerator, never()).destroyData(new Item("Item 1"));
+    }
+}

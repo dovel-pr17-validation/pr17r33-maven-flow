@@ -1,0 +1,856 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.component.internal;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+
+import net.bytebuddy.ByteBuddy;
+import net.bytebuddy.description.modifier.SyntheticState;
+import net.bytebuddy.description.modifier.Visibility;
+import net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.HasComponents;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.UI.BrowserLeaveNavigationEvent;
+import com.vaadin.flow.component.UI.BrowserNavigateEvent;
+import com.vaadin.flow.component.page.AppShellConfigurator;
+import com.vaadin.flow.component.page.ExtendedClientDetails;
+import com.vaadin.flow.component.page.History;
+import com.vaadin.flow.component.page.Page;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.dom.impl.BasicElementStateProvider;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.internal.CurrentInstance;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.internal.StateNode;
+import com.vaadin.flow.internal.StateTree;
+import com.vaadin.flow.internal.menu.MenuRegistry;
+import com.vaadin.flow.js.JsCall;
+import com.vaadin.flow.js.JsDefinitionProxy;
+import com.vaadin.flow.router.BeforeEnterEvent;
+import com.vaadin.flow.router.BeforeEnterObserver;
+import com.vaadin.flow.router.BeforeLeaveEvent;
+import com.vaadin.flow.router.BeforeLeaveEvent.ContinueNavigationAction;
+import com.vaadin.flow.router.BeforeLeaveObserver;
+import com.vaadin.flow.router.Location;
+import com.vaadin.flow.router.NavigationEndedEvent;
+import com.vaadin.flow.router.NotFoundException;
+import com.vaadin.flow.router.PageTitle;
+import com.vaadin.flow.router.PreserveOnRefresh;
+import com.vaadin.flow.router.QueryParameters;
+import com.vaadin.flow.router.Route;
+import com.vaadin.flow.router.Router;
+import com.vaadin.flow.router.RouterLink;
+import com.vaadin.flow.server.MockServletServiceSessionSetup;
+import com.vaadin.flow.server.SessionRouteRegistry;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.tests.util.MockDeploymentConfiguration;
+
+import static com.vaadin.flow.component.UI.CLIENT_NAVIGATE_TO;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class JavaScriptBootstrapUITest {
+
+    private static final String CLIENT_PUSHSTATE_TO = "setTimeout(() => { window.history.pushState($0, '', $1); window.dispatchEvent(new CustomEvent('vaadin-navigated')); })";
+    private static final String REACT_PUSHSTATE_TO = "window.dispatchEvent(new CustomEvent('vaadin-navigate', { detail: { state: $0, url: $1, replace: false, callback: $2 } }));";
+
+    private MockServletServiceSessionSetup mocks;
+    private UI ui;
+
+    @PageTitle("app-shell-title")
+    public static class AppShell implements AppShellConfigurator {
+    }
+
+    @Tag(Tag.H2)
+    public static class CleanChild extends Component
+            implements BeforeLeaveObserver {
+        @Override
+        public void beforeLeave(BeforeLeaveEvent event) {
+        }
+    }
+
+    @Route("clean")
+    @Tag(Tag.HEADER)
+    public static class Clean extends Component implements HasComponents {
+        public Clean() {
+            add(new CleanChild());
+        }
+    }
+
+    @Tag(Tag.H1)
+    public static class DirtyChild extends Component
+            implements BeforeLeaveObserver {
+        // What the postponed leave hands out, for a case that decides it
+        static ContinueNavigationAction action;
+
+        @Override
+        public void beforeLeave(BeforeLeaveEvent event) {
+            action = event.postpone();
+        }
+    }
+
+    @Route("dirty")
+    @Tag(Tag.SPAN)
+    public static class Dirty extends Component implements HasComponents {
+        public Dirty() {
+            add(new DirtyChild());
+        }
+    }
+
+    @Route("preserved")
+    @Tag(Tag.SPAN)
+    @PreserveOnRefresh
+    public static class PreservedView extends Component {
+    }
+
+    @Route("partially-preserved")
+    @Tag(Tag.SPAN)
+    @PreserveOnRefresh(partialMatch = true)
+    public static class PartiallyPreservedView extends Component {
+    }
+
+    @Route("product")
+    @Tag(Tag.SPAN)
+    @PageTitle("my-product")
+    public static class ProductView extends Component implements HasComponents {
+        public ProductView() {
+            // this should be ignored
+            UI.getCurrent().navigate("product");
+            setId("productView");
+        }
+    }
+
+    @Route("exception")
+    @Tag(Tag.DIV)
+    public static class FailOnException extends Component
+            implements BeforeEnterObserver {
+
+        @Override
+        public void beforeEnter(BeforeEnterEvent event) {
+            throw new RuntimeException("Failed on an exception");
+        }
+    }
+
+    @Route("forwardToClientSideViewOnBeforeEnter")
+    @Tag(Tag.DIV)
+    public static class ForwardToClientSideViewOnBeforeEnter extends Component
+            implements BeforeEnterObserver {
+
+        @Override
+        public void beforeEnter(BeforeEnterEvent event) {
+            event.forwardTo("client-view");
+        }
+    }
+
+    @Route("forwardToClientSideViewOnBeforeLeave")
+    @Tag(Tag.DIV)
+    public static class ForwardToClientSideViewOnBeforeLeave extends Component
+            implements BeforeLeaveObserver {
+
+        @Override
+        public void beforeLeave(BeforeLeaveEvent event) {
+            event.forwardTo("client-view");
+        }
+    }
+
+    @Route("rerouteToClientSideViewOnReroute")
+    @Tag(Tag.DIV)
+    public static class ForwardToClientSideViewOnReroute extends Component
+            implements BeforeLeaveObserver, BeforeEnterObserver {
+
+        @Override
+        public void beforeLeave(BeforeLeaveEvent event) {
+            event.rerouteTo("client-view");
+        }
+
+        @Override
+        public void beforeEnter(BeforeEnterEvent event) {
+            event.rerouteTo("client-view");
+        }
+    }
+
+    @Route("forwardToServerSideViewOnBeforeEnter")
+    @Tag(Tag.DIV)
+    public static class ForwardToServerViewOnBeforeEnter extends Component
+            implements BeforeEnterObserver {
+
+        @Override
+        public void beforeEnter(BeforeEnterEvent event) {
+            event.forwardTo("clean");
+        }
+    }
+
+    @BeforeEach
+    void setup() throws Exception {
+        mocks = new MockServletServiceSessionSetup();
+        mocks.getService().getRouter().getRegistry().setRoute("clean",
+                Clean.class, Collections.emptyList());
+        mocks.getService().getRouter().getRegistry().setRoute("clean/1",
+                Clean.class, Collections.emptyList());
+        mocks.getService().getRouter().getRegistry().setRoute("dirty",
+                Dirty.class, Collections.emptyList());
+        mocks.getService().getRouter().getRegistry().setRoute("product",
+                ProductView.class, Collections.emptyList());
+        mocks.getService().getRouter().getRegistry().setRoute("preserved",
+                PreservedView.class, Collections.emptyList());
+        mocks.getService().getRouter().getRegistry().setRoute(
+                "partially-preserved", PartiallyPreservedView.class,
+                Collections.emptyList());
+        mocks.getService().getRouter().getRegistry().setRoute(
+                "partially-preserved/1", PartiallyPreservedView.class,
+                Collections.emptyList());
+
+        Class<? extends ProductView> routeProxyClass = new ByteBuddy()
+                .subclass(ProductView.class)
+                .modifiers(Visibility.PUBLIC, SyntheticState.SYNTHETIC).make()
+                .load(ProductView.class.getClassLoader(),
+                        ClassLoadingStrategy.Default.WRAPPER)
+                .getLoaded();
+        mocks.getService().getRouter().getRegistry().setRoute("proxy-product",
+                routeProxyClass, Collections.emptyList());
+
+        mocks.getService().getRouter().getRegistry().setRoute("exception",
+                FailOnException.class, Collections.emptyList());
+        mocks.getService().getRouter().getRegistry().setRoute(
+                "forwardToClientSideViewOnBeforeEnter",
+                ForwardToClientSideViewOnBeforeEnter.class,
+                Collections.emptyList());
+        mocks.getService().getRouter().getRegistry().setRoute(
+                "forwardToClientSideViewOnBeforeLeave",
+                ForwardToClientSideViewOnBeforeLeave.class,
+                Collections.emptyList());
+        mocks.getService().getRouter().getRegistry().setRoute(
+                "rerouteToClientSideViewOnReroute",
+                ForwardToClientSideViewOnReroute.class,
+                Collections.emptyList());
+        mocks.getService().getRouter().getRegistry().setRoute(
+                "forwardToServerSideViewOnBeforeEnter",
+                ForwardToServerViewOnBeforeEnter.class,
+                Collections.emptyList());
+        ui = new UI();
+        ui.getInternals().setSession(mocks.getSession());
+        ui.doInit(null, 0, "appIdABC");
+
+        CurrentInstance.setCurrent(ui);
+    }
+
+    @AfterEach
+    void cleanup() {
+        mocks.cleanup();
+    }
+
+    @Test
+    void should_allow_navigation() {
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/clean", "", "", null, ""));
+        assertEquals(Tag.HEADER,
+                ui.getInternals().getWrapperElement().getChild(0).getTag());
+        assertEquals(Tag.H2, ui.getInternals().getWrapperElement().getChild(0)
+                .getChild(0).getTag());
+
+        // Dirty view is allowed after clean view
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/dirty", "", "", null, ""));
+        assertEquals(Tag.SPAN,
+                ui.getInternals().getWrapperElement().getChild(0).getTag());
+        assertEquals(Tag.H1, ui.getInternals().getWrapperElement().getChild(0)
+                .getChild(0).getTag());
+    }
+
+    @Test
+    void should_navigate_when_endingSlash() {
+        ui.browserNavigate(new BrowserNavigateEvent(ui, true, "/clean/", "", "",
+                null, ""));
+        assertEquals(Tag.HEADER,
+                ui.getInternals().getWrapperElement().getChild(0).getTag());
+        assertEquals(Tag.H2, ui.getInternals().getWrapperElement().getChild(0)
+                .getChild(0).getTag());
+    }
+
+    @Test
+    void getChildren_should_notReturnAnEmptyList() {
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/clean", "", "", null, ""));
+        assertEquals(1, ui.getChildren().count());
+    }
+
+    @Test
+    void addRemoveComponent_clientSideRouting_addsToBody() {
+        final Element uiElement = ui.getElement();
+
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/clean", "", "", null, ""));
+        // router outlet is a virtual child that is not reflected on element
+        // level
+        assertEquals(1, ui.getChildren().count());
+        assertEquals(0, uiElement.getChildCount());
+        assertEquals(0, ui.getElement().getChildCount());
+
+        final RouterLink routerLink = new RouterLink();
+        ui.add(routerLink);
+
+        assertEquals(2, ui.getChildren().count());
+        assertEquals(1, ui.getElement().getChildCount());
+        assertEquals(1, uiElement.getChildCount());
+
+        ui.add(new RouterLink());
+
+        assertEquals(3, ui.getChildren().count());
+        assertEquals(2, ui.getElement().getChildCount());
+        assertEquals(2, uiElement.getChildCount());
+
+        ui.remove(routerLink);
+
+        assertEquals(2, ui.getChildren().count());
+        assertEquals(1, ui.getElement().getChildCount());
+        assertEquals(1, uiElement.getChildCount());
+    }
+
+    @Test
+    void addComponent_clientSideRouterAndNavigation_componentsRemain() {
+        final Element uiElement = ui.getElement();
+        // trigger route via client
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/clean", "", "", null, ""));
+        final RouterLink routerLink = new RouterLink();
+        ui.add(routerLink);
+
+        assertEquals(2, ui.getChildren().count());
+        assertEquals(1, ui.getElement().getChildCount());
+        assertEquals(1, uiElement.getChildCount());
+
+        ui.navigate("product");
+
+        assertEquals(2, ui.getChildren().count());
+        assertEquals(1, ui.getElement().getChildCount());
+        assertEquals(1, uiElement.getChildCount());
+    }
+
+    @Test
+    void should_prevent_navigation_on_dirty() {
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/dirty", "", "", null, ""));
+        assertEquals(Tag.SPAN,
+                ui.getInternals().getWrapperElement().getChild(0).getTag());
+        assertEquals(Tag.H1, ui.getInternals().getWrapperElement().getChild(0)
+                .getChild(0).getTag());
+
+        // clean view cannot be rendered after dirty
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/clean", "", "", null, ""));
+        assertEquals(Tag.H1, ui.getInternals().getWrapperElement().getChild(0)
+                .getChild(0).getTag());
+
+        // an error route cannot be rendered after dirty
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/errr", "", "", null, ""));
+        assertEquals(Tag.H1, ui.getInternals().getWrapperElement().getChild(0)
+                .getChild(0).getTag());
+    }
+
+    @Test
+    void should_remove_content_on_leaveNavigation() {
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/clean", "", "", null, ""));
+        assertEquals(Tag.HEADER,
+                ui.getInternals().getWrapperElement().getChild(0).getTag());
+        assertEquals(Tag.H2, ui.getInternals().getWrapperElement().getChild(0)
+                .getChild(0).getTag());
+
+        ui.leaveNavigation(
+                new BrowserLeaveNavigationEvent(ui, true, "/client-view", ""));
+
+        assertEquals(0, ui.getInternals().getWrapperElement().getChildCount());
+    }
+
+    @Test
+    void leaveNavigation_toClientView_firesNotShownOutcome() {
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/clean", "", "", null, ""));
+        List<NavigationEndedEvent> ended = recordNavigationEndedEvents();
+
+        ui.leaveNavigation(
+                new BrowserLeaveNavigationEvent(ui, true, "/client-view", ""));
+
+        assertEquals(1, ended.size());
+        assertEquals(new NavigationEndedEvent.NotShown(),
+                ended.get(0).getOutcome());
+    }
+
+    @Test
+    void browserNavigate_unknownRoute_firesOneFailedNavigation() {
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/clean", "", "", null, ""));
+        List<NavigationEndedEvent> ended = recordNavigationEndedEvents();
+
+        ui.browserNavigate(new BrowserNavigateEvent(ui, true, "/unknown", "",
+                "", null, "link"));
+
+        assertEquals(1, ended.size());
+        NavigationEndedEvent event = ended.get(0);
+        assertEquals("unknown", event.getLocation().getPath());
+        assertInstanceOf(NotFoundException.class,
+                ((NavigationEndedEvent.Failed) event.getOutcome()).error());
+        assertEquals(404, event.getStatusCode());
+    }
+
+    private List<NavigationEndedEvent> recordNavigationEndedEvents() {
+        List<NavigationEndedEvent> ended = new ArrayList<>();
+        mocks.getService().getEventBus().addListener(NavigationEndedEvent.class,
+                ended::add);
+        return ended;
+    }
+
+    @Test
+    void should_keep_content_on_leaveNavigation_postpone() {
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/dirty", "", "", null, ""));
+        assertEquals(Tag.SPAN,
+                ui.getInternals().getWrapperElement().getChild(0).getTag());
+        assertEquals(Tag.H1, ui.getInternals().getWrapperElement().getChild(0)
+                .getChild(0).getTag());
+
+        ui.leaveNavigation(
+                new BrowserLeaveNavigationEvent(ui, true, "/client-view", ""));
+        assertEquals(Tag.SPAN,
+                ui.getInternals().getWrapperElement().getChild(0).getTag());
+        assertEquals(Tag.H1, ui.getInternals().getWrapperElement().getChild(0)
+                .getChild(0).getTag());
+    }
+
+    @Test
+    void postponedLeave_proceedLetsTheClientGoAndCancelTurnsItBack() {
+        // The client waits to hear what became of the navigation it handed
+        // over, so each way out of a postponed one has to answer - and answer
+        // the right way round
+        for (boolean proceed : new boolean[] { true, false }) {
+            ui.browserNavigate(new BrowserNavigateEvent(ui, true, "/dirty", "",
+                    "", null, ""));
+            ui.leaveNavigation(new BrowserLeaveNavigationEvent(ui, true,
+                    "/client-view", ""));
+            dumpServerConnectedCalls();
+
+            if (proceed) {
+                DirtyChild.action.proceed();
+            } else {
+                DirtyChild.action.cancel();
+            }
+
+            assertEquals(List.of(!proceed), dumpServerConnectedCalls(),
+                    proceed ? "proceeding should not cancel the navigation"
+                            : "cancelling should turn the navigation back");
+        }
+    }
+
+    /**
+     * What the wrapper element has been told since last asked, as the cancel
+     * flag of each call.
+     */
+    private List<Object> dumpServerConnectedCalls() {
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+        return ui.getInternals().dumpPendingJavaScriptInvocations().stream()
+                .map(pending -> pending.getInvocation().getJsCall())
+                .filter(call -> call != null
+                        && call.definitionType() == Element.CallFunctionJs.class
+                        && "serverConnected"
+                                .equals(call.flattenArguments().get(0)))
+                .map(call -> call.flattenArguments().get(1)).toList();
+    }
+
+    @Test
+    void should_handle_forward_to_client_side_view_on_beforeEnter() {
+        ui.browserNavigate(new BrowserNavigateEvent(ui, true,
+                "/forwardToClientSideViewOnBeforeEnter", "", "", null, ""));
+
+        assertEquals("client-view", ui.getForwardToClientUrl());
+    }
+
+    @Test
+    void should_not_handle_forward_to_client_side_view_on_beforeLeave() {
+        ui.browserNavigate(new BrowserNavigateEvent(ui, true,
+                "/forwardToClientSideViewOnBeforeLeave", "", "", null, ""));
+
+        assertNull(ui.getForwardToClientUrl());
+    }
+
+    @Test
+    void should_not_handle_forward_to_client_side_view_on_reroute() {
+        ui.browserNavigate(new BrowserNavigateEvent(ui, true,
+                "/forwardToClientSideViewOnReroute", "", "", null, ""));
+
+        assertNull(ui.getForwardToClientUrl());
+    }
+
+    @Test
+    void should_handle_forward_to_server_side_view_on_beforeEnter_and_update_url() {
+        ui.browserNavigate(new BrowserNavigateEvent(ui, true,
+                "/forwardToServerSideViewOnBeforeEnter", "", "", null, ""));
+
+        assertEquals(Tag.HEADER,
+                ui.getInternals().getWrapperElement().getChild(0).getTag());
+        assertEquals(Tag.H2, ui.getInternals().getWrapperElement().getChild(0)
+                .getChild(0).getTag());
+
+        ui.navigate("product");
+        assertEquals("my-product", ui.getInternals().getTitle());
+        assertEquals("productView",
+                ui.getChildren().findFirst().get().getId().get());
+
+        ui.navigate("forwardToServerSideViewOnBeforeEnter");
+        assertEquals(Tag.HEADER,
+                ui.getInternals().getWrapperElement().getChild(0).getTag());
+        assertEquals(Tag.H2, ui.getInternals().getWrapperElement().getChild(0)
+                .getChild(0).getTag());
+    }
+
+    @Test
+    void should_show_error_page() {
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/err", "", "", null, ""));
+        assertEquals(Tag.DIV,
+                ui.getInternals().getWrapperElement().getChild(0).getTag());
+        assertTrue(ui.getInternals().getWrapperElement().toString()
+                .contains("Available routes:"));
+    }
+
+    @Test
+    void should_invoke_clientRoute_when_navigationHasNotBeenStarted() {
+        ui = spy(ui);
+        Page page = mockPage();
+
+        ui.navigate("whatever");
+
+        assertEquals(CLIENT_NAVIGATE_TO, onlyPageCall().getExpression());
+        assertEquals(List.of("whatever"), onlyPageCall().arguments());
+    }
+
+    @Test
+    void should_update_pushState_when_navigationHasBeenAlreadyStarted() {
+        ui = spy(ui);
+        Page page = mockPage();
+
+        UIInternals internals = mockUIInternals();
+
+        VaadinSession session = mocks.getSession();
+        DeploymentConfiguration configuration = mock(
+                DeploymentConfiguration.class);
+        when(internals.getSession()).thenReturn(session);
+        when(session.getConfiguration()).thenReturn(configuration);
+        ((MockDeploymentConfiguration) session.getService()
+                .getDeploymentConfiguration()).setReactEnabled(false);
+
+        when(internals.hasLastHandledLocation()).thenReturn(true);
+        Location lastLocation = new Location("clean");
+        when(internals.getLastHandledLocation()).thenReturn(lastLocation);
+        StateTree stateTree = mock(StateTree.class);
+        when(internals.getStateTree()).thenReturn(stateTree);
+        when(internals.getTitle()).thenReturn("");
+
+        StateNode stateNode = BasicElementStateProvider
+                .createStateNode("foo-element");
+        when(stateTree.getRootNode()).thenReturn(stateNode);
+
+        try (MockedStatic<MenuRegistry> menuRegistry = mockStatic(
+                MenuRegistry.class)) {
+
+            menuRegistry
+                    .when(() -> MenuRegistry.hasClientRoute("clean/1", true))
+                    .thenReturn(false);
+
+            ui.navigate("clean/1");
+
+            boolean reactEnabled = ui.getSession().getConfiguration()
+                    .isReactEnabled();
+
+            JsCall call = onlyPageCall();
+            if (reactEnabled) {
+                assertEquals(REACT_PUSHSTATE_TO, call.getExpression());
+                assertEquals(3, call.arguments().size());
+                assertEquals("clean/1", call.arguments().get(1));
+            } else {
+                assertEquals(CLIENT_PUSHSTATE_TO, call.getExpression());
+                assertEquals(2, call.arguments().size());
+                assertNull(call.arguments().get(0));
+                assertEquals("clean/1", call.arguments().get(1));
+            }
+        }
+    }
+
+    @Test
+    void should_not_notify_clientRoute_when_navigatingToTheSame() {
+        ui = spy(ui);
+        Page page = mockPage();
+
+        UIInternals internals = mockUIInternals();
+
+        when(internals.hasLastHandledLocation()).thenReturn(true);
+        Location lastLocation = new Location("clean");
+        when(internals.getLastHandledLocation()).thenReturn(lastLocation);
+
+        ui.navigate("clean/");
+        assertEquals(List.of(), pageCalls);
+    }
+
+    @Test
+    void server_should_not_doClientRoute_when_navigatingToServer() {
+        ui.browserNavigate(
+                new BrowserNavigateEvent(ui, true, "/clean", "", "", null, ""));
+        assertEquals(Tag.HEADER,
+                ui.getInternals().getWrapperElement().getChild(0).getTag());
+        assertEquals(Tag.H2, ui.getInternals().getWrapperElement().getChild(0)
+                .getChild(0).getTag());
+
+        ui = spy(ui);
+        Page page = mockPage();
+
+        // Dirty view is allowed after clean view
+        ui.navigate("dirty");
+        // A server navigation happens
+        assertEquals(Tag.SPAN,
+                ui.getInternals().getWrapperElement().getChild(0).getTag());
+
+        boolean reactEnabled = ui.getSession().getConfiguration()
+                .isReactEnabled();
+
+        JsCall call = onlyPageCall();
+        if (reactEnabled) {
+            assertEquals(REACT_PUSHSTATE_TO, call.getExpression());
+            assertEquals(3, call.arguments().size());
+        } else {
+            assertEquals(CLIENT_PUSHSTATE_TO, call.getExpression());
+            assertEquals(2, call.arguments().size());
+        }
+        assertNull(call.arguments().get(0));
+        assertEquals("dirty", call.arguments().get(1));
+    }
+
+    @Test
+    void should_updatePageTitle_when_serverNavigation() {
+        ui.navigate("empty");
+        assertNull(ui.getInternals().getTitle());
+        ui.navigate("product");
+        assertEquals("my-product", ui.getInternals().getTitle());
+    }
+
+    @Test
+    void should_updatePageTitle_when_serverNavigationToProxyViewClass() {
+        ui.navigate("empty");
+        assertNull(ui.getInternals().getTitle());
+        ui.navigate("proxy-product");
+        assertEquals("my-product", ui.getInternals().getTitle());
+    }
+
+    @Test
+    void should_removeTitle_when_noAppShellTitle() {
+        ui.navigate("empty");
+        assertNull(ui.getInternals().getTitle());
+        ui.navigate("dirty");
+        assertEquals("", ui.getInternals().getTitle());
+    }
+
+    @Test
+    void should_restoreIndexHtmlTitle() {
+        ui.browserNavigate(new BrowserNavigateEvent(ui, true, "empty", "",
+                "app-shell-title", null, ""));
+        assertEquals("", ui.getInternals().getTitle());
+        ui.browserNavigate(new BrowserNavigateEvent(ui, true, "dirty", "",
+                "app-shell-title", null, ""));
+        assertEquals("app-shell-title", ui.getInternals().getTitle());
+    }
+
+    @Test
+    void should_restoreIndexHtmlTitle_when_preserveOnRefreshViewReloadedBeforeWindowNameKnown() {
+        assertAppShellTitleRestoredOnReloadBeforeWindowNameKnown("preserved",
+                "preserved");
+    }
+
+    @Test
+    void should_restoreIndexHtmlTitle_when_partialMatchPreserveOnRefreshViewReloadedBeforeWindowNameKnown() {
+        assertAppShellTitleRestoredOnReloadBeforeWindowNameKnown(
+                "partially-preserved", "partially-preserved/1");
+    }
+
+    private void assertAppShellTitleRestoredOnReloadBeforeWindowNameKnown(
+            String location, String reloadLocation) {
+        // The preserved chain is cached in a session attribute
+        VaadinSession session = mocks.getSession();
+        Map<Class<?>, Object> attributes = new HashMap<>();
+        attributes.put(SessionRouteRegistry.class,
+                session.getAttribute(SessionRouteRegistry.class));
+        doAnswer(invocation -> attributes.put(invocation.getArgument(0),
+                invocation.getArgument(1))).when(session)
+                .setAttribute(any(Class.class), any());
+        doAnswer(invocation -> attributes.get(invocation.getArgument(0)))
+                .when(session).getAttribute(any(Class.class));
+
+        ExtendedClientDetails details = mock(ExtendedClientDetails.class);
+        when(details.getWindowName()).thenReturn("window");
+        ui.getInternals().setExtendedClientDetails(details);
+        ui.browserNavigate(new BrowserNavigateEvent(ui, true, location, "",
+                "app-shell-title", null, ""));
+        assertEquals("app-shell-title", ui.getInternals().getTitle());
+
+        // Reload: the new UI does not know the window name yet, so the
+        // preserved chain is only reused once the client has responded
+        UI reloadedUI = new UI();
+        reloadedUI.getInternals().setSession(mocks.getSession());
+        reloadedUI.doInit(null, 0, "reloadedUiId");
+        reloadedUI.browserNavigate(new BrowserNavigateEvent(reloadedUI, true,
+                reloadLocation, "", "app-shell-title", null, ""));
+
+        ObjectNode browserDetails = JacksonUtils.createObjectNode();
+        browserDetails.put("v-wn", "window");
+        reloadedUI.getInternals().dumpPendingJavaScriptInvocations().stream()
+                .filter(invocation -> invocation.getInvocation().getExpression()
+                        .contains("getBrowserDetailsParameters"))
+                .findFirst().orElseThrow().complete(browserDetails);
+
+        assertEquals("app-shell-title", reloadedUI.getInternals().getTitle());
+    }
+
+    @Test
+    void should_not_share_dynamic_app_title_for_different_UIs() {
+        String dynamicTitle = UUID.randomUUID().toString();
+        ui.browserNavigate(new BrowserNavigateEvent(ui, true, "clean", "",
+                dynamicTitle, null, ""));
+        assertEquals(dynamicTitle, ui.getInternals().getTitle());
+
+        String anotherDynamicTitle = UUID.randomUUID().toString();
+        UI anotherUI = new UI();
+        anotherUI.getInternals().setSession(mocks.getSession());
+        anotherUI.doInit(null, 0, "anotherUiId");
+        anotherUI.browserNavigate(new BrowserNavigateEvent(anotherUI, true,
+                "clean", "", anotherDynamicTitle, null, ""));
+        assertEquals(anotherDynamicTitle, anotherUI.getInternals().getTitle());
+
+        ui.navigate("dirty");
+        assertEquals(dynamicTitle, ui.getInternals().getTitle());
+    }
+
+    @Test
+    void navigate_firsClientSideRoutingThrows_navigationInProgressIsReset_secondClientSideRoutingWorks() {
+        VaadinSession session = mock(VaadinSession.class);
+
+        VaadinService service = mock(VaadinService.class);
+        when(session.getService()).thenReturn(service);
+        Router router = mock(Router.class);
+        when(service.getRouter()).thenReturn(router);
+
+        doThrow(RuntimeException.class).when(router)
+                .resolveNavigationTarget(any());
+
+        UI ui = new UI();
+
+        ui.getInternals().setSession(session);
+
+        try {
+            ui.navigate("foo", QueryParameters.empty());
+        } catch (RuntimeException expected) {
+            router = mock(Router.class);
+            when(service.getRouter()).thenReturn(router);
+
+            when(router.resolveNavigationTarget(any()))
+                    .thenReturn(Optional.empty());
+            ui.navigate("foo", QueryParameters.empty());
+
+            verify(router).resolveNavigationTarget(any());
+            return;
+        }
+        // self control: code inside catch should be invoked
+        fail();
+    }
+
+    private void assertExceptionComponent(Class<?> errorClass,
+            String... exceptionTexts) {
+        Optional<Component> visibleComponent = ui.getElement().getChild(0)
+                .getComponent();
+
+        assertTrue(visibleComponent.isPresent(),
+                "No navigation component visible");
+
+        Component internalServerError = visibleComponent.get();
+        assertEquals(errorClass, internalServerError.getClass());
+        String errorText = internalServerError.getElement().getText();
+        for (String exceptionText : exceptionTexts) {
+            assertTrue(errorText.contains(exceptionText),
+                    "Expected the error text to contain '" + exceptionText
+                            + "'");
+        }
+    }
+
+    private Page mockPage() {
+        Page page = mock(Page.class);
+        when(ui.getPage()).thenReturn(page);
+        // The page runs declared JavaScript rather than an expression, so the
+        // mock hands out an implementation that records the call
+        when(page.executeJs(any(Class.class)))
+                .thenAnswer(invocation -> JsDefinitionProxy.create(
+                        invocation.getArgument(0, Class.class), call -> {
+                            pageCalls.add(call);
+                            return null;
+                        }));
+
+        History history = new History(ui);
+        when(page.getHistory()).thenReturn(history);
+
+        return page;
+    }
+
+    /** What the page was asked to run of the declared JavaScript. */
+    private final List<JsCall> pageCalls = new ArrayList<>();
+
+    /** The only call the page was asked to run. */
+    private JsCall onlyPageCall() {
+        assertEquals(1, pageCalls.size(), "calls: " + pageCalls);
+        return pageCalls.get(0);
+    }
+
+    private UIInternals mockUIInternals() {
+        UIInternals internals = mock(UIInternals.class);
+        when(ui.getInternals()).thenReturn(internals);
+
+        when(internals.getRouter()).thenReturn(mocks.getService().getRouter());
+
+        return internals;
+    }
+
+}

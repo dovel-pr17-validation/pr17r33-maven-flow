@@ -1,0 +1,605 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.dom;
+
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Type;
+import java.lang.reflect.TypeVariable;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
+
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.internal.ReflectTools;
+import com.vaadin.flow.internal.nodefeature.ElementChildrenList;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+abstract class AbstractNodeTest {
+
+    @Test
+    void insertWithNullParameter() {
+        Node<?> parent = createParentNode();
+        assertThrows(IllegalArgumentException.class,
+                () -> parent.insertChild(0, (Element[]) null));
+    }
+
+    @Test
+    void insertNullChild() {
+        Node<?> parent = createParentNode();
+        assertThrows(IllegalArgumentException.class,
+                () -> parent.insertChild(0, new Element[] { null }));
+    }
+
+    @Test
+    void appendChildren() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        parent.appendChild(child1, child2);
+
+        assertChildren(parent, child1, child2);
+    }
+
+    protected void assertChildren(Node<?> parent, Element... children) {
+        assertEquals(children.length, parent.getChildCount());
+        for (int i = 0; i < children.length; i++) {
+            assertChild(parent, i, children[i]);
+        }
+    }
+
+    protected void assertChild(Node<?> parent, int index, Element child) {
+        assertEquals(child, parent.getChild(index));
+    }
+
+    @Test
+    void insertChildFirst() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        parent.appendChild(child1);
+        parent.insertChild(0, child2);
+
+        assertChildren(parent, child2, child1);
+    }
+
+    @Test
+    void insertChildMiddle() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        parent.appendChild(child1, child2);
+        parent.insertChild(1, child3);
+
+        assertChildren(parent, child1, child3, child2);
+    }
+
+    @Test
+    void insertChildAsLast() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        parent.appendChild(child1, child2);
+        parent.insertChild(2, child3);
+
+        assertChildren(parent, child1, child2, child3);
+    }
+
+    @Test
+    void insertChildAfterLast() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        parent.appendChild(child1, child2);
+        assertThrows(IllegalArgumentException.class,
+                () -> parent.insertChild(3, child3));
+    }
+
+    @Test
+    void removeChildFirst() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        parent.appendChild(child1, child2, child3);
+        parent.removeChild(child1);
+
+        assertChildren(parent, child2, child3);
+    }
+
+    @Test
+    void removeChildFirstIndex() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        parent.appendChild(child1, child2, child3);
+        parent.removeChild(0);
+
+        assertChildren(parent, child2, child3);
+    }
+
+    @Test
+    void removeChildrenFirst() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        parent.appendChild(child1, child2, child3);
+        parent.removeChild(child1, child2);
+
+        assertChildren(parent, child3);
+    }
+
+    @Test
+    void removeChildMiddle() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        parent.appendChild(child1, child2, child3);
+        parent.removeChild(child2);
+
+        assertChildren(parent, child1, child3);
+    }
+
+    @Test
+    void removeChildMiddleIndex() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        parent.appendChild(child1, child2, child3);
+        parent.removeChild(1);
+
+        assertChildren(parent, child1, child3);
+    }
+
+    @Test
+    void removeChildrenMiddle() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        Element child4 = new Element("child4");
+        parent.appendChild(child1, child2, child3, child4);
+        parent.removeChild(child2, child3);
+
+        assertChildren(parent, child1, child4);
+    }
+
+    @Test
+    void removeChildLast() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        parent.appendChild(child1, child2, child3);
+        parent.removeChild(child3);
+
+        assertChildren(parent, child1, child2);
+    }
+
+    @Test
+    void removeChildLastIndex() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        parent.appendChild(child1, child2, child3);
+        parent.removeChild(2);
+
+        assertChildren(parent, child1, child2);
+    }
+
+    @Test
+    void removeChildrenLast() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        Element child4 = new Element("child4");
+        parent.appendChild(child1, child2, child3, child4);
+        parent.removeChild(child3, child4);
+
+        assertChildren(parent, child1, child2);
+    }
+
+    @Test
+    void removeAllChildren() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        Element child4 = new Element("child4");
+        parent.appendChild(child1, child2, child3, child4);
+        parent.removeAllChildren();
+
+        assertChildren(parent);
+    }
+
+    @Test
+    void removeAllChildrenEmpty() {
+        Node<?> parent = createParentNode();
+        parent.removeAllChildren();
+
+        assertChildren(parent);
+    }
+
+    @Test
+    void testGetChildren() {
+        Node<?> parent = createParentNode();
+
+        Element child1 = ElementFactory.createDiv();
+        Element child2 = ElementFactory.createDiv();
+        Element child3 = ElementFactory.createDiv();
+
+        parent.appendChild(child1, child2, child3);
+
+        List<Element> children = parent.getChildren()
+                .collect(Collectors.toList());
+        assertEquals(Arrays.asList(child1, child2, child3), children);
+    }
+
+    @Test
+    void testGetChildren_empty() {
+        Node<?> parent = createParentNode();
+
+        assertEquals(0, parent.getChildren().count());
+    }
+
+    @Test
+    void removeNonChild() {
+        Node<?> parent = createParentNode();
+        Element otherElement = new Element("other");
+        assertThrows(IllegalArgumentException.class,
+                () -> parent.removeChild(otherElement));
+    }
+
+    @Test
+    void getChild() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        Element child3 = new Element("child3");
+        Element child4 = new Element("child4");
+        parent.appendChild(child1, child2, child3, child4);
+        assertEquals(child1, parent.getChild(0));
+        assertEquals(child2, parent.getChild(1));
+        assertEquals(child3, parent.getChild(2));
+        assertEquals(child4, parent.getChild(3));
+    }
+
+    @Test
+    void getNegativeChild() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        parent.appendChild(child1, child2);
+        assertThrows(IllegalArgumentException.class, () -> parent.getChild(-1));
+    }
+
+    @Test
+    void getAfterLastChild() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        parent.appendChild(child1, child2);
+        assertThrows(IllegalArgumentException.class, () -> parent.getChild(2));
+    }
+
+    @Test
+    void appendChild() {
+        Node<?> parent = createParentNode();
+        Element child = new Element("child");
+        parent.appendChild(child);
+
+        assertChildren(parent, child);
+    }
+
+    @Test
+    void appendNullChild() {
+        Node<?> parent = createParentNode();
+        assertThrows(IllegalArgumentException.class,
+                () -> parent.appendChild((Element[]) null));
+    }
+
+    @Test
+    void replaceNullChild() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        parent.appendChild(child1);
+        assertThrows(IllegalArgumentException.class,
+                () -> parent.setChild(0, null));
+    }
+
+    @Test
+    void removeNullChild() {
+        Node<?> parent = createParentNode();
+        assertThrows(IllegalArgumentException.class,
+                () -> parent.removeChild((Element[]) null));
+    }
+
+    @Test
+    void replaceBeforeFirstChild() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        parent.appendChild(child1);
+        assertThrows(IllegalArgumentException.class,
+                () -> parent.setChild(-1, child2));
+    }
+
+    @Test
+    void setForEmptyParent() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        parent.setChild(0, child1);
+        assertChildren(parent, child1);
+    }
+
+    @Test
+    void replaceAfterLastChild() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        parent.appendChild(child1);
+        parent.setChild(1, child2);
+        assertChildren(parent, child1, child2);
+    }
+
+    @Test
+    void replaceAfterAfterLastChild() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        parent.appendChild(child1);
+        assertThrows(IllegalArgumentException.class,
+                () -> parent.setChild(2, child2));
+    }
+
+    @Test
+    void replaceChildWithItself() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        parent.appendChild(child1);
+
+        parent.getNode().clearChanges();
+
+        parent.setChild(0, child1);
+
+        AtomicInteger changesCausedBySetChild = new AtomicInteger(0);
+        parent.getNode().getFeature(ElementChildrenList.class)
+                .collectChanges(change -> {
+                    changesCausedBySetChild.incrementAndGet();
+                });
+        assertEquals(0, changesCausedBySetChild.get());
+    }
+
+    @Test
+    void removeChildBeforeFirst() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        parent.appendChild(child1);
+        assertThrows(IllegalArgumentException.class,
+                () -> parent.removeChild(-1));
+    }
+
+    @Test
+    void removeChildAfterLast() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        parent.appendChild(child1);
+        assertThrows(IllegalArgumentException.class,
+                () -> parent.removeChild(1));
+    }
+
+    @Test
+    void appendAttachedChild() {
+        Node<?> parent = createParentNode();
+        Element child = ElementFactory.createDiv();
+        parent.appendChild(child);
+
+        Element target = ElementFactory.createDiv();
+
+        target.appendChild(child);
+
+        assertEquals(child.getParent(), target);
+
+        checkIsNotChild(parent, child);
+    }
+
+    @Test
+    void indexOfChild_firstChild() {
+        Node<?> parent = createParentNode();
+        Element child = ElementFactory.createDiv();
+        parent.appendChild(child);
+
+        assertEquals(0, parent.indexOfChild(child));
+    }
+
+    @Test
+    void indexOfChild_childInTheMiddle() {
+        Node<?> parent = createParentNode();
+        Element child1 = ElementFactory.createDiv();
+        Element child2 = ElementFactory.createAnchor();
+        Element child3 = ElementFactory.createButton();
+        parent.appendChild(child1, child2, child3);
+
+        assertEquals(1, parent.indexOfChild(child2));
+    }
+
+    @Test
+    void indexOfChild_notAChild() {
+        Node<?> parent = createParentNode();
+        Element child = ElementFactory.createDiv();
+
+        assertEquals(-1, parent.indexOfChild(child));
+    }
+
+    @Test
+    void appendFirstChildToOwnParent() {
+        Node<?> parent = createParentNode();
+        Element child1 = ElementFactory.createDiv();
+        Element child2 = ElementFactory.createDiv();
+        parent.appendChild(child1, child2);
+
+        parent.appendChild(child1);
+        assertChildren(parent, child2, child1);
+    }
+
+    @Test
+    void appendLastChildToOwnParent() {
+        Node<?> parent = createParentNode();
+        Element child1 = ElementFactory.createDiv();
+        Element child2 = ElementFactory.createDiv();
+        parent.appendChild(child1, child2);
+
+        parent.appendChild(child2);
+        assertChildren(parent, child1, child2);
+    }
+
+    @Test
+    void appendManyChildrenToOwnParent() {
+        Node<?> parent = createParentNode();
+        Element child1 = ElementFactory.createDiv();
+        Element child2 = ElementFactory.createDiv();
+        parent.appendChild(child1, child2);
+
+        parent.appendChild(child2, child1);
+        // Order should be changed
+        assertChildren(parent, child2, child1);
+    }
+
+    @Test
+    void appendExistingAndNewChildren() {
+        Node<?> parent = createParentNode();
+        Element child1 = ElementFactory.createDiv();
+        Element child2 = ElementFactory.createDiv();
+        parent.appendChild(child1);
+
+        parent.appendChild(child2, child1);
+
+        assertChildren(parent, child2, child1);
+    }
+
+    @Test
+    void insertAttachedChild() {
+        Node<?> parent = createParentNode();
+        Element child = ElementFactory.createDiv();
+        parent.appendChild(child);
+
+        Element target = ElementFactory.createDiv();
+        target.appendChild(ElementFactory.createAnchor());
+
+        target.insertChild(0, child);
+
+        assertEquals(child.getParent(), target);
+
+        checkIsNotChild(parent, child);
+    }
+
+    @Test
+    void setAttachedChild() {
+        Node<?> parent = createParentNode();
+        Element child = ElementFactory.createDiv();
+        parent.appendChild(child);
+
+        Element target = ElementFactory.createDiv();
+        target.appendChild(ElementFactory.createAnchor());
+
+        target.setChild(0, child);
+
+        assertEquals(child.getParent(), target);
+
+        checkIsNotChild(parent, child);
+    }
+
+    @Test
+    void removeFromParent() {
+        Node<?> parent = createParentNode();
+        Element otherElement = new Element("other");
+        parent.appendChild(otherElement);
+        assertEquals(parent, otherElement.getParentNode());
+        otherElement.removeFromParent();
+        assertNull(otherElement.getParentNode());
+    }
+
+    @Test
+    void replaceFirstChild() {
+        Node<?> parent = createParentNode();
+        Element child1 = new Element("child1");
+        Element child2 = new Element("child2");
+        parent.appendChild(child1);
+        parent.setChild(0, child2);
+        assertNull(child1.getParentNode());
+        assertEquals(parent, child2.getParentNode());
+    }
+
+    protected void checkIsNotChild(Node<?> parent, Element child) {
+        assertNotEquals(child.getParentNode(), parent);
+        assertFalse(parent.getChildren().anyMatch(el -> el.equals(child)));
+    }
+
+    @SuppressWarnings("unchecked")
+    protected void assertMethodsReturnType(Class<? extends Node<?>> clazz,
+            Set<String> ignore) {
+        for (Method method : clazz.getMethods()) {
+            if (method.getDeclaringClass().equals(Object.class)) {
+                continue;
+            }
+            if (!Modifier.isPublic(method.getModifiers())) {
+                continue;
+            }
+            if (Modifier.isStatic(method.getModifiers())) {
+                continue;
+            }
+            if (method.isBridge()) {
+                continue;
+            }
+            if (method.getName().startsWith("get")
+                    || method.getName().startsWith("has")
+                    || method.getName().startsWith("is")
+                    || ignore.contains(method.getName())) {
+                // Ignore
+            } else {
+                // Setters and such
+                Type returnType = method.getGenericReturnType();
+                if (returnType instanceof TypeVariable<?> variable
+                        && variable.getGenericDeclaration() instanceof Class) {
+                    returnType = ReflectTools.getTypeParameter(clazz,
+                            (TypeVariable<? extends Class<?>>) variable);
+                }
+                assertEquals(clazz, returnType, "Method " + method.getName()
+                        + " has invalid return type");
+            }
+        }
+    }
+
+    @SuppressWarnings("rawtypes")
+    protected abstract Node createParentNode();
+}

@@ -1,0 +1,273 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.startup;
+
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.ServletException;
+
+import java.lang.reflect.Type;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import tools.jackson.databind.JsonNode;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.template.internal.DeprecatedPolymerPublishedEventHandler;
+import com.vaadin.flow.di.Lookup;
+import com.vaadin.flow.di.LookupInitializer;
+import com.vaadin.flow.di.ResourceProvider;
+import com.vaadin.flow.function.VaadinApplicationInitializationBootstrap;
+import com.vaadin.flow.router.RoutePathProvider;
+import com.vaadin.flow.server.VaadinContext;
+import com.vaadin.flow.server.startup.testdata.TestResourceProvider;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class LookupServletContainerInitializerTest {
+
+    private LookupServletContainerInitializer initializer = new LookupServletContainerInitializer();
+
+    public static class TestPolymerPublishedEventHandler
+            implements DeprecatedPolymerPublishedEventHandler {
+
+        @Override
+        public boolean isTemplateModelValue(Component instance,
+                JsonNode argValue, Class<?> convertedType) {
+            return false;
+        }
+
+        @Override
+        public Object getTemplateItem(Component template, JsonNode argValue,
+                Type convertedType) {
+            return null;
+        }
+
+    }
+
+    public static class TestApplicationConfigurationFactory
+            implements ApplicationConfigurationFactory {
+        @Override
+        public ApplicationConfiguration create(VaadinContext context) {
+            return null;
+        }
+    }
+
+    public static class TestRoutePathProvider implements RoutePathProvider {
+
+        @Override
+        public String getRoutePath(Class<?> navigationTarget) {
+            return null;
+        }
+
+    }
+
+    private static class TestLookup implements Lookup {
+
+        private Map<Class<?>, Collection<Class<?>>> services;
+
+        @Override
+        public <T> T lookup(Class<T> serviceClass) {
+            return null;
+        }
+
+        @Override
+        public <T> Collection<T> lookupAll(Class<T> serviceClass) {
+            return null;
+        }
+
+    }
+
+    public static class TestLookupInitializer extends LookupInitializer {
+
+        @Override
+        public void initialize(VaadinContext context,
+                Map<Class<?>, Collection<Class<?>>> services,
+                VaadinApplicationInitializationBootstrap bootstrap)
+                throws ServletException {
+            TestLookup lookup = new TestLookup();
+            lookup.services = services;
+            bootstrap.bootstrap(lookup);
+        }
+    }
+
+    @Test
+    void processLookupServletContainerInitializer_resourceProviderIsProvidedAsScannedClass_lookupReturnsTheProviderInstance()
+            throws ServletException {
+        Lookup lookup = mockLookup(TestResourceProvider.class);
+
+        ResourceProvider provider = lookup.lookup(ResourceProvider.class);
+        assertNotNull(provider);
+        assertEquals(TestResourceProvider.class, provider.getClass());
+
+        Collection<ResourceProvider> allProviders = lookup
+                .lookupAll(ResourceProvider.class);
+        assertEquals(1, allProviders.size());
+
+        assertEquals(TestResourceProvider.class,
+                allProviders.iterator().next().getClass());
+    }
+
+    @Test
+    void processLookupServletContainerInitializer_polymerPublishedEventHandlerIsProvidedAsScannedClass_lookupReturnsTheProviderInstance()
+            throws ServletException {
+        Lookup lookup = mockLookup(TestPolymerPublishedEventHandler.class);
+
+        DeprecatedPolymerPublishedEventHandler handler = lookup
+                .lookup(DeprecatedPolymerPublishedEventHandler.class);
+        assertNotNull(handler);
+        assertEquals(TestPolymerPublishedEventHandler.class,
+                handler.getClass());
+
+        Collection<DeprecatedPolymerPublishedEventHandler> allHandlers = lookup
+                .lookupAll(DeprecatedPolymerPublishedEventHandler.class);
+        assertEquals(1, allHandlers.size());
+
+        assertEquals(TestPolymerPublishedEventHandler.class,
+                allHandlers.iterator().next().getClass());
+    }
+
+    @Test
+    void processLookupServletContainerInitializer_routePathProviderIsProvidedAsScannedClass_lookupReturnsTheProviderInstance()
+            throws ServletException {
+        Lookup lookup = mockLookup(TestRoutePathProvider.class);
+
+        RoutePathProvider handler = lookup.lookup(RoutePathProvider.class);
+        assertNotNull(handler);
+        assertEquals(TestRoutePathProvider.class, handler.getClass());
+
+        Collection<RoutePathProvider> allHandlers = lookup
+                .lookupAll(RoutePathProvider.class);
+        assertEquals(1, allHandlers.size());
+
+        assertEquals(TestRoutePathProvider.class,
+                allHandlers.iterator().next().getClass());
+    }
+
+    @Test
+    void processLookupServletContainerInitializer_contextHasDeferredInitializers_runInitializersAndClearAttribute()
+            throws ServletException {
+        ServletContext context = mock(ServletContext.class);
+        DeferredServletContextInitializers deferredInitializers = mock(
+                DeferredServletContextInitializers.class);
+        when(context.getAttribute(
+                DeferredServletContextInitializers.class.getName()))
+                .thenReturn(deferredInitializers);
+        mockLookup(context);
+
+        verify(deferredInitializers).runInitializers(context);
+        verify(context).removeAttribute(
+                DeferredServletContextInitializers.class.getName());
+    }
+
+    @Test
+    void processApplicationConfigurationFactory_factoryIsProvided_providedFactoryIsCreated()
+            throws ServletException {
+        Lookup lookup = mockLookup(DefaultApplicationConfigurationFactory.class,
+                TestApplicationConfigurationFactory.class);
+
+        ApplicationConfigurationFactory config = lookup
+                .lookup(ApplicationConfigurationFactory.class);
+        assertNotNull(config);
+        assertTrue(config instanceof TestApplicationConfigurationFactory);
+    }
+
+    @Test
+    void process_customLookupInitializerIsProvided_servicesHasCustomImpls_customInitializerIsCalledWithProvidedImpls()
+            throws ServletException {
+        Lookup lookup = mockLookup(TestPolymerPublishedEventHandler.class,
+                TestResourceProvider.class,
+                TestApplicationConfigurationFactory.class,
+                TestLookupInitializer.class);
+        assertTrue(lookup instanceof TestLookup);
+
+        TestLookup customLookup = (TestLookup) lookup;
+        Map<Class<?>, Collection<Class<?>>> services = customLookup.services;
+        assertFalse(services.containsKey(LookupInitializer.class));
+        assertEquals(TestPolymerPublishedEventHandler.class,
+                services.get(DeprecatedPolymerPublishedEventHandler.class)
+                        .iterator().next());
+        assertEquals(TestResourceProvider.class,
+                services.get(ResourceProvider.class).iterator().next());
+        assertEquals(TestApplicationConfigurationFactory.class, services
+                .get(ApplicationConfigurationFactory.class).iterator().next());
+    }
+
+    @Test
+    void getServiceTypes_getServiceTypesIsInvoked_initializerIsInvokdedWithProvidedServices()
+            throws ServletException {
+        initializer = new LookupServletContainerInitializer() {
+            @Override
+            protected Collection<Class<?>> getServiceTypes() {
+                return Arrays.asList(List.class);
+            }
+        };
+
+        Lookup lookup = mockLookup(TestLookupInitializer.class,
+                ArrayList.class);
+
+        assertTrue(lookup instanceof TestLookup);
+
+        TestLookup customLookup = (TestLookup) lookup;
+        Map<Class<?>, Collection<Class<?>>> services = customLookup.services;
+        assertFalse(services.containsKey(LookupInitializer.class));
+        assertTrue(services.containsKey(List.class));
+
+        Collection<Class<?>> collection = services.get(List.class);
+        assertEquals(1, collection.size());
+        assertEquals(ArrayList.class, collection.iterator().next());
+    }
+
+    @Test
+    void process_classSetIsNull_throws() throws ServletException {
+        assertThrows(ServletException.class, () -> {
+            initializer.process(null, mock(ServletContext.class));
+        });
+    }
+
+    private Lookup mockLookup(ServletContext context, Class<?>... classes)
+            throws ServletException {
+        ArgumentCaptor<Lookup> lookupCapture = ArgumentCaptor
+                .forClass(Lookup.class);
+
+        Stream<Class<? extends Object>> stream = Stream
+                .concat(Stream.of(LookupInitializer.class), Stream.of(classes));
+        initializer.process(stream.collect(Collectors.toSet()), context);
+
+        verify(context).setAttribute(eq(Lookup.class.getName()),
+                lookupCapture.capture());
+
+        return lookupCapture.getValue();
+    }
+
+    private Lookup mockLookup(Class<?>... classes) throws ServletException {
+        return mockLookup(mock(ServletContext.class), classes);
+    }
+}

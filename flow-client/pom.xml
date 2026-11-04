@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.vaadin</groupId>
+    <artifactId>flow-project</artifactId>
+    <version>25.4-SNAPSHOT</version>
+  </parent>
+  <artifactId>flow-client</artifactId>
+  <packaging>jar</packaging>
+  <name>Flow Client</name>
+  <description>${project.name}</description>
+
+  <properties>
+    <jandex.skip>true</jandex.skip>
+    <skipTsTests>${skipTests}</skipTsTests>
+    <!-- The module has no Java sources, so there is no API to compare. -->
+    <flow.apicmp.skip>true</flow.apicmp.skip>
+  </properties>
+
+  <build>
+    <resources>
+      <!-- The hand written client sources next to the TypeScript ones. tsc
+           only emits what it compiles, so these are copied as they are. -->
+      <resource>
+        <targetPath>META-INF/frontend</targetPath>
+        <directory>src/main/frontend</directory>
+        <includes>
+          <include>*.js</include>
+          <include>*.d.ts</include>
+        </includes>
+      </resource>
+    </resources>
+
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <!-- The module builds no classes: the JAR only ships the compiled
+               TypeScript under META-INF/frontend plus the OSGi manifest -->
+          <includes>
+            <include>META-INF/**</include>
+          </includes>
+          <archive>
+            <manifestFile>${project.build.outputDirectory}/META-INF/MANIFEST.MF</manifestFile>
+            <index>false</index>
+            <manifest>
+              <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+            </manifest>
+          </archive>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>npm-install</id>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <phase>validate</phase>
+            <configuration>
+              <executable>npm</executable>
+              <arguments>
+                <argument>install</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>install-esbuild</id>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <phase>validate</phase>
+            <configuration>
+              <executable>node</executable>
+              <arguments>
+                <argument>node_modules/esbuild/install.js</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>typescript-compile</id>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <phase>compile</phase>
+            <configuration>
+              <executable>npm</executable>
+              <arguments>
+                <argument>run</argument>
+                <argument>compile</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>run-tests</id>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <phase>test</phase>
+            <configuration>
+              <executable>npm</executable>
+              <arguments>
+                <argument>test</argument>
+              </arguments>
+              <skip>${skipTsTests}</skip>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+  <profiles>
+    <profile>
+      <id>slow-tests</id>
+      <properties>
+        <!-- There are no slow tests in this module, so skip the TypeScript ones -->
+        <skipTsTests>true</skipTsTests>
+      </properties>
+    </profile>
+  </profiles>
+</project>

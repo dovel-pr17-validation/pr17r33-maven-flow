@@ -1,0 +1,111 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.streams;
+
+import java.io.IOException;
+import java.io.Serializable;
+
+import com.vaadin.flow.dom.DisabledUpdateMode;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.flow.server.VaadinResponse;
+import com.vaadin.flow.server.VaadinSession;
+
+/**
+ * Request handler callback for handing client-server or server-client data
+ * transfer scoped to a specific (owner) element.
+ * 
+ * @since 24.8
+ */
+@FunctionalInterface
+public interface ElementRequestHandler extends Serializable {
+
+    /**
+     * Request handler callback for handing client-server or server-client data
+     * transfer scoped to a specific (owner) element.
+     *
+     * Note: when handling requests via this API, you need to take care of
+     * typical stream handling issues, e.g. exceptions yourself. However, you do
+     * not need to close the stream yourself, Flow will handle that for you when
+     * needed.
+     * <p>
+     * Note: the owner element's attached, visible, enabled and inert state is
+     * checked before this method is called, but not while it is running. A
+     * request that has already been passed to this method is therefore served
+     * to the end even if the owner element is detached, hidden or disabled in
+     * the meantime.
+     * <p>
+     * Note: the request is terminated if the session is invalidated while it is
+     * being served. The streams of the given request and response then refuse
+     * to transfer any more bytes and throw an {@link IOException} instead, so a
+     * handler that reads or writes through some other means should stop on its
+     * own account when the session is no longer valid.
+     *
+     * @param request
+     *            VaadinRequest request to handle
+     * @param response
+     *            VaadinResponse response to handle
+     * @param session
+     *            VaadinSession current VaadinSession
+     * @param owner
+     *            Element owner element
+     * @throws IOException
+     *             if an IO error occurred during data transfer
+     */
+    void handleRequest(VaadinRequest request, VaadinResponse response,
+            VaadinSession session, Element owner) throws IOException;
+
+    /**
+     * Optional URL postfix allows appending an application-controlled string,
+     * e.g. the logical name of the target file, to the end of the otherwise
+     * random-looking download URL. If defined, requests that would otherwise be
+     * routable are still rejected if the postfix is missing or invalid. Postfix
+     * changes the last segment in the resource url.
+     *
+     * @return String optional URL postfix, or {@code null} for "".
+     */
+    default String getUrlPostfix() {
+        return null;
+    }
+
+    /**
+     * Whether to invoke this request handler even if the owning element is
+     * currently inert.
+     * <p>
+     * This is checked for every request when it is received, so the result can
+     * depend on the current state. For example, an upload component can allow
+     * the remaining files of an upload that started before a modal component
+     * made it inert, while still rejecting an upload that starts while it is
+     * inert.
+     *
+     * @return {@code true} to invoke for inert elements, {@code false}
+     *         otherwise. Defaults to {@code false}.
+     */
+    default boolean isAllowInert() {
+        return false;
+    }
+
+    /**
+     * Controls whether request handler is invoked when the owner element is
+     * disabled.
+     *
+     * @return the currently set DisabledUpdateMode for this request handler.
+     *         Defaults to {@literal ONLY_WHEN_ENABLED}.
+     */
+    default DisabledUpdateMode getDisabledUpdateMode() {
+        return DisabledUpdateMode.ONLY_WHEN_ENABLED;
+    }
+}

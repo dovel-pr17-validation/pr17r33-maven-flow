@@ -1,0 +1,164 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.data.provider.hierarchy;
+
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+
+import com.vaadin.flow.data.provider.Query;
+import com.vaadin.flow.data.provider.QuerySortOrder;
+
+/**
+ * Immutable hierarchical query object used to request data from a backend.
+ * Contains the parent node, index limits, sorting and filtering information.
+ *
+ * @param <T>
+ *            bean type
+ * @param <F>
+ *            filter type
+ * @since 1.1
+ */
+public class HierarchicalQuery<T, F> extends Query<T, F> {
+
+    private final T parent;
+
+    private final Set<Object> expandedItemIds;
+
+    /**
+     * Constructs a new hierarchical query object with given filter and parent
+     * node.
+     *
+     * @param filter
+     *            filtering for fetching; can be <code>null</code>
+     * @param parent
+     *            the hierarchical parent object, <code>null</code>
+     *            corresponding to the root node
+     */
+    public HierarchicalQuery(F filter, T parent) {
+        super(filter);
+        this.expandedItemIds = Collections.emptySet();
+        this.parent = parent;
+    }
+
+    /**
+     * Constructs a new hierarchical query object with given filter, expanded
+     * items and parent node.
+     *
+     * @param filter
+     *            filtering for fetching; can be <code>null</code>
+     * @param expandedItemIds
+     *            the set of expanded item IDs
+     * @param parent
+     *            the hierarchical parent object, <code>null</code>
+     *            corresponding to the root node
+     * @since 25.0
+     */
+    public HierarchicalQuery(F filter, Set<Object> expandedItemIds, T parent) {
+        super(filter);
+        this.expandedItemIds = expandedItemIds;
+        this.parent = parent;
+    }
+
+    /**
+     * Constructs a new hierarchical query object with given offset, limit,
+     * sorting and filtering.
+     *
+     * @param offset
+     *            first index to fetch
+     * @param limit
+     *            fetched item count
+     * @param sortOrders
+     *            sorting order for fetching; used for sorting backends; can be
+     *            <code>null</code>, which is treated as an empty list
+     * @param inMemorySorting
+     *            comparator for sorting in-memory data
+     * @param filter
+     *            filtering for fetching; can be <code>null</code>
+     * @param parent
+     *            the hierarchical parent object, <code>null</code>
+     *            corresponding to the root node
+     */
+    public HierarchicalQuery(int offset, int limit,
+            List<QuerySortOrder> sortOrders, Comparator<T> inMemorySorting,
+            F filter, T parent) {
+        super(offset, limit, sortOrders, inMemorySorting, filter);
+        this.expandedItemIds = Collections.emptySet();
+        this.parent = parent;
+    }
+
+    /**
+     * Constructs a new hierarchical query object with given offset, limit,
+     * sorting, filtering and expanded items.
+     *
+     * @param offset
+     *            first index to fetch
+     * @param limit
+     *            fetched item count
+     * @param sortOrders
+     *            sorting order for fetching; used for sorting backends; can be
+     *            <code>null</code>, which is treated as an empty list
+     * @param inMemorySorting
+     *            comparator for sorting in-memory data
+     * @param filter
+     *            filtering for fetching; can be <code>null</code>
+     * @param expandedItemIds
+     *            the set of expanded item IDs
+     * @param parent
+     *            the hierarchical parent object, <code>null</code>
+     *            corresponding to the root node
+     * @since 25.0
+     */
+    public HierarchicalQuery(int offset, int limit,
+            List<QuerySortOrder> sortOrders, Comparator<T> inMemorySorting,
+            F filter, Set<Object> expandedItemIds, T parent) {
+        super(offset, limit, sortOrders, inMemorySorting, filter);
+        this.expandedItemIds = expandedItemIds;
+        this.parent = parent;
+    }
+
+    /**
+     * Get the hierarchical parent object, where <code>null</code> corresponds
+     * to the root node.
+     *
+     * @return the hierarchical parent object
+     */
+    public T getParent() {
+        return parent;
+    }
+
+    /**
+     * Get an Optional of the hierarchical parent object.
+     *
+     * @see #getParent()
+     * @return the result of {@link #getParent()} wrapped by an Optional
+     */
+    public Optional<T> getParentOptional() {
+        return Optional.ofNullable(parent);
+    }
+
+    /**
+     * Gets the set of item IDs that are currently expanded in the hierarchy.
+     *
+     * @return the set of expanded item IDs
+     * @since 25.0
+     */
+    public Set<Object> getExpandedItemIds() {
+        return expandedItemIds;
+    }
+}

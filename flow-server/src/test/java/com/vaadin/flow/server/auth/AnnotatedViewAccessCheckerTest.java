@@ -1,0 +1,844 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.auth;
+
+import java.security.Principal;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.internal.CurrentInstance;
+import com.vaadin.flow.router.BeforeEnterEvent;
+import com.vaadin.flow.router.ErrorNavigationEvent;
+import com.vaadin.flow.router.HasErrorParameter;
+import com.vaadin.flow.router.Location;
+import com.vaadin.flow.router.NavigationEvent;
+import com.vaadin.flow.router.NavigationTrigger;
+import com.vaadin.flow.router.Route;
+import com.vaadin.flow.router.RouteData;
+import com.vaadin.flow.router.RouteNotFoundError;
+import com.vaadin.flow.router.RouteParameters;
+import com.vaadin.flow.router.Router;
+import com.vaadin.flow.router.RouterLayout;
+import com.vaadin.flow.router.internal.NavigationRouteTarget;
+import com.vaadin.flow.router.internal.RouteUtil;
+import com.vaadin.flow.server.MockVaadinContext;
+import com.vaadin.flow.server.RouteRegistry;
+import com.vaadin.flow.server.VaadinContext;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.AnonymousAllowedView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.DenyAllView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.NoAnnotationAnonymousAllowedByGrandParentView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.NoAnnotationAnonymousAllowedByParentView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.NoAnnotationDenyAllAsInterfacesIgnoredView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.NoAnnotationDenyAllByGrandParentView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.NoAnnotationPermitAllByGrandParentAsInterfacesIgnoredView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.NoAnnotationPermitAllByGrandParentView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.NoAnnotationRolesAllowedAdminByGrandParentView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.NoAnnotationRolesAllowedUserByGrandParentView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.NoAnnotationView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.PermitAllView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.RolesAllowedAdminView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.RolesAllowedUserView;
+import com.vaadin.flow.server.auth.NavigationContext.Phase;
+import com.vaadin.flow.server.startup.ApplicationConfiguration;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class AnnotatedViewAccessCheckerTest {
+
+    enum User {
+        USER_NO_ROLES, NORMAL_USER, ADMIN
+    }
+
+    private final AnnotatedViewAccessChecker viewAccessChecker = new AnnotatedViewAccessChecker();
+
+    @Test
+    void anonymousAccessToAnonymousViewAllowed() {
+        AccessCheckResult result = checkAccess(AnonymousAllowedView.class,
+                null);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void anonymousAccessToNoAnnotationViewDenied() {
+        AccessCheckResult result = checkAccess(NoAnnotationView.class, null);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void anonymousAccessToPermitAllViewDenied() {
+        AccessCheckResult result = checkAccess(PermitAllView.class, null);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void anonymousAccessToDenyAllViewDenied() {
+        AccessCheckResult result = checkAccess(DenyAllView.class, null);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void anonymousAccessToRolesAllowedUserViewDenied() {
+        AccessCheckResult result = checkAccess(RolesAllowedUserView.class,
+                null);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void anonymousAccessToRolesAllowedAdminViewDenied() {
+        AccessCheckResult result = checkAccess(RolesAllowedAdminView.class,
+                null);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInNoRolesAccessToAnonymousViewAllowed() {
+        AccessCheckResult result = checkAccess(AnonymousAllowedView.class,
+                User.USER_NO_ROLES);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInNoRolesAccessToNoAnnotationViewDenied() {
+        AccessCheckResult result = checkAccess(NoAnnotationView.class,
+                User.USER_NO_ROLES);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInNoRolesAccessToPermitAllViewAllowed() {
+        AccessCheckResult result = checkAccess(PermitAllView.class,
+                User.USER_NO_ROLES);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInNoRolesAccessToPermitAllViewWithNonAnnotatedParentDenied() {
+        NavigationContext context = setupNavigationContext(
+                AccessControlTestClasses.PermitAllWithEmptyParentView.class,
+                User.USER_NO_ROLES,
+                List.of(AccessControlTestClasses.NoPermitParent.class));
+
+        AccessCheckResult result = this.viewAccessChecker.check(context);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void aliasLayoutDiffersFromPrimaryRouteLayout_aliasLayoutChecked_denied() {
+        NavigationContext context = setupNavigationContext(PermitAllView.class,
+                User.NORMAL_USER,
+                List.of(AccessControlTestClasses.RolesAllowedLayout.class));
+        RouteData primaryRoute = new RouteData(
+                List.of(AccessControlTestClasses.PermitAllLayout.class),
+                "permitall", Collections.emptyMap(), PermitAllView.class,
+                Collections.emptyList());
+        when(context.getRouter().getRegistry().getRegisteredRoutes())
+                .thenReturn(List.of(primaryRoute));
+
+        AccessCheckResult result = this.viewAccessChecker.check(context);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void automaticLayoutAccessible_parentLayoutNotAccessible_denied() {
+        NavigationContext context = setupLayoutDenialContext(
+                PermitAllView.class, User.USER_NO_ROLES,
+                AccessControlTestClasses.PermitAllLayoutInNoPermitParent.class,
+                Phase.NAVIGATION, false);
+
+        AccessCheckResult result = this.viewAccessChecker.check(context);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+        assertTrue(result.reason().contains("NoPermitParent"),
+                "Reason should name the parent layout, got: "
+                        + result.reason());
+    }
+
+    @Test
+    void loggedInNoRolesAccessToDenyAllViewDenied() {
+        AccessCheckResult result = checkAccess(DenyAllView.class,
+                User.USER_NO_ROLES);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInNoRolesAccessToRolesAllowedUserViewDenied() {
+        AccessCheckResult result = checkAccess(RolesAllowedUserView.class,
+                User.USER_NO_ROLES);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInNoRolesAccessToRolesAllowedAdminViewDenied() {
+        AccessCheckResult result = checkAccess(RolesAllowedAdminView.class,
+                User.USER_NO_ROLES);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInUserRoleAccessToAnonymousViewAllowed() {
+        AccessCheckResult result = checkAccess(AnonymousAllowedView.class,
+                User.NORMAL_USER);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInUserRoleAccessToNoAnnotationViewDenied() {
+        AccessCheckResult result = checkAccess(NoAnnotationView.class,
+                User.NORMAL_USER);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInUserRoleAccessToPermitAllViewAllowed() {
+        AccessCheckResult result = checkAccess(PermitAllView.class,
+                User.NORMAL_USER);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInUserRoleAccessToDenyAllViewDenied() {
+        AccessCheckResult result = checkAccess(DenyAllView.class,
+                User.NORMAL_USER);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInUserRoleAccessToRolesAllowedUserViewAllowed() {
+        AccessCheckResult result = checkAccess(RolesAllowedUserView.class,
+                User.NORMAL_USER);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInUserRoleAccessToRolesAllowedAdminViewDenied() {
+        AccessCheckResult result = checkAccess(RolesAllowedAdminView.class,
+                User.NORMAL_USER);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInAdminRoleAccessToAnonymousViewAllowed() {
+        AccessCheckResult result = checkAccess(AnonymousAllowedView.class,
+                User.ADMIN);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInAdminRoleAccessToNoAnnotationViewDenied() {
+        AccessCheckResult result = checkAccess(NoAnnotationView.class,
+                User.ADMIN);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInAdminRoleAccessToPermitAllViewAllowed() {
+        AccessCheckResult result = checkAccess(PermitAllView.class, User.ADMIN);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInAdminRoleAccessToDenyAllViewDenied() {
+        AccessCheckResult result = checkAccess(DenyAllView.class, User.ADMIN);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInAdminRoleAccessToRolesAllowedUserViewDenied() {
+        AccessCheckResult result = checkAccess(RolesAllowedUserView.class,
+                User.ADMIN);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInAdminRoleAccessToRolesAllowedAdminViewAllowed() {
+        AccessCheckResult result = checkAccess(RolesAllowedAdminView.class,
+                User.ADMIN);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void openingNoAnnotationViewShowsReasonAndHint() {
+        AccessCheckResult result = checkAccess(NoAnnotationView.class,
+                User.NORMAL_USER);
+        assertEquals(AccessCheckResult
+                .deny("Consider adding one of the following annotations "
+                        + "to make the view accessible: @AnonymousAllowed, "
+                        + "@PermitAll, @RolesAllowed."),
+                result);
+    }
+
+    @Test
+    void anonymousAccess_to_noAnnotationAnonymousAllowedByParent_allowed() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationAnonymousAllowedByParentView.class, null);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void anonymousAccess_to_noAnnotationAnonymousAllowedByGrandParent_allowed() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationAnonymousAllowedByGrandParentView.class, null);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void anonymousAccess_to_noAnnotationPermitAllByGrandParentView_denied() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationPermitAllByGrandParentView.class, null);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void anonymousAccess_to_noAnnotationDenyAllByGrandParentView_denied() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationDenyAllByGrandParentView.class, null);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void anonymousAccess_to_noAnnotationRolesAllowedUserByGrandParentView_denied() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationRolesAllowedUserByGrandParentView.class, null);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void anonymousAccess_to_noAnnotationRolesAllowedAdminByGrandParentView_denied() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationRolesAllowedAdminByGrandParentView.class, null);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInNoRolesAccess_to_noAnnotationAnonymousAllowedByGrandParentView_allowed() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationAnonymousAllowedByGrandParentView.class,
+                User.USER_NO_ROLES);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInNoRolesAccess_to_noAnnotationPermitAllByGrandParentView_allowed() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationPermitAllByGrandParentView.class,
+                User.USER_NO_ROLES);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInNoRolesAccess_to_noAnnotationDenyAllByGrandParentView_denied() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationDenyAllByGrandParentView.class, User.USER_NO_ROLES);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInNoRolesAccess_to_noAnnotationRolesAllowedUserByGrandParentView_denied() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationRolesAllowedUserByGrandParentView.class,
+                User.USER_NO_ROLES);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInNoRolesAccess_to_noAnnotationRolesAllowedAdminByGrandParentView_denied() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationRolesAllowedAdminByGrandParentView.class,
+                User.USER_NO_ROLES);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInUserRoleAccess_to_noAnnotationAnonymousAllowedByGrandParentView_allowed() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationAnonymousAllowedByGrandParentView.class,
+                User.NORMAL_USER);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInUserRoleAccess_to_noAnnotationPermitAllByGrandParentView_allowed() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationPermitAllByGrandParentView.class, User.NORMAL_USER);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInUserRoleAccess_to_noAnnotationDenyAllByGrandParentView_denied() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationDenyAllByGrandParentView.class, User.NORMAL_USER);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInUserRoleAccess_to_noAnnotationRolesAllowedUserByGrandParentView_allowed() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationRolesAllowedUserByGrandParentView.class,
+                User.NORMAL_USER);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInUserRoleAccess_to_noAnnotationRolesAllowedAdminByGrandParentView_denied() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationRolesAllowedAdminByGrandParentView.class,
+                User.NORMAL_USER);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInAdminRoleAccess_to_noAnnotationAnonymousAllowedByGrandParentView_allowed() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationAnonymousAllowedByGrandParentView.class,
+                User.ADMIN);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInAdminRoleAccess_to_noAnnotationPermitAllByGrandParentView_allowed() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationPermitAllByGrandParentView.class, User.ADMIN);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void loggedInAdminRoleAccess_to_noAnnotationDenyAllByGrandParentView_denied() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationDenyAllByGrandParentView.class, User.ADMIN);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInAdminRoleAccess_to_noAnnotationRolesAllowedUserByGrandParentView_denied() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationRolesAllowedUserByGrandParentView.class,
+                User.ADMIN);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInAdminRoleAccess_To_noAnnotationRolesAllowedAdminByGrandParentView_allowed() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationRolesAllowedAdminByGrandParentView.class,
+                User.ADMIN);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void anyAccess_to_noAnnotationDenyAllAsInterfacesIgnoredView_denied() {
+        assertEquals(AccessCheckDecision.DENY,
+                checkAccess(NoAnnotationDenyAllAsInterfacesIgnoredView.class,
+                        null).decision());
+
+        assertEquals(AccessCheckDecision.DENY,
+                checkAccess(NoAnnotationDenyAllAsInterfacesIgnoredView.class,
+                        User.USER_NO_ROLES).decision());
+
+        assertEquals(AccessCheckDecision.DENY,
+                checkAccess(NoAnnotationDenyAllAsInterfacesIgnoredView.class,
+                        User.NORMAL_USER).decision());
+
+        assertEquals(AccessCheckDecision.DENY,
+                checkAccess(NoAnnotationDenyAllAsInterfacesIgnoredView.class,
+                        User.ADMIN).decision());
+    }
+
+    @Test
+    void anonymousAccess_to_noAnnotationPermitAllByGrandParentAsInterfacesIgnoredView_denied() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationPermitAllByGrandParentAsInterfacesIgnoredView.class,
+                null);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void loggedInNoRolesAccess_to_noAnnotationPermitAllByGrandParentAsInterfacesIgnoredView_allowed() {
+        AccessCheckResult result = checkAccess(
+                NoAnnotationPermitAllByGrandParentAsInterfacesIgnoredView.class,
+                User.USER_NO_ROLES);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void rerouteToError_defaultErrorHandler_allowed() {
+        AccessCheckResult result = checkAccess(RouteNotFoundError.class, null);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void rerouteToError_errorViewLayoutNotAccessible_allowed() {
+        Router router = mock(Router.class);
+        RouteRegistry registry = mock(RouteRegistry.class);
+        when(router.getRegistry()).thenReturn(registry);
+        when(registry.getNavigationRouteTarget("restricted"))
+                .thenReturn(new NavigationRouteTarget("restricted", null,
+                        Collections.emptyMap()));
+        ErrorNavigationEvent errorEvent = new ErrorNavigationEvent(router,
+                new Location("restricted"), mock(UI.class),
+                NavigationTrigger.ROUTER_LINK, null);
+        // The error view has an application layout as its parent layout,
+        // which the user is not allowed to access
+        BeforeEnterEvent event = new BeforeEnterEvent(errorEvent,
+                RouteNotFoundError.class,
+                List.of(AccessControlTestClasses.NoAuthLayout.class));
+        NavigationContext context = new NavigationContext(event, null,
+                role -> false);
+
+        assertEquals(AccessCheckResult.allow(),
+                this.viewAccessChecker.check(context));
+    }
+
+    @Test
+    void rerouteToError_customAnonymousErrorHandler_allowed() {
+        AccessCheckResult result = checkAccess(
+                AccessControlTestClasses.CustomErrorView.class, null);
+        assertEquals(AccessCheckResult.allow(), result);
+    }
+
+    @Test
+    void rerouteToError_customNotAnnotatedErrorHandler_deny() {
+        AccessCheckResult result = checkAccess(
+                AccessControlTestClasses.NotAnnotatedCustomErrorView.class,
+                null);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void routeWithNoAnnotationLayout_deny() {
+        NavigationContext context = setupNavigationContext(
+                AccessControlTestClasses.AnonymousAllowedView.class, null,
+                List.of(AccessControlTestClasses.NoAuthLayout.class));
+        AccessCheckResult result = this.viewAccessChecker.check(context);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    @Test
+    void routeWithNoAnnotationsAllowedLayout_allowed() {
+        NavigationContext context = setupNavigationContext(
+                AccessControlTestClasses.AnonymousAllowedView.class, null,
+                List.of(AccessControlTestClasses.AnonymousAllowedLayout.class));
+        AccessCheckResult result = this.viewAccessChecker.check(context);
+        assertEquals(AccessCheckDecision.ALLOW, result.decision());
+    }
+
+    @Test
+    void routeWithNoAnnotationsAllowed_LayoutWithAllowed_denied() {
+        NavigationContext context = setupNavigationContext(
+                AccessControlTestClasses.NoAnnotationView.class, null,
+                List.of(AccessControlTestClasses.AnonymousAllowedLayout.class));
+        AccessCheckResult result = this.viewAccessChecker.check(context);
+        assertEquals(AccessCheckDecision.DENY, result.decision());
+    }
+
+    private AccessCheckResult checkAccess(Class<? extends Component> viewClass,
+            User user) {
+        NavigationContext context = setupNavigationContext(viewClass, user);
+        return this.viewAccessChecker.check(context);
+    }
+
+    static NavigationContext setupNavigationContext(
+            Class<? extends Component> navigationTarget, User user) {
+        return setupNavigationContext(navigationTarget, user, List.of());
+    }
+
+    static NavigationContext setupNavigationContext(
+            Class<? extends Component> navigationTarget, User user,
+            List<Class<? extends RouterLayout>> layouts) {
+        CurrentInstance.clearAll();
+
+        Principal principal;
+        Set<String> roles = new HashSet<>();
+
+        if (user == User.USER_NO_ROLES) {
+            principal = AccessAnnotationCheckerTest.USER_PRINCIPAL;
+        } else if (user == User.NORMAL_USER) {
+            principal = AccessAnnotationCheckerTest.USER_PRINCIPAL;
+            roles.add("user");
+        } else if (user == User.ADMIN) {
+            principal = AccessAnnotationCheckerTest.USER_PRINCIPAL;
+            roles.add("admin");
+        } else {
+            principal = null;
+        }
+
+        Router router = mock(Router.class);
+        UI ui = mock(UI.class);
+        Location location = new Location(getRoute(navigationTarget));
+        NavigationEvent navigationEvent = new NavigationEvent(router, location,
+                ui, NavigationTrigger.ROUTER_LINK);
+        BeforeEnterEvent event = new BeforeEnterEvent(navigationEvent,
+                navigationTarget, layouts);
+
+        RouteRegistry routeRegistry = mock(RouteRegistry.class);
+        when(router.getRegistry()).thenReturn(routeRegistry);
+        return new NavigationContext(event, principal, roles::contains);
+    }
+
+    @Test
+    void layoutDenial_viewBroaderThanLayout_logsWarn() {
+        // AnonymousAllowed view (level 3) + PermitAll layout (level 2)
+        // = misconfiguration → WARN with "configuration error" message
+        String logOutput = LogOutputCapture.capture(() -> {
+            NavigationContext context = setupLayoutDenialContext(
+                    AnonymousAllowedView.class, null,
+                    AccessControlTestClasses.PermitAllLayout.class,
+                    Phase.NAVIGATION, false);
+            viewAccessChecker.check(context);
+        });
+        assertTrue(logOutput.contains("WARN"),
+                "Expected WARN log for misconfiguration, got: " + logOutput);
+        assertTrue(logOutput.contains("configuration error"),
+                "Expected 'configuration error' in log, got: " + logOutput);
+    }
+
+    @Test
+    void layoutDenial_publicRouteCheck_viewBroaderThanLayout_noWarnOrInfo() {
+        // Same misconfiguration as above, but the public route check only
+        // finds out if the route is public → DEBUG, no WARN
+        String logOutput = LogOutputCapture.capture(() -> {
+            NavigationContext context = setupLayoutDenialContext(
+                    AnonymousAllowedView.class, null,
+                    AccessControlTestClasses.PermitAllLayout.class,
+                    Phase.PUBLIC_ROUTE_CHECK, false);
+            AccessCheckResult result = viewAccessChecker.check(context);
+            assertEquals(AccessCheckDecision.DENY, result.decision());
+            assertEquals(
+                    "Denied access to view 'AnonymousAllowedView' due to layout 'PermitAllLayout' access rules.",
+                    result.reason(),
+                    "Public route check reason should not suggest annotations");
+        });
+        assertFalse(logOutput.contains("WARN"),
+                "Public route check should not produce WARN, got: "
+                        + logOutput);
+        assertFalse(logOutput.contains("INFO"),
+                "Public route check should not produce INFO, got: "
+                        + logOutput);
+    }
+
+    @Test
+    void layoutDenial_sameAccessLevel_navigating_devMode_logsInfo() {
+        // PermitAll view + PermitAll layout, navigating=true, devMode=true
+        // anonymous user → layout denies, view not broader → INFO
+        String logOutput = LogOutputCapture.capture(() -> {
+            NavigationContext context = setupLayoutDenialContext(
+                    PermitAllView.class, null,
+                    AccessControlTestClasses.PermitAllLayout.class,
+                    Phase.NAVIGATION, false);
+            viewAccessChecker.check(context);
+        });
+        assertTrue(logOutput.contains("INFO"),
+                "Expected INFO log for dev-mode navigation denial, got: "
+                        + logOutput);
+        assertFalse(
+                logOutput.contains("WARN")
+                        && logOutput.contains("configuration error"),
+                "Should not log WARN when access levels are equal, got: "
+                        + logOutput);
+    }
+
+    @Test
+    void layoutDenial_securityProbe_notNavigating_noWarnOrInfo() {
+        // PermitAll view + PermitAll layout, checked outside of navigation
+        // (e.g. menu access control) → DEBUG (not visible at default INFO
+        // level)
+        String logOutput = LogOutputCapture.capture(() -> {
+            NavigationContext context = setupLayoutDenialContext(
+                    PermitAllView.class, null,
+                    AccessControlTestClasses.PermitAllLayout.class,
+                    Phase.EVALUATION, false);
+            viewAccessChecker.check(context);
+        });
+        assertFalse(logOutput.contains("WARN") && logOutput.contains("layout"),
+                "Security probe should not produce WARN, got: " + logOutput);
+        assertFalse(logOutput.contains("INFO") && logOutput.contains("layout"),
+                "Security probe should not produce INFO about layout, got: "
+                        + logOutput);
+    }
+
+    @Test
+    void layoutDenial_navigating_productionMode_noWarnOrInfo() {
+        // PermitAll view + PermitAll layout, navigating=true, prodMode=true
+        // → DEBUG (not visible at default INFO level)
+        String logOutput = LogOutputCapture.capture(() -> {
+            NavigationContext context = setupLayoutDenialContext(
+                    PermitAllView.class, null,
+                    AccessControlTestClasses.PermitAllLayout.class,
+                    Phase.NAVIGATION, true);
+            viewAccessChecker.check(context);
+        });
+        assertFalse(logOutput.contains("WARN") && logOutput.contains("layout"),
+                "Production mode should not produce WARN, got: " + logOutput);
+        assertFalse(logOutput.contains("INFO") && logOutput.contains("layout"),
+                "Production mode should not produce INFO about layout, got: "
+                        + logOutput);
+    }
+
+    @Test
+    void layoutDenial_parentLayout_viewBroaderThanLayout_logsWarn() {
+        // PermitAll view (level 2) with no-annotation parent layout (level 0)
+        // = misconfiguration → WARN
+        String logOutput = LogOutputCapture.capture(() -> {
+            NavigationContext context = setupParentLayoutDenialContext(
+                    AccessControlTestClasses.PermitAllWithEmptyParentView.class,
+                    null, AccessControlTestClasses.NoPermitParent.class,
+                    Phase.NAVIGATION, false);
+            viewAccessChecker.check(context);
+        });
+        assertTrue(
+
+                logOutput.contains("WARN"),
+                "Expected WARN log for misconfiguration, got: " + logOutput);
+        assertTrue(
+
+                logOutput.contains("configuration error"),
+                "Expected 'configuration error' in log, got: " + logOutput);
+    }
+
+    /**
+     * Sets up a NavigationContext that triggers the autolayout-based layout
+     * denial path for testing log levels.
+     */
+    private NavigationContext setupLayoutDenialContext(
+            Class<? extends Component> viewClass, User user,
+            Class<? extends Component> layoutClass, Phase phase,
+            boolean productionMode) {
+        CurrentInstance.clearAll();
+
+        Principal principal = getPrincipal(user);
+        Set<String> roles = getRoles(user);
+
+        Router router = mock(Router.class);
+        RouteRegistry routeRegistry = mock(RouteRegistry.class);
+        when(router.getRegistry()).thenReturn(routeRegistry);
+
+        VaadinContext vaadinContext = mock(VaadinContext.class);
+        when(routeRegistry.getContext()).thenReturn(vaadinContext);
+
+        ApplicationConfiguration appConfig = mock(
+                ApplicationConfiguration.class);
+        when(appConfig.isProductionMode()).thenReturn(productionMode);
+        when(vaadinContext.getAttribute(eq(ApplicationConfiguration.class),
+                any())).thenReturn(appConfig);
+        when(vaadinContext.getAttribute(ApplicationConfiguration.class))
+                .thenReturn(appConfig);
+
+        when(routeRegistry.getRegisteredRoutes())
+                .thenReturn(Collections.emptyList());
+
+        String route = getRoute(viewClass);
+        when(routeRegistry.getNavigationRouteTarget(route)).thenReturn(
+                new NavigationRouteTarget(route, null, Collections.emptyMap()));
+        when(routeRegistry.hasLayout(route)).thenReturn(true);
+        when(routeRegistry.getLayout(route))
+                .thenAnswer(invocation -> layoutClass);
+
+        Location location = new Location(route);
+        if (phase == Phase.PUBLIC_ROUTE_CHECK) {
+            return NavigationContext.forPublicRouteCheck(router, viewClass,
+                    location, RouteParameters.empty());
+        }
+        return new NavigationContext(router, viewClass, location,
+                RouteParameters.empty(), principal, roles::contains, false,
+                phase);
+    }
+
+    /**
+     * Sets up a NavigationContext that triggers the parent-layout-based denial
+     * path for testing log levels.
+     */
+    @SuppressWarnings("unchecked")
+    private NavigationContext setupParentLayoutDenialContext(
+            Class<? extends Component> viewClass, User user,
+            Class<? extends Component> parentLayoutClass, Phase phase,
+            boolean productionMode) {
+        CurrentInstance.clearAll();
+
+        Principal principal = getPrincipal(user);
+        Set<String> roles = getRoles(user);
+
+        Router router = mock(Router.class);
+        RouteRegistry routeRegistry = mock(RouteRegistry.class);
+        when(router.getRegistry()).thenReturn(routeRegistry);
+
+        VaadinContext vaadinContext = mock(VaadinContext.class);
+        when(routeRegistry.getContext()).thenReturn(vaadinContext);
+
+        ApplicationConfiguration appConfig = mock(
+                ApplicationConfiguration.class);
+        when(appConfig.isProductionMode()).thenReturn(productionMode);
+        when(vaadinContext.getAttribute(eq(ApplicationConfiguration.class),
+                any())).thenReturn(appConfig);
+        when(vaadinContext.getAttribute(ApplicationConfiguration.class))
+                .thenReturn(appConfig);
+
+        RouteData data = new RouteData(
+                Collections.singletonList((Class) parentLayoutClass),
+                getRoute(viewClass), Collections.emptyMap(), viewClass,
+                Collections.emptyList());
+        when(routeRegistry.getRegisteredRoutes())
+                .thenReturn(Collections.singletonList(data));
+
+        String route = getRoute(viewClass);
+        when(routeRegistry.getNavigationRouteTarget(route)).thenReturn(
+                new NavigationRouteTarget(route, null, Collections.emptyMap()));
+        Location location = new Location(route);
+        if (phase == Phase.PUBLIC_ROUTE_CHECK) {
+            return NavigationContext.forPublicRouteCheck(router, viewClass,
+                    location, RouteParameters.empty());
+        }
+        return new NavigationContext(router, viewClass, location,
+                RouteParameters.empty(), principal, roles::contains, false,
+                phase);
+    }
+
+    private static Principal getPrincipal(User user) {
+        if (user == null) {
+            return null;
+        }
+        return AccessAnnotationCheckerTest.USER_PRINCIPAL;
+    }
+
+    private static Set<String> getRoles(User user) {
+        Set<String> roles = new HashSet<>();
+        if (user == User.NORMAL_USER) {
+            roles.add("user");
+        } else if (user == User.ADMIN) {
+            roles.add("admin");
+        }
+        return roles;
+    }
+
+    static String getRoute(Class<?> navigationTarget) {
+        if (navigationTarget.getAnnotation(Route.class) == null
+                && HasErrorParameter.class.isAssignableFrom(navigationTarget)) {
+            return "mock-path";
+        }
+        return RouteUtil.getRoutePath(new MockVaadinContext(),
+                navigationTarget);
+    }
+
+}

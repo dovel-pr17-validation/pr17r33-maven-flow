@@ -1,0 +1,141 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.startup;
+
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.ServletException;
+
+import java.lang.annotation.Annotation;
+import java.util.Collections;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.component.WebComponentExporter;
+import com.vaadin.flow.component.page.Push;
+import com.vaadin.flow.component.webcomponent.WebComponent;
+import com.vaadin.flow.router.Route;
+import com.vaadin.flow.router.RouterLayout;
+import com.vaadin.flow.server.InvalidApplicationConfigurationException;
+
+import static org.hamcrest.CoreMatchers.allOf;
+import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.mock;
+
+class WebComponentExporterAwareValidatorTest {
+
+    private static final String ERROR_HINT = "Move it to a single route/a top router layout/web component of the application";
+
+    private WebComponentExporterAwareValidator annotationValidator;
+    private ServletContext servletContext;
+
+    @BeforeEach
+    void init() {
+        annotationValidator = new WebComponentExporterAwareValidator();
+        servletContext = mock(ServletContext.class);
+    }
+
+    @Tag(Tag.DIV)
+    public static class Parent extends Component implements RouterLayout {
+    }
+
+    @Route(value = "", layout = Parent.class)
+    @Tag(Tag.DIV)
+    @Push
+    public static class ThemeViewportWithParent extends Component {
+    }
+
+    @Tag(Tag.DIV)
+    @Push
+    public static class NonRoutePush extends Component {
+    }
+
+    @Tag(Tag.DIV)
+    @Push
+    public static class WCExporter extends WebComponentExporter<Component> {
+
+        public WCExporter() {
+            super(Tag.DIV);
+        }
+
+        @Override
+        public void configureInstance(WebComponent<Component> webComponent,
+                Component component) {
+
+        }
+    }
+
+    @Tag(Tag.DIV)
+    public static abstract class AbstractMain extends Component {
+    }
+
+    @Test
+    void process_no_exception_is_thrown_for_correctly_setup_classes()
+            throws ServletException {
+        annotationValidator
+                .process(Stream.of(AbstractMain.class, WCExporter.class)
+                        .collect(Collectors.toSet()), servletContext);
+    }
+
+    @Test
+    void process_all_failing_anotations_are_reported() throws ServletException {
+        try {
+            annotationValidator.process(
+                    Collections.singleton(ThemeViewportWithParent.class),
+                    servletContext);
+            fail("No exception was thrown for faulty setup.");
+        } catch (InvalidApplicationConfigurationException iace) {
+            String errorMessage = iace.getMessage();
+            assertHint(errorMessage, Push.class);
+        }
+    }
+
+    @Test
+    void process_non_linked_push_throws() throws ServletException {
+        assertNon_linked_theme_throws(NonRoutePush.class, Push.class);
+    }
+
+    private void assertNon_linked_theme_throws(Class<? extends Component> clazz,
+            Class<? extends Annotation> annotationType)
+            throws ServletException {
+        InvalidApplicationConfigurationException thrown = assertThrows(
+                InvalidApplicationConfigurationException.class, () -> {
+                    annotationValidator.process(
+                            Stream.of(clazz).collect(Collectors.toSet()),
+                            servletContext);
+                });
+        assertTrue(thrown.getMessage().contains(ERROR_HINT));
+        assertTrue(thrown.getMessage().contains(String.format(
+                "Class '%s' contains '%s', but it is not a router "
+                        + "layout/top level route/web component.",
+                clazz.getName(), "@" + annotationType.getSimpleName())));
+    }
+
+    private void assertHint(String msg,
+            Class<? extends Annotation> anntationType) {
+        assertThat("Exception has hint.", msg,
+                allOf(containsString(anntationType.getSimpleName()),
+                        containsString(ERROR_HINT)));
+    }
+}

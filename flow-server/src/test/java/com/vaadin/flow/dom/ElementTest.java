@@ -1,0 +1,3417 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.dom;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
+import java.lang.ref.WeakReference;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.time.Duration;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+import java.util.stream.DoubleStream;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.BaseJsonNode;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.Html;
+import com.vaadin.flow.component.Size;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.internal.PendingJavaScriptInvocation;
+import com.vaadin.flow.component.internal.UIInternals.JavaScriptInvocation;
+import com.vaadin.flow.component.page.PendingJavaScriptResult;
+import com.vaadin.flow.dom.impl.BasicElementStateProvider;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.internal.NullOwner;
+import com.vaadin.flow.internal.StateNode;
+import com.vaadin.flow.internal.nodefeature.ComponentMapping;
+import com.vaadin.flow.internal.nodefeature.ElementAttributeMap;
+import com.vaadin.flow.internal.nodefeature.ElementListenerMap;
+import com.vaadin.flow.internal.nodefeature.ElementListenersTest;
+import com.vaadin.flow.internal.nodefeature.ElementPropertyMap;
+import com.vaadin.flow.internal.nodefeature.ElementStylePropertyMap;
+import com.vaadin.flow.internal.nodefeature.InertData;
+import com.vaadin.flow.internal.nodefeature.ReturnChannelMap;
+import com.vaadin.flow.internal.nodefeature.ReturnChannelRegistration;
+import com.vaadin.flow.internal.nodefeature.VirtualChildrenList;
+import com.vaadin.flow.js.JsCall;
+import com.vaadin.flow.js.JsDefinition;
+import com.vaadin.flow.js.JsExpression;
+import com.vaadin.flow.server.ErrorEvent;
+import com.vaadin.flow.server.MockVaadinServletService;
+import com.vaadin.flow.server.StreamResource;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.flow.shared.JsonConstants;
+import com.vaadin.flow.shared.Registration;
+import com.vaadin.flow.signals.Signal;
+import com.vaadin.flow.signals.local.ValueSignal;
+import com.vaadin.tests.util.AlwaysLockedVaadinSession;
+import com.vaadin.tests.util.MockUI;
+import com.vaadin.tests.util.TestUtil;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.mock;
+
+@Isolated
+class ElementTest extends AbstractNodeTest {
+
+    @Test
+    void createElementWithTag() {
+        Element e = ElementFactory.createDiv();
+        assertEquals(Tag.DIV, e.getTag());
+        assertFalse(e.hasAttribute("is"));
+        assertFalse(e.isTextNode());
+    }
+
+    @Test
+    void createElementWithInvalidTag() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            new Element("<div>");
+        });
+    }
+
+    @Test
+    void createElementWithEmptyTag() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            new Element("");
+        });
+    }
+
+    @Test
+    void createElementWithNullTag() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            new Element(null);
+        });
+    }
+
+    @Test
+    void elementsUpdateSameData() {
+        Element te = new Element("testelem");
+        Element e = Element.get(te.getNode());
+
+        // Elements must be equal but not necessarily the same
+        assertEquals(te, e);
+
+        te.setAttribute("foo", "bar");
+        assertEquals("bar", e.getAttribute("foo"));
+
+        e.setAttribute("baz", "123");
+        assertEquals("123", te.getAttribute("baz"));
+    }
+
+    @Test
+    void getElementFromInvalidNode() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            StateNode node = new StateNode(ElementPropertyMap.class);
+            Element.get(node);
+        });
+    }
+
+    @Test
+    void publicElementMethodsShouldReturnElement() {
+        Set<String> ignore = new HashSet<>();
+        ignore.add("toString");
+        ignore.add("hashCode");
+        ignore.add("equals");
+
+        // Returns EventRegistrationHandle
+        ignore.add("addEventListener");
+        ignore.add("addAttachListener");
+        ignore.add("addDetachListener");
+        ignore.add("addPropertyChangeListener");
+
+        // Returns index of child element
+        ignore.add("indexOfChild");
+        // Component wrapper
+        ignore.add("as");
+        // Possibly returns a remover or a wrapped return value in the future
+        ignore.add("callFunction");
+        ignore.add("executeJavaScript");
+        // Returns a future-ish thing with access to the return value
+        ignore.add("callJsFunction");
+        ignore.add("executeJs");
+        // Returns Registration
+        ignore.add("addJsInitializer");
+        ignore.add("whenAttached");
+
+        // ignore shadow root methods
+        ignore.add("attachShadow");
+        ignore.add("getShadowRoot");
+
+        // ignore signal binding methods
+        ignore.add("bindEnabled");
+        ignore.add("bindProperty");
+        ignore.add("bindAttribute");
+        ignore.add("bindText");
+        ignore.add("bindVisible");
+
+        // returns a read-only Signal
+        ignore.add("sizeSignal");
+
+        // returns void
+        ignore.add("flashClass");
+
+        assertMethodsReturnType(Element.class, ignore);
+    }
+
+    @Test
+    void publicElementStyleMethodsShouldReturnElement() {
+        Set<String> ignore = new HashSet<>();
+        ignore.add("toString");
+        ignore.add("hashCode");
+        ignore.add("equals");
+        ignore.add("bind");
+
+        for (Method m : Style.class.getDeclaredMethods()) {
+            if (!Modifier.isPublic(m.getModifiers())) {
+                continue;
+            }
+            if (Modifier.isStatic(m.getModifiers())) {
+                continue;
+            }
+            if (m.getName().startsWith("get") || m.getName().startsWith("has")
+                    || m.getName().startsWith("is")
+                    || ignore.contains(m.getName())) {
+                // Ignore
+            } else {
+                // Setters and such
+                Class<?> returnType = m.getReturnType();
+                assertEquals(Style.class, returnType,
+                        "Method " + m.getName() + " has invalid return type");
+            }
+        }
+
+    }
+
+    @Test
+    void stringAttribute() {
+        Element e = ElementFactory.createDiv();
+        e.setAttribute("foo", "bar");
+        assertEquals("bar", e.getAttribute("foo"));
+    }
+
+    @Test
+    void setEmptyAttribute() {
+        Element e = ElementFactory.createDiv();
+        e.setAttribute("foo", "");
+        assertEquals("", e.getAttribute("foo"));
+    }
+
+    @Test
+    void setBooleanAttribute() {
+        Element e = ElementFactory.createDiv();
+
+        e.setAttribute("foo", true);
+        assertEquals("", e.getAttribute("foo"));
+        assertTrue(e.hasAttribute("foo"));
+
+        e.setAttribute("foo", false);
+        assertEquals(null, e.getAttribute("foo"));
+        assertFalse(e.hasAttribute("foo"));
+    }
+
+    @Test
+    void setNullAttribute_attributeRemoved() {
+        Element e = ElementFactory.createDiv();
+        e.setAttribute("foo", "bar");
+        e.setAttribute("class", "baz");
+
+        e.setAttribute("foo", (String) null);
+        e.setAttribute("class", (String) null);
+
+        assertFalse(e.hasAttribute("foo"));
+        assertFalse(e.hasAttribute("class"));
+        assertTrue(e.getClassList().isEmpty());
+    }
+
+    @Test
+    void getNullAttribute() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element e = ElementFactory.createDiv();
+            e.getAttribute(null);
+        });
+    }
+
+    @Test
+    void hasNullAttribute() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element e = ElementFactory.createDiv();
+            e.hasAttribute(null);
+        });
+    }
+
+    @Test
+    void removeNullAttribute() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element e = ElementFactory.createDiv();
+            e.removeAttribute(null);
+        });
+    }
+
+    @Test
+    void setInvalidAttribute() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element e = ElementFactory.createDiv();
+            e.setAttribute("\"foo\"", "bar");
+        });
+    }
+
+    @Test
+    void hasDefinedAttribute() {
+        Element e = ElementFactory.createDiv();
+        e.setAttribute("foo", "bar");
+        assertTrue(e.hasAttribute("foo"));
+    }
+
+    @Test
+    void doesNotHaveUndefinedAttribute() {
+        Element e = ElementFactory.createDiv();
+        assertFalse(e.hasAttribute("foo"));
+    }
+
+    @Test
+    void doesNotHaveRemovedAttribute() {
+        Element e = ElementFactory.createDiv();
+        e.setAttribute("foo", "bar");
+        e.removeAttribute("foo");
+        assertFalse(e.hasAttribute("foo"));
+    }
+
+    @Test
+    void removeNonExistingAttributeIsNoOp() {
+        Element e = ElementFactory.createDiv();
+        assertFalse(e.hasAttribute("foo"));
+        e.removeAttribute("foo");
+        assertFalse(e.hasAttribute("foo"));
+    }
+
+    @Test
+    void attributesWhenNoneDefined() {
+        Element e = ElementFactory.createDiv();
+        assertEquals(0, e.getAttributeNames().count());
+    }
+
+    @Test
+    void attributesNames() {
+        Element e = ElementFactory.createDiv();
+        e.setAttribute("foo", "bar");
+        assertArrayEquals(new String[] { "foo" },
+                e.getAttributeNames().toArray());
+    }
+
+    @Test
+    void attributesNamesAfterRemoved() {
+        Element e = ElementFactory.createDiv();
+        e.setAttribute("foo", "bar");
+        e.setAttribute("bar", "baz");
+        e.removeAttribute("foo");
+        assertArrayEquals(new String[] { "bar" },
+                e.getAttributeNames().toArray());
+    }
+
+    @Test
+    void setGetAttributeValueCaseSensitive() {
+        Element e = new Element(Tag.SPAN);
+        e.setAttribute("foo", "bAr");
+        assertEquals("bAr", e.getAttribute("foo"));
+        e.setAttribute("foo", "BAR");
+        assertEquals("BAR", e.getAttribute("foo"));
+    }
+
+    @Test
+    void setGetAttributeNameCaseInsensitive() {
+        Element e = new Element(Tag.SPAN);
+        e.setAttribute("foo", "bar");
+        e.setAttribute("FOO", "baz");
+
+        assertEquals("baz", e.getAttribute("foo"));
+        assertEquals("baz", e.getAttribute("FOO"));
+    }
+
+    @Test
+    void hasAttributeNamesCaseInsensitive() {
+        Element e = new Element(Tag.SPAN);
+        e.setAttribute("fooo", "bar");
+        assertTrue(e.hasAttribute("fOoO"));
+    }
+
+    @Test
+    void getAttributeNamesLowerCase() {
+        Element e = new Element(Tag.SPAN);
+        e.setAttribute("FOO", "bar");
+        e.setAttribute("Baz", "bar");
+
+        Set<String> attributeNames = e.getAttributeNames()
+                .collect(Collectors.toSet());
+        assertTrue(attributeNames.contains("foo"));
+        assertFalse(attributeNames.contains("FOO"));
+        assertTrue(attributeNames.contains("baz"));
+        assertFalse(attributeNames.contains("Baz"));
+    }
+
+    @Test
+    void removeDetachedFromParent() {
+        Element otherElement = new Element("other");
+        assertNull(otherElement.getParent());
+        otherElement.removeFromParent(); // No op
+        assertNull(otherElement.getParent());
+    }
+
+    @Test
+    void getDetachedParent() {
+        Element otherElement = new Element("other");
+        assertNull(otherElement.getParent());
+        assertNull(otherElement.getParentNode());
+    }
+
+    @Test
+    void addNullEventListener() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element e = ElementFactory.createDiv();
+            e.addEventListener("foo", null);
+        });
+    }
+
+    @Test
+    void addEventListenerForNullType() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element e = ElementFactory.createDiv();
+            e.addEventListener(null, ignore -> {
+            });
+        });
+    }
+
+    @Test
+    void equalsSelf() {
+        Element e = ElementFactory.createDiv();
+        assertTrue(e.equals(e));
+    }
+
+    @Test
+    void notEqualsNull() {
+        Element e = ElementFactory.createDiv();
+        assertFalse(e.equals(null));
+    }
+
+    @Test
+    void notEqualsString() {
+        Element e = ElementFactory.createDiv();
+        assertFalse(e.equals(Tag.DIV));
+    }
+
+    @Test
+    void listenerReceivesEvents() {
+        Element e = ElementFactory.createDiv();
+        AtomicInteger listenerCalls = new AtomicInteger(0);
+        DomEventListener myListener = event -> listenerCalls.incrementAndGet();
+
+        e.addEventListener("click", myListener);
+        assertEquals(0, listenerCalls.get());
+        e.getNode().getFeature(ElementListenerMap.class).fireEvent(
+                new DomEvent(e, "click", JacksonUtils.createObjectNode()));
+        assertEquals(1, listenerCalls.get());
+    }
+
+    @Test
+    void listenerReceivesEventsWithAllowInert() {
+        Element e = ElementFactory.createDiv();
+        // Inert the node, verify events no more passed through
+        InertData inertData = e.getNode().getFeature(InertData.class);
+        inertData.setInertSelf(true);
+        inertData.generateChangesFromEmpty();
+
+        AtomicInteger listenerCalls = new AtomicInteger(0);
+        DomEventListener myListener = event -> listenerCalls.incrementAndGet();
+
+        DomListenerRegistration domListenerRegistration = e
+                .addEventListener("click", myListener);
+        assertEquals(0, listenerCalls.get());
+        e.getNode().getFeature(ElementListenerMap.class).fireEvent(
+                new DomEvent(e, "click", JacksonUtils.createObjectNode()));
+        // Event should not go through
+        assertEquals(0, listenerCalls.get());
+
+        // Now should pass inert check and get notified
+        domListenerRegistration.allowInert();
+        e.getNode().getFeature(ElementListenerMap.class).fireEvent(
+                new DomEvent(e, "click", JacksonUtils.createObjectNode()));
+        assertEquals(1, listenerCalls.get());
+
+    }
+
+    @Test
+    void getPropertyDefaults() {
+        Element element = ElementFactory.createDiv();
+
+        element.setProperty("null", null);
+        element.setProperty("empty", "");
+
+        assertEquals("d", element.getProperty("null", "d"));
+        assertEquals("d", element.getProperty("notThere", "d"));
+        assertNotEquals("d", element.getProperty("empty", "d"));
+
+        assertTrue(element.getProperty("null", true));
+        assertFalse(element.getProperty("null", false));
+        assertTrue(element.getProperty("notThere", true));
+        assertFalse(element.getProperty("notThere", false));
+        assertFalse(element.getProperty("empty", true));
+        assertFalse(element.getProperty("empty", false));
+
+        assertEquals(0.1, element.getProperty("null", 0.1), 0);
+        assertEquals(0.1, element.getProperty("notThere", 0.1), 0);
+        assertNotEquals(0.1, element.getProperty("empty", 0.1), 0);
+
+        assertEquals(42, element.getProperty("null", 42));
+        assertEquals(42, element.getProperty("notThere", 42));
+        assertNotEquals(42, element.getProperty("empty", 42));
+    }
+
+    @Test
+    void getPropertyStringConversions() {
+        assertPropertyString(null, null);
+        assertPropertyString("foo", "foo");
+        assertPropertyString("", "");
+        assertPropertyString("45.6e1", "45.6e1");
+        assertPropertyString("true", Boolean.TRUE);
+        assertPropertyString("false", Boolean.FALSE);
+        assertPropertyString(String.valueOf(143534123423.243e23),
+                Double.valueOf(143534123423.243e23));
+        assertPropertyString("42", Double.valueOf(42));
+
+        assertPropertyString(null, JacksonUtils.nullNode());
+        assertPropertyString("{}", JacksonUtils.createObjectNode());
+    }
+
+    private static void assertPropertyString(String expected, Object value) {
+        Element element = createPropertyAssertElement(value);
+
+        assertEquals(expected, element.getProperty("property"));
+    }
+
+    @Test
+    void testPropertyBooleanConversions() {
+        assertPropertyBoolean(true, Boolean.TRUE);
+        assertPropertyBoolean(false, Boolean.FALSE);
+
+        assertPropertyBoolean(true, "true");
+        assertPropertyBoolean(true, "false");
+        assertPropertyBoolean(false, "");
+
+        assertPropertyBoolean(true, Double.valueOf(1));
+        assertPropertyBoolean(true, Double.valueOf(3.14));
+        assertPropertyBoolean(false, Double.valueOf(0));
+        assertPropertyBoolean(false, Double.valueOf(Double.NaN));
+
+        assertPropertyBoolean(false, JacksonUtils.nullNode());
+        assertPropertyBoolean(false, JacksonUtils.createNode(false));
+        assertPropertyBoolean(true, JacksonUtils.createNode(true));
+        assertPropertyBoolean(true, JacksonUtils.createObjectNode());
+    }
+
+    private static void assertPropertyBoolean(boolean expected, Object value) {
+        Element element = createPropertyAssertElement(value);
+
+        // !expected -> default value will always fail
+        boolean actual = element.getProperty("property", !expected);
+
+        if (expected) {
+            assertTrue(actual);
+        } else {
+            assertFalse(actual);
+        }
+    }
+
+    @Test
+    void testPropertyDoubleConversions() {
+        assertPropertyDouble(1, Double.valueOf(1));
+        assertPropertyDouble(.1, Double.valueOf(.1));
+        assertPropertyDouble(Double.NaN, Double.valueOf(Double.NaN));
+
+        assertPropertyDouble(1, "1");
+        assertPropertyDouble(.1, ".1");
+        assertPropertyDouble(12.34e56, "12.34e56");
+        assertPropertyDouble(Double.NaN, "foo");
+
+        assertPropertyDouble(1, Boolean.TRUE);
+        assertPropertyDouble(0, Boolean.FALSE);
+
+        assertPropertyDouble(.1, JacksonUtils.createNode(.1));
+        assertPropertyDouble(1, JacksonUtils.createNode(true));
+        assertPropertyDouble(0, JacksonUtils.createNode(false));
+        assertPropertyDouble(.1, JacksonUtils.createNode(".1"));
+        assertPropertyDouble(Double.NaN, JacksonUtils.createNode("foo"));
+        assertPropertyDouble(Double.NaN, JacksonUtils.createObjectNode());
+    }
+
+    private static void assertPropertyDouble(double expected, Object value) {
+        Element element = createPropertyAssertElement(value);
+
+        int delta = 0;
+        double defaultValue = 1234d;
+
+        if (defaultValue == expected) {
+            throw new IllegalArgumentException(
+                    "Expecting the default value might cause unintended results");
+        }
+
+        assertEquals(expected, element.getProperty("property", defaultValue),
+                delta);
+    }
+
+    @Test
+    void testPropertyIntConversions() {
+        assertPropertyInt(1, Double.valueOf(1));
+        assertPropertyInt(1, Double.valueOf(1.9));
+        assertPropertyInt(0, Double.valueOf(Double.NaN));
+        assertPropertyInt(Integer.MAX_VALUE, Double.valueOf(12.34e56));
+
+        assertPropertyInt(1, "1");
+        assertPropertyInt(1, "1.9");
+        assertPropertyInt(Integer.MAX_VALUE, "12.34e56");
+        assertPropertyInt(0, "foo");
+
+        assertPropertyInt(1, Boolean.TRUE);
+        assertPropertyInt(0, Boolean.FALSE);
+
+        assertPropertyInt(1, JacksonUtils.createNode(1));
+        assertPropertyInt(1, JacksonUtils.createNode(1.9));
+        assertPropertyInt(1, JacksonUtils.createNode(true));
+        assertPropertyInt(0, JacksonUtils.createNode(false));
+        assertPropertyInt(1, JacksonUtils.createNode("1"));
+        assertPropertyInt(0, JacksonUtils.createNode("foo"));
+        assertPropertyInt(0, JacksonUtils.createObjectNode());
+    }
+
+    private static void assertPropertyInt(int expected, Object value) {
+        Element element = createPropertyAssertElement(value);
+
+        int defaultValue = 1234;
+
+        if (defaultValue == expected) {
+            throw new IllegalArgumentException(
+                    "Expecting the default value might cause unintended results");
+        }
+
+        assertEquals(expected, element.getProperty("property", defaultValue));
+    }
+
+    public static class SimpleBean {
+        private String string = "value";
+        private int number = 1;
+        private float flt = 2.3f;
+        private double dbl = 4.56;
+
+        public String getString() {
+            return string;
+        }
+
+        public int getNumber() {
+            return number;
+        }
+
+        public float getFlt() {
+            return flt;
+        }
+
+        public double getDbl() {
+            return dbl;
+        }
+    }
+
+    public static class BeanWithTemporalFields {
+
+        public LocalTime localTime = LocalTime.of(10, 23, 55);
+
+        public LocalDate localDate = LocalDate.of(2024, 6, 26);
+
+        public LocalDateTime localDateTime = localDate.atTime(localTime);
+
+        public java.sql.Date sqlDate = java.sql.Date.valueOf(localDate);
+
+        public Date date = new Date(sqlDate.getTime());
+
+        public ZonedDateTime zonedDateTime = ZonedDateTime.of(localDateTime,
+                ZoneId.of("Europe/Rome"));
+
+        public Duration duration = Duration.ofSeconds(10);
+    }
+
+    @Test
+    void propertyRawValues() {
+        Element element = ElementFactory.createDiv();
+
+        element.setProperty("p", "v");
+        assertEquals("v", element.getPropertyRaw("p"));
+
+        element.setProperty("p", true);
+        assertEquals(Boolean.TRUE, element.getPropertyRaw("p"));
+
+        element.setProperty("p", 3.14);
+        assertEquals(Double.valueOf(3.14), element.getPropertyRaw("p"));
+
+        element.setPropertyJson("p", JacksonUtils.createObjectNode());
+        assertEquals(ObjectNode.class, element.getPropertyRaw("p").getClass());
+
+        element.setPropertyBean("p", new SimpleBean());
+        ObjectNode json = (ObjectNode) element.getPropertyRaw("p");
+        assertEquals("value", json.get("string").asString());
+        assertEquals(1.0, json.get("number").doubleValue(), 0.0);
+        assertEquals(2.3f, json.get("flt").floatValue(), 0.0);
+        assertEquals(4.56, json.get("dbl").doubleValue(), 0.0);
+
+        List<SimpleBean> list = new ArrayList<>();
+        SimpleBean bean1 = new SimpleBean();
+        bean1.string = "bean1";
+        SimpleBean bean2 = new SimpleBean();
+        bean2.string = "bean2";
+        list.add(bean1);
+        list.add(bean2);
+        element.setPropertyList("p", list);
+        ArrayNode jsonArray = (ArrayNode) element.getPropertyRaw("p");
+        assertEquals("bean1", jsonArray.get(0).get("string").asString());
+        assertEquals("bean2", jsonArray.get(1).get("string").asString());
+
+        Map<String, SimpleBean> map = new HashMap<>();
+        map.put("one", bean1);
+        map.put("two", bean2);
+        element.setPropertyMap("p", map);
+        JsonNode jsonObject = (JsonNode) element.getPropertyRaw("p");
+        assertEquals("bean1", jsonObject.get("one").get("string").asString());
+        assertEquals("bean2", jsonObject.get("two").get("string").asString());
+    }
+
+    @Test
+    void addAndRemoveProperty() {
+        Element element = ElementFactory.createDiv();
+
+        assertFalse(element.hasProperty("foo"));
+        element.removeProperty("foo");
+        assertFalse(element.hasProperty("foo"));
+
+        element.setProperty("foo", "bar");
+        assertTrue(element.hasProperty("foo"));
+        element.setProperty("foo", null);
+        assertTrue(element.hasProperty("foo"));
+
+        element.removeProperty("foo");
+        assertFalse(element.hasProperty("foo"));
+    }
+
+    @Test
+    void propertyNames() {
+        Element element = ElementFactory.createDiv();
+
+        assertEquals(0, element.getPropertyNames().count());
+
+        element.setProperty("foo", "bar");
+        assertEquals(Collections.singleton("foo"),
+                element.getPropertyNames().collect(Collectors.toSet()));
+
+        element.removeProperty("foo");
+        assertEquals(0, element.getPropertyNames().count());
+    }
+
+    @Test
+    void setProperty_javaTimeObject() {
+        BeanWithTemporalFields bean = new BeanWithTemporalFields();
+        Element element = ElementFactory.createDiv();
+
+        element.setPropertyBean("bean", bean);
+        JsonNode json = (JsonNode) element.getPropertyRaw("bean");
+
+        assertTrue(
+                JacksonUtils.jsonEquals(JacksonUtils.createNode("10:23:55"),
+                        json.get("localTime")),
+                "LocalTime not serialized as expected");
+        assertTrue(
+                JacksonUtils.jsonEquals(JacksonUtils.createNode("2024-06-26"),
+                        json.get("localDate")),
+                "LocalDate not serialized as expected");
+        assertTrue(
+                JacksonUtils.jsonEquals(
+                        JacksonUtils.createNode("2024-06-26T10:23:55"),
+                        json.get("localDateTime")),
+                "LocalDateTime not serialized as expected");
+        assertEquals(bean.zonedDateTime.toEpochSecond(),
+                ZonedDateTime.parse(json.get("zonedDateTime").asString())
+                        .toEpochSecond(),
+                0, "ZonedDateTime not serialized as expected");
+        assertEquals(bean.sqlDate.getTime(),
+                ZonedDateTime.parse(json.get("sqlDate").asString()).toInstant()
+                        .toEpochMilli(),
+                0, "ZonedDateTime not serialized as expected");
+        assertEquals(bean.date.getTime(),
+                ZonedDateTime.parse(json.get("date").asString()).toInstant()
+                        .toEpochMilli(),
+                0, "ZonedDateTime not serialized as expected");
+        assertEquals(10.0,
+                Duration.parse(json.get("duration").asString()).toSeconds(), 0);
+    }
+
+    private static Element createPropertyAssertElement(Object value) {
+        Element element = ElementFactory.createDiv();
+
+        if (value instanceof Number && !(value instanceof Double)) {
+            throw new IllegalArgumentException(
+                    "Double is the only accepted numeric type");
+        }
+
+        if (value instanceof BaseJsonNode) {
+            element.setPropertyJson("property", (BaseJsonNode) value);
+        } else if (value instanceof Serializable) {
+            BasicElementStateProvider.get().setProperty(element.getNode(),
+                    "property", (Serializable) value, true);
+        } else if (value == null) {
+            element.setProperty("property", null);
+        } else {
+            throw new IllegalArgumentException(
+                    "Invalid value type: " + value.getClass());
+        }
+
+        return element;
+    }
+
+    @Test
+    void testGetTextContent() {
+        Element child = new Element("child");
+        child.appendChild(Element.createText("bar"));
+
+        Element element = ElementFactory.createDiv();
+
+        element.appendChild(Element.createText("foo"));
+        element.appendChild(child);
+
+        assertEquals("foobar", element.getTextRecursively());
+    }
+
+    @Test
+    void testSetTextContent() {
+        Element element = ElementFactory.createDiv();
+        element.setText("foo");
+
+        assertEquals("foo", element.getTextRecursively());
+        assertEquals(1, element.getChildCount());
+        assertTrue(element.getChild(0).isTextNode());
+    }
+
+    @Test
+    void testSetTextContentRemovesOldContent() {
+        Element child = new Element("child");
+        Element element = ElementFactory.createDiv();
+        element.appendChild(child);
+
+        element.setText("foo");
+
+        assertNull(child.getParent());
+        assertEquals("foo", element.getTextRecursively());
+    }
+
+    @Test
+    void testSetTextReplacesOldTextNode() {
+        Element element = ElementFactory.createDiv();
+        Element text = Element.createText("foo");
+        element.appendChild(text);
+
+        element.setText("bar");
+
+        assertEquals(element, text.getParent());
+        assertEquals("bar", text.getTextRecursively());
+    }
+
+    @Test
+    void testSetTextContentPropertyThrows() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element element = new Element("element");
+            element.setProperty("textContent", "foo");
+        });
+    }
+
+    @Test
+    void setOuterHtmlProperty_throws() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element element = new Element("element");
+            element.setProperty("outerHTML", "<br>");
+        });
+    }
+
+    @Test
+    void setInnerHtmlProeprty_setValueAndRemoveAllChildren() {
+        Element element = new Element("element");
+        element.appendChild(ElementFactory.createAnchor(),
+                ElementFactory.createDiv());
+        element.setProperty("innerHTML", "<br>");
+
+        assertEquals(0, element.getChildCount());
+        assertEquals("<br>", element.getProperty("innerHTML"));
+    }
+
+    @Test
+    void testGetTextContentProperty() {
+        Element element = ElementFactory.createDiv();
+        element.setText("foo");
+
+        assertFalse(element.hasProperty("textContent"));
+        assertNull(element.getProperty("textContent"));
+    }
+
+    @Test
+    // Because that's how it works in browsers
+    void clearTextContentRemovesChild() {
+        Element element = ElementFactory.createDiv();
+        element.setText("foo");
+
+        assertEquals(1, element.getChildCount());
+
+        element.setText("");
+
+        assertEquals(0, element.getChildCount());
+    }
+
+    @Test
+    void newElementClasses() {
+        Element element = ElementFactory.createDiv();
+
+        assertFalse(element.hasAttribute("class"));
+        assertEquals(Collections.emptySet(), element.getClassList());
+    }
+
+    @Test
+    void addElementClasses() {
+        Element element = ElementFactory.createDiv();
+
+        element.getClassList().add("foo");
+
+        assertEquals(Collections.singleton("foo"), element.getClassList());
+        assertTrue(element.hasAttribute("class"));
+
+        assertEquals(Collections.singleton("class"),
+                element.getAttributeNames().collect(Collectors.toSet()));
+        assertTrue(element.hasAttribute("class"));
+        assertEquals("foo", element.getAttribute("class"));
+
+        element.getClassList().add("bar");
+
+        assertEquals("foo bar", element.getAttribute("class"));
+    }
+
+    @Test
+    void testSetClassAttribute() {
+        Element element = ElementFactory.createDiv();
+
+        // Get instance right away to see that changes are live
+        Set<String> classList = element.getClassList();
+
+        element.setAttribute("class", "       foo bar ");
+
+        assertEquals(2, classList.size());
+        assertTrue(classList.contains("foo"));
+        assertTrue(classList.contains("bar"));
+
+        assertNull(
+                element.getNode().getFeature(ElementAttributeMap.class)
+                        .get("class"),
+                "class should not be stored as a regular attribute");
+    }
+
+    @Test
+    void testSetEmptyClassAttribute() {
+        Element element = new Element(Tag.DIV);
+
+        // Get instance right away to see that changes are live
+        Set<String> classList = element.getClassList();
+
+        element.setAttribute("class", "");
+
+        assertEquals(0, classList.size());
+    }
+
+    @Test
+    void testAddEmptyClassname() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element element = new Element(Tag.DIV);
+
+            // Get instance right away to see that changes are live
+            Set<String> classList = element.getClassList();
+
+            classList.add("");
+        });
+    }
+
+    @Test
+    void testRemoveClassName() {
+        Element element = ElementFactory.createDiv();
+
+        element.setAttribute("class", "foo bar");
+
+        element.getClassList().remove("foo");
+
+        assertEquals("bar", element.getAttribute("class"));
+
+        element.getClassList().remove("bar");
+
+        assertNull(element.getAttribute("class"));
+        assertFalse(element.hasAttribute("class"));
+
+        assertEquals(0, element.getAttributeNames().count());
+    }
+
+    @Test
+    void testRemoveClassAttribute() {
+        Element element = ElementFactory.createDiv();
+
+        Set<String> classList = element.getClassList();
+
+        classList.add("foo");
+
+        element.removeAttribute("class");
+
+        assertEquals(Collections.emptySet(), classList);
+    }
+
+    @Test
+    void addExistingClass_noop() {
+        Element element = ElementFactory.createDiv();
+
+        element.setAttribute("class", "foo");
+
+        element.getClassList().add("foo");
+
+        assertEquals(Collections.singleton("foo"), element.getClassList());
+    }
+
+    @Test
+    void testAddClassWithSpaces_throws() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            ElementFactory.createDiv().getClassList().add("foo bar");
+        });
+    }
+
+    @Test
+    void testRemoveClassWithSpaces() {
+        ClassList cl = ElementFactory.createDiv().getClassList();
+        cl.add("foo");
+        cl.add("bar");
+        cl.remove("foo bar");
+        assertEquals(2, cl.size());
+    }
+
+    @Test
+    void testContainsClassWithSpaces() {
+        ClassList cl = ElementFactory.createDiv().getClassList();
+        cl.add("foo");
+        cl.add("bar");
+
+        assertFalse(cl.contains("foo bar"));
+    }
+
+    @Test
+    void classListSetAdd() {
+        Element e = new Element(Tag.DIV);
+        assertTrue(e.getClassList().set("foo", true));
+        assertEquals("foo", e.getAttribute("class"));
+        assertFalse(e.getClassList().set("foo", true));
+        assertEquals("foo", e.getAttribute("class"));
+    }
+
+    @Test
+    void classListSetRemove() {
+        Element e = new Element(Tag.DIV);
+        e.setAttribute("class", "foo bar");
+        assertTrue(e.getClassList().set("foo", false));
+        assertEquals("bar", e.getAttribute("class"));
+        assertFalse(e.getClassList().set("foo", false));
+        assertEquals("bar", e.getAttribute("class"));
+    }
+
+    @Test
+    void testClassListProperty_throws() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            ElementFactory.createDiv().setProperty("classList", "foo");
+        });
+    }
+
+    @Test
+    void testClassNameProperty_throws() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            ElementFactory.createDiv().setProperty("className", "foo");
+        });
+    }
+
+    @Test
+    void setStyle() {
+        Element e = ElementFactory.createDiv();
+        Style s = e.getStyle();
+        s.set("foo", "bar");
+        assertEquals("bar", s.get("foo"));
+        s.set("--lumo-primary-text-color", "hsl(12, 12%, 12%)");
+        assertEquals("hsl(12, 12%, 12%)", s.get("--lumo-primary-text-color"));
+    }
+
+    @Test
+    void getUnsetStyle() {
+        Element e = ElementFactory.createDiv();
+        Style s = e.getStyle();
+        assertNull(s.get("foo"));
+    }
+
+    @Test
+    void getNullStyle() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element e = ElementFactory.createDiv();
+            Style s = e.getStyle();
+            s.get(null);
+        });
+    }
+
+    @Test
+    void replaceStyle() {
+        Element e = ElementFactory.createDiv();
+        Style s = e.getStyle();
+        s.set("foo", "bar");
+        s.set("foo", "baz");
+        assertEquals("baz", s.get("foo"));
+    }
+
+    @Test
+    void removeSingleStyle() {
+        Element e = ElementFactory.createDiv();
+        Style s = e.getStyle();
+        s.set("foo", "bar");
+        s.remove("foo");
+        assertEquals(null, s.get("foo"));
+    }
+
+    @Test
+    void emptyStyleAsAttribute() {
+        Element e = ElementFactory.createDiv();
+        assertFalse(e.hasAttribute("style"));
+        assertNull(e.getAttribute("style"));
+    }
+
+    @Test
+    void semicolonInStyle() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element e = ElementFactory.createDiv();
+            Style s = e.getStyle();
+            s.set("border", "1 px solid black;");
+        });
+    }
+
+    @Test
+    void getSingleStyleAsAttribute() {
+        Element e = ElementFactory.createDiv();
+        Style s = e.getStyle();
+        s.setBorder("1px solid black");
+        assertTrue(e.hasAttribute("style"));
+        assertEquals("border:1px solid black", e.getAttribute("style"));
+    }
+
+    @Test
+    void getMultipleStylesAsAttribute() {
+        Element e = ElementFactory.createDiv();
+        Style s = e.getStyle();
+        s.set("border", "1px solid black");
+        s.setMargin("1em");
+        assertTrue(e.hasAttribute("style"));
+        assertEqualsOne(
+                new String[] { "border:1px solid black;margin:1em",
+                        "margin:1em;border:1px solid black" },
+                e.getAttribute("style"));
+    }
+
+    @Test
+    void setSingleStyleAsAttribute() {
+        Element e = ElementFactory.createDiv();
+        String style = "width:12em";
+        e.setAttribute("style", style);
+        assertEquals(style, e.getAttribute("style"));
+
+    }
+
+    @Test
+    void setStyleAttributeMultipleTimes() {
+        Element e = ElementFactory.createDiv();
+        e.setAttribute("style", "width:12em");
+        e.setAttribute("style", "height:12em");
+        assertEquals("height:12em", e.getAttribute("style"));
+
+    }
+
+    @Test
+    void setMultipleStylesAsAttribute() {
+        Element e = ElementFactory.createDiv();
+        String style = "width:12em;height:2em";
+        e.setAttribute("style", style);
+        assertEquals(style, e.getAttribute("style"));
+        assertEquals("2em", e.getStyle().get("height"));
+    }
+
+    @Test
+    void setComplexStylesAsAttribute() {
+        testStyleAttribute(
+                "background:rgb(0,255,0) url(http://foo.bar/smiley.gif) no-repeat fixed center");
+        testStyleAttribute("content:\"content: bar\"");
+        testStyleAttribute("width:12px;content:\"content: bar\";height:12px");
+        testStyleAttribute("width:calc(100% - 80px)");
+        testStyleAttribute("width:var(--widthB)");
+        testStyleAttribute("color:var(--mainColor)");
+        testStyleAttribute("font-size:calc(var(--fontSize) * 2)");
+        testStyleAttribute("--lumo-primary-text-color:hsl(12, 12%, 12%)");
+        testStyleAttribute(
+                "background:url(\"https://example.com/images/myImg.jpg?q;param\")");
+        var style = testStyleAttribute(
+                "background-image:cross-fade(20% url(first.png?foo;bar&d=3), url(second.png))");
+        assertEquals(
+                "cross-fade(20% url(first.png?foo;bar&d=3), url(second.png))",
+                style.get("background-image"));
+        testStyleAttribute(
+                "mask-image:image(url(mask.png), skyblue, linear-gradient(rgb(0 0 0 / 100%), transparent))");
+        style = testStyleAttribute(
+                "width:var(--widthB);color:var(--mainColor);background-image:cross-fade(20% url(first.png?foo;bar&d=3), url(second.png))");
+        assertEquals("var(--widthB)", style.get("width"));
+        assertEquals("var(--mainColor)", style.get("color"));
+        assertEquals(
+                "cross-fade(20% url(first.png?foo;bar&d=3), url(second.png))",
+                style.get("background-image"));
+    }
+
+    private Style testStyleAttribute(String style) {
+        Element e = ElementFactory.createDiv();
+        e.setAttribute("style", style);
+        assertEquals(style, e.getAttribute("style"));
+        return e.getStyle();
+    }
+
+    @Test
+    void setInvalidStyleAsAttribute() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element e = ElementFactory.createDiv();
+            e.setAttribute("style", "width:");
+        });
+    }
+
+    @Test
+    void setInvalidStyleAsAttribute2() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element e = ElementFactory.createDiv();
+            e.setAttribute("style", "width");
+        });
+    }
+
+    @Test
+    void setVendorSpecificStylesProperty() {
+        Element e = ElementFactory.createDiv();
+        String style = "-moz-user-input:inherit";
+        e.setAttribute("style", style);
+        assertEquals("inherit", e.getStyle().get("mozUserInput"));
+        assertEquals(style, e.getAttribute("style"));
+    }
+
+    @Test
+    void setVendorSpecificStylesValue() {
+        Element e = ElementFactory.createDiv();
+        String style = "display:-moz-box";
+        e.setAttribute("style", style);
+        assertEquals("-moz-box", e.getStyle().get("display"));
+        assertEquals(style, e.getAttribute("style"));
+
+    }
+
+    @Test
+    void setStyleAttributeTrailingSemicolon() {
+        Element e = ElementFactory.createDiv();
+        String style = "width:12em";
+        e.setAttribute("style", style + ";");
+        assertEquals(style, e.getAttribute("style"));
+    }
+
+    private void assertEqualsOne(String[] expected, String actual) {
+        for (String string : expected) {
+            if (string.equals(actual)) {
+                return;
+            }
+        }
+        String expectedString = Arrays.stream(expected)
+                .collect(Collectors.joining("> or <"));
+        fail("expected: <" + expectedString + "> but was <" + actual + ">");
+
+    }
+
+    @Test
+    void setEmptyStyleName() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element e = ElementFactory.createDiv();
+            e.getStyle().set("", "foo");
+        });
+    }
+
+    @Test
+    void setStyleNameExtraWhitespace() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element e = ElementFactory.createDiv();
+            e.getStyle().set("   color", "red");
+        });
+    }
+
+    @Test
+    void setStyleNameColon() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element e = ElementFactory.createDiv();
+            e.getStyle().set("color:", "red");
+        });
+    }
+
+    @Test
+    void setStyleValueExtraWhitespace() {
+        Element e = ElementFactory.createDiv();
+        e.getStyle().setColor("red   ");
+        assertEquals("color:red", e.getAttribute("style"));
+        assertEquals("red", e.getStyle().get("color"));
+    }
+
+    @Test
+    void removeStyles() {
+        Element element = ElementFactory.createDiv();
+
+        element.getStyle().setZIndex(12);
+        element.getStyle().set("background", "blue");
+
+        element.getStyle().remove("background");
+
+        assertEquals("z-index:12", element.getAttribute("style"));
+
+        element.getStyle().setZIndex(null);
+
+        assertNull(element.getAttribute("style"));
+        assertFalse(element.hasAttribute("style"));
+
+        assertEquals(0, element.getStyle().getNames().count());
+    }
+
+    @Test
+    void removeStyleAttribute() {
+        Element element = ElementFactory.createDiv();
+
+        Style style = element.getStyle();
+
+        style.setBorder("1px solid green");
+
+        element.removeAttribute("style");
+
+        assertEquals(0, style.getNames().count());
+    }
+
+    @Test
+    void validStyleWithSemicolon() {
+        Element element = ElementFactory.createDiv();
+        String validStyle = "background: url('foo;bar')";
+        Style style = element.getStyle();
+        style.setBackground(validStyle);
+        assertEquals(validStyle, style.get("background"));
+    }
+
+    @Test
+    void dashSeparatedSetStyle() {
+        Element element = ElementFactory.createDiv();
+
+        Style style = element.getStyle();
+        style.set("border-color", "blue");
+        assertEquals("blue", style.get("border-color"));
+    }
+
+    @Test
+    void dashSeparatedGetStyle() {
+        Element element = ElementFactory.createDiv();
+
+        Style style = element.getStyle();
+        style.set("borderColor", "blue");
+        style.set("border-foo", "bar");
+        assertEquals("blue", style.get("border-color"));
+        assertEquals("bar", style.get("border-foo"));
+    }
+
+    @Test
+    void dashSeparatedHasStyle() {
+        Element element = ElementFactory.createDiv();
+
+        Style style = element.getStyle();
+        style.set("borderColor", "blue");
+        style.set("border-foo", "bar");
+        assertTrue(style.has("border-color"));
+        assertTrue(style.has("border-foo"));
+    }
+
+    @Test
+    void dashSeparatedRemoveStyle() {
+        Element element = ElementFactory.createDiv();
+
+        Style style = element.getStyle();
+        style.set("borderColor", "blue");
+        style.set("border-foo", "bar");
+        style.remove("border-color");
+        style.remove("border-foo");
+
+        assertFalse(style.has("border-color"));
+        assertFalse(style.has("border-foo"));
+    }
+
+    @Test
+    void styleGetNamesDashAndCamelCase() {
+        Element element = ElementFactory.createDiv();
+
+        Style style = element.getStyle();
+        style.set("borderColor", "blue");
+        style.set("border-foo", "bar");
+
+        List<String> styles = style.getNames().collect(Collectors.toList());
+        assertEquals(2, styles.size());
+        assertTrue(styles.contains("border-color"));
+        assertTrue(styles.contains("border-foo"));
+    }
+
+    @Test
+    void nullStyleValue() {
+        Element element = ElementFactory.createDiv();
+
+        Style style = element.getStyle();
+        style.set("borderColor", "blue");
+        style.set("borderColor", null);
+        List<String> styles = style.getNames().collect(Collectors.toList());
+        assertFalse(styles.contains("borderColor"));
+    }
+
+    @Test
+    void sendPropertyInCorrectFormatToClient() {
+        assertClientStyleKey("--some-variable", "--some-variable");
+        assertClientStyleKey("-webkit-border", "-webkit-border");
+        assertClientStyleKey("background-color", "background-color");
+        assertClientStyleKey("color", "color");
+
+        assertClientStyleKey("-webkit-border", "webkitBorder");
+        assertClientStyleKey("background-color", "backgroundColor");
+    }
+
+    private void assertClientStyleKey(String sentToClient,
+            String setUsingStyleApi) {
+        Element element = ElementFactory.createDiv();
+        StateNode stateNode = element.getNode();
+        ElementStylePropertyMap map = stateNode
+                .getFeature(ElementStylePropertyMap.class);
+
+        Style style = element.getStyle();
+        style.set(setUsingStyleApi, "foo");
+        assertEquals("foo", style.get(setUsingStyleApi));
+        assertEquals(sentToClient, map.getPropertyNames().toArray()[0]);
+        assertEquals("foo", map.getProperty(sentToClient));
+
+    }
+
+    @Test
+    void customPropertyStyle() {
+        Element element = ElementFactory.createDiv();
+        Style style = element.getStyle();
+        style.set("--some-variable", "foo");
+        assertEquals("foo", style.get("--some-variable"));
+    }
+
+    @Test
+    void useCustomPropertyStyle() {
+        Element element = ElementFactory.createDiv();
+
+        Style style = element.getStyle();
+        style.setColor("var(--some-var)");
+        assertEquals("var(--some-var)", style.get("color"));
+    }
+
+    @Test
+    void listenersFiredInRegisteredOrder() {
+        Element element = ElementFactory.createDiv();
+        List<Integer> eventOrder = new ArrayList<>();
+
+        for (int i = 0; i < 10; i++) {
+            final int j = i;
+            element.addEventListener("click", e -> {
+                eventOrder.add(j);
+            });
+        }
+        fireEvent(element, "click");
+        assertArrayEquals(new Object[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 },
+                eventOrder.toArray());
+    }
+
+    private void fireEvent(Element element, String eventType) {
+        element.getNode().getFeature(ElementListenerMap.class)
+                .fireEvent(new DomEvent(element, eventType,
+                        JacksonUtils.createObjectNode()));
+
+    }
+
+    @Test
+    void eventsWhenListenerIsRegisteredManyTimes() {
+        AtomicInteger invocations = new AtomicInteger(0);
+
+        DomEventListener listener = e -> {
+            invocations.incrementAndGet();
+        };
+        Element element = ElementFactory.createDiv();
+        element.addEventListener("click", listener);
+        element.addEventListener("click", listener);
+
+        fireEvent(element, "click");
+
+        assertEquals(2, invocations.get());
+    }
+
+    @Test
+    void addAsOwnChild() {
+        assertThrows(IllegalStateException.class, () -> {
+            Element element = ElementFactory.createDiv();
+            element.appendChild(element);
+        });
+    }
+
+    @Test
+    void addAsChildOfChild() {
+        assertThrows(IllegalStateException.class, () -> {
+            Element parent = ElementFactory.createDiv();
+            Element child = ElementFactory.createDiv();
+            parent.appendChild(child);
+
+            child.appendChild(parent);
+        });
+    }
+
+    @Override
+    protected void checkIsNotChild(Node<?> parent, Element child) {
+        assertNotEquals(child.getParent(), parent);
+
+        super.checkIsNotChild(parent, child);
+    }
+
+    @Test
+    void testGetOwnTextContent() {
+        Element element = ElementFactory.createDiv();
+        element.setText("foo");
+        element.appendChild(ElementFactory.createDiv()
+                .appendChild(ElementFactory.createSpan("span contents")));
+        element.appendChild(ElementFactory.createStrong("strong contents"));
+        element.appendChild(Element.createText("Another text node"));
+
+        assertEquals("fooAnother text node", element.getText());
+        assertEquals("foospan contentsstrong contentsAnother text node",
+                element.getTextRecursively());
+    }
+
+    @Test
+    void setResourceAttribute_elementIsNotAttached_elementHasAttribute() {
+        UI.setCurrent(createUI());
+        Element element = ElementFactory.createDiv();
+        String resName = "resource";
+        StreamResource resource = createEmptyResource(resName);
+        element.setAttribute("foo", resource);
+
+        assertTrue(element.hasAttribute("foo"));
+
+        assertTrue(element.getAttribute("foo").endsWith(resName));
+    }
+
+    @Test
+    void setResourceAttribute_elementIsNotAttachedAndHasAttribute_elementHasAttribute() {
+        UI.setCurrent(createUI());
+        Element element = ElementFactory.createDiv();
+        element.setAttribute("foo", "bar");
+
+        String resName = "resource";
+        StreamResource resource = createEmptyResource(resName);
+        element.setAttribute("foo", resource);
+
+        assertTrue(element.hasAttribute("foo"));
+
+        assertTrue(element.getAttribute("foo").endsWith(resName));
+    }
+
+    @Test
+    void setResourceAttributeSeveralTimes_elementIsNotAttached_elementHasAttribute() {
+        UI.setCurrent(createUI());
+        Element element = ElementFactory.createDiv();
+        String resName = "resource";
+        StreamResource resource = createEmptyResource(resName);
+        element.setAttribute("foo", resource);
+
+        assertTrue(element.hasAttribute("foo"));
+
+        resName = "resource1";
+        resource = createEmptyResource(resName);
+        element.setAttribute("foo", resource);
+
+        assertTrue(element.hasAttribute("foo"));
+
+        assertTrue(element.getAttribute("foo").endsWith(resName));
+    }
+
+    @Test
+    void setResourceAttribute_nullValue_attributeRemoved() {
+        UI.setCurrent(createUI());
+        Element element = ElementFactory.createDiv();
+        element.setAttribute("foo", createEmptyResource("resource"));
+
+        element.setAttribute("foo", (StreamResource) null);
+
+        assertFalse(element.hasAttribute("foo"));
+    }
+
+    @Test
+    void setResourceAttribute_classAttribute() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element element = ElementFactory.createDiv();
+            element.setAttribute("class", mock(StreamResource.class));
+        });
+    }
+
+    @Test
+    void setResourceAttribute_nullAttribute() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element element = ElementFactory.createDiv();
+            element.setAttribute(null, mock(StreamResource.class));
+        });
+    }
+
+    @Test
+    void setResourceAttribute_elementIsAttached_elementHasAttribute() {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+        String resName = "resource";
+        StreamResource resource = createEmptyResource(resName);
+        ui.getElement().setAttribute("foo", resource);
+
+        assertTrue(ui.getElement().hasAttribute("foo"));
+        assertTrue(ui.getElement().getAttribute("foo").endsWith(resName));
+    }
+
+    @Test
+    void setResourceAttribute_elementIsAttached_setAnotherResource()
+            throws URISyntaxException {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+        StreamResource resource = createEmptyResource("resource1");
+        ui.getElement().setAttribute("foo", resource);
+
+        String uri = ui.getElement().getAttribute("foo");
+        Optional<StreamResource> res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, new URI(uri));
+        assertTrue(res.isPresent());
+
+        String resName = "resource2";
+        ui.getElement().setAttribute("foo", createEmptyResource(resName));
+        res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, new URI(uri));
+        assertFalse(res.isPresent());
+
+        assertTrue(ui.getElement().hasAttribute("foo"));
+        assertTrue(ui.getElement().getAttribute("foo").endsWith(resName));
+    }
+
+    @Test
+    void setResourceAttribute_elementIsAttached_setRawAttribute()
+            throws URISyntaxException, InterruptedException {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+        StreamResource resource = createEmptyResource("resource");
+        ui.getElement().setAttribute("foo", resource);
+
+        String uri = ui.getElement().getAttribute("foo");
+        Optional<StreamResource> res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, new URI(uri));
+        assertTrue(res.isPresent());
+        res = null;
+
+        WeakReference<StreamResource> ref = new WeakReference<>(resource);
+        resource = null;
+
+        ui.getElement().setAttribute("foo", "bar");
+
+        TestUtil.isGarbageCollected(ref);
+        res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, new URI(uri));
+
+        assertFalse(res.isPresent());
+        assertTrue(ui.getElement().hasAttribute("foo"));
+        assertTrue(ui.getElement().getAttribute("foo").equals("bar"));
+    }
+
+    @Test
+    void setResourceAttribute_elementIsAttached_removeAttribute()
+            throws URISyntaxException, InterruptedException {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+        StreamResource resource = createEmptyResource("resource");
+        ui.getElement().setAttribute("foo", resource);
+
+        String uri = ui.getElement().getAttribute("foo");
+        Optional<StreamResource> res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, new URI(uri));
+        assertTrue(res.isPresent());
+        res = null;
+
+        WeakReference<StreamResource> ref = new WeakReference<>(resource);
+        resource = null;
+
+        ui.getElement().removeAttribute("foo");
+        TestUtil.isGarbageCollected(ref);
+
+        res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, new URI(uri));
+        assertFalse(res.isPresent());
+        assertFalse(ui.getElement().hasAttribute("foo"));
+        assertNull(ui.getElement().getAttribute("foo"));
+    }
+
+    @Test
+    void setResourceAttribute_attachElement_resourceIsRegistered()
+            throws URISyntaxException {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+
+        StreamResource resource = createEmptyResource("resource");
+        Element element = ElementFactory.createDiv();
+        element.setAttribute("foo", resource);
+
+        ui.getElement().appendChild(element);
+
+        assertTrue(element.hasAttribute("foo"));
+
+        String uri = element.getAttribute("foo");
+        Optional<StreamResource> res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, new URI(uri));
+        assertTrue(res.isPresent());
+    }
+
+    @Test
+    void setResourceAttribute_attachElement_setAnotherResource()
+            throws URISyntaxException, InterruptedException {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+
+        StreamResource resource = createEmptyResource("resource1");
+        Element element = ElementFactory.createDiv();
+        element.setAttribute("foo", resource);
+
+        WeakReference<StreamResource> ref = new WeakReference<>(resource);
+        resource = null;
+
+        String resName = "resource2";
+        element.setAttribute("foo", createEmptyResource(resName));
+
+        ui.getElement().appendChild(element);
+
+        assertTrue(element.hasAttribute("foo"));
+
+        String uri = element.getAttribute("foo");
+        Optional<StreamResource> res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, new URI(uri));
+        assertTrue(res.isPresent());
+        assertTrue(uri.endsWith(resName));
+
+        // allow GC to collect element and all its (detach) listeners
+        element = null;
+
+        TestUtil.isGarbageCollected(ref);
+    }
+
+    @Test
+    void setResourceAttribute_attachElement_setRawAttribute()
+            throws URISyntaxException, InterruptedException {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+
+        StreamResource resource = createEmptyResource("resource");
+        Element element = ElementFactory.createDiv();
+        element.setAttribute("foo", resource);
+
+        WeakReference<StreamResource> ref = new WeakReference<>(resource);
+        resource = null;
+
+        element.setAttribute("foo", "bar");
+
+        TestUtil.isGarbageCollected(ref);
+
+        ui.getElement().appendChild(element);
+
+        assertTrue(element.hasAttribute("foo"));
+        assertEquals("bar", element.getAttribute("foo"));
+    }
+
+    @Test
+    void setResourceAttribute_attachElement_removeAttribute()
+            throws URISyntaxException, InterruptedException {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+
+        StreamResource resource = createEmptyResource("resource");
+        Element element = ElementFactory.createDiv();
+        element.setAttribute("foo", resource);
+
+        WeakReference<StreamResource> ref = new WeakReference<>(resource);
+        resource = null;
+
+        element.removeAttribute("foo");
+
+        ui.getElement().appendChild(element);
+
+        TestUtil.isGarbageCollected(ref);
+
+        assertFalse(element.hasAttribute("foo"));
+
+        assertNull(element.getAttribute("foo"));
+    }
+
+    @Test
+    void setResourceAttribute_attachElement_setAnotherResourceAfterAttaching()
+            throws URISyntaxException, InterruptedException {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+
+        StreamResource resource = createEmptyResource("resource1");
+        Element element = ElementFactory.createDiv();
+        element.setAttribute("foo", resource);
+
+        WeakReference<StreamResource> ref = new WeakReference<>(resource);
+        resource = null;
+
+        ui.getElement().appendChild(element);
+
+        String resName = "resource2";
+        element.setAttribute("foo", createEmptyResource(resName));
+
+        assertTrue(element.hasAttribute("foo"));
+
+        TestUtil.isGarbageCollected(ref);
+
+        assertNull(ref.get());
+
+        String uri = element.getAttribute("foo");
+        Optional<StreamResource> res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, new URI(uri));
+        assertTrue(res.isPresent());
+        assertTrue(uri.endsWith(resName));
+    }
+
+    @Test
+    void setResourceAttribute_attachElement_setRawAttributeAfterAttaching()
+            throws URISyntaxException, InterruptedException {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+
+        StreamResource resource = createEmptyResource("resource");
+        Element element = ElementFactory.createDiv();
+        element.setAttribute("foo", resource);
+
+        WeakReference<StreamResource> ref = new WeakReference<>(resource);
+        resource = null;
+
+        ui.getElement().appendChild(element);
+
+        element.setAttribute("foo", "bar");
+
+        TestUtil.isGarbageCollected(ref);
+
+        assertNull(ref.get());
+
+        assertTrue(element.hasAttribute("foo"));
+
+        assertEquals("bar", element.getAttribute("foo"));
+    }
+
+    @Test
+    void setResourceAttribute_attachElement_removeAttributeAfterAttaching()
+            throws URISyntaxException, InterruptedException {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+
+        StreamResource resource = createEmptyResource("resource");
+        Element element = ElementFactory.createDiv();
+        element.setAttribute("foo", resource);
+
+        WeakReference<StreamResource> ref = new WeakReference<>(resource);
+        resource = null;
+
+        ui.getElement().appendChild(element);
+
+        element.removeAttribute("foo");
+
+        TestUtil.isGarbageCollected(ref);
+
+        assertNull(ref.get());
+
+        assertFalse(element.hasAttribute("foo"));
+
+        assertNull(element.getAttribute("foo"));
+    }
+
+    @Test
+    void setResourceAttribute_detachElement_resourceIsUnregistered()
+            throws URISyntaxException, InterruptedException {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+
+        String resName = "resource";
+        StreamResource resource = createEmptyResource(resName);
+        element.setAttribute("foo", resource);
+        String attribute = element.getAttribute("foo");
+
+        WeakReference<StreamResource> ref = new WeakReference<>(resource);
+        resource = null;
+
+        URI uri = new URI(attribute);
+        Optional<StreamResource> res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, uri);
+        assertTrue(res.isPresent());
+
+        ui.getElement().removeAllChildren();
+
+        res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, uri);
+        assertFalse(res.isPresent());
+
+        assertTrue(element.hasAttribute("foo"));
+        assertNotNull(element.getAttribute("foo"));
+        assertTrue(element.getAttribute("foo").endsWith(resName));
+
+        element.setAttribute("foo", "bar");
+        assertTrue(element.hasAttribute("foo"));
+        assertEquals("bar", element.getAttribute("foo"));
+
+        TestUtil.isGarbageCollected(ref);
+    }
+
+    @Test
+    void setResourceAttribute_detachAndReattachElement_resourceReregistered()
+            throws URISyntaxException {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+
+        String resName = "resource";
+        StreamResource resource = createEmptyResource(resName);
+        element.setAttribute("foo", resource);
+        String attribute = element.getAttribute("foo");
+
+        URI uri = new URI(attribute);
+        Optional<StreamResource> res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, uri);
+        assertTrue(res.isPresent());
+
+        ui.getElement().removeAllChildren();
+
+        res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, uri);
+        assertFalse(res.isPresent());
+
+        ui.getElement().appendChild(element);
+
+        res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, uri);
+        assertTrue(res.isPresent());
+    }
+
+    @Test
+    void setResourceAttribute_attachAndDetachAndReattachElement_resourceReregistered()
+            throws URISyntaxException {
+        UI ui = createUI();
+        UI.setCurrent(ui);
+        Element element = ElementFactory.createDiv();
+
+        String resName = "resource";
+        StreamResource resource = createEmptyResource(resName);
+        element.setAttribute("foo", resource);
+        String attribute = element.getAttribute("foo");
+
+        ui.getElement().appendChild(element);
+
+        URI uri = new URI(attribute);
+        Optional<StreamResource> res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, uri);
+        assertTrue(res.isPresent());
+
+        ui.getElement().removeAllChildren();
+
+        res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, uri);
+        assertFalse(res.isPresent());
+
+        ui.getElement().appendChild(element);
+
+        res = ui.getSession().getResourceRegistry()
+                .getResource(StreamResource.class, uri);
+        assertTrue(res.isPresent());
+    }
+
+    @Test
+    void setResourceAttribute_elementIsText_operationIsNotSupported() {
+        assertThrows(UnsupportedOperationException.class, () -> {
+            Element.createText("").setAttribute("foo",
+                    mock(StreamResource.class));
+        });
+    }
+
+    @Test
+    void testAttachListener_parentAttach_childListenersTriggered() {
+        Element body = new UI().getElement();
+        Element parent = ElementFactory.createDiv();
+        Element child = ElementFactory.createDiv();
+        Element grandChild = ElementFactory.createDiv();
+
+        AtomicInteger childTriggered = new AtomicInteger();
+        AtomicInteger grandChildTriggered = new AtomicInteger();
+
+        Registration registrationHandle = child.addAttachListener(event -> {
+            childTriggered.addAndGet(1);
+        });
+        child.addAttachListener(event -> {
+            assertEquals(child, event.getSource());
+        });
+        grandChild.addAttachListener(event -> {
+            grandChildTriggered.addAndGet(1);
+        });
+        grandChild.addAttachListener(event -> {
+            assertEquals(grandChild, event.getSource());
+        });
+
+        parent.appendChild(child);
+        child.appendChild(grandChild);
+
+        assertEquals(childTriggered.get(), 0);
+        assertEquals(grandChildTriggered.get(), 0);
+
+        body.appendChild(parent);
+
+        assertEquals(childTriggered.get(), 1);
+        assertEquals(grandChildTriggered.get(), 1);
+
+        body.removeAllChildren();
+        parent.removeAllChildren();
+
+        body.appendChild(parent);
+        parent.appendChild(child);
+
+        assertEquals(childTriggered.get(), 2);
+        assertEquals(grandChildTriggered.get(), 2);
+
+        registrationHandle.remove();
+
+        body.removeAllChildren();
+        body.appendChild(child);
+
+        assertEquals(childTriggered.get(), 2);
+        assertEquals(grandChildTriggered.get(), 3);
+    }
+
+    @Test
+    void testDetachListener_parentDetach_childListenersTriggered() {
+        Element body = new UI().getElement();
+        Element parent = ElementFactory.createDiv();
+        Element child = ElementFactory.createDiv();
+        Element grandChild = ElementFactory.createDiv();
+
+        AtomicInteger triggered = new AtomicInteger();
+
+        Registration registrationHandle = child.addDetachListener(event -> {
+            triggered.addAndGet(1);
+            assertEquals(child, event.getSource());
+        });
+
+        grandChild.addDetachListener(event -> {
+            triggered.addAndGet(1);
+            assertEquals(grandChild, event.getSource());
+        });
+
+        child.appendChild(grandChild);
+        parent.appendChild(child);
+        body.appendChild(parent);
+
+        assertEquals(triggered.get(), 0);
+
+        body.removeAllChildren();
+        assertEquals(triggered.get(), 2);
+
+        body.appendChild(parent);
+        body.removeAllChildren();
+
+        assertEquals(triggered.get(), 4);
+
+        body.appendChild(parent);
+        registrationHandle.remove();
+
+        body.removeAllChildren();
+
+        assertEquals(triggered.get(), 5);
+    }
+
+    @Test
+    void testAttachListener_eventOrder_childFirst() {
+        Element body = new UI().getElement();
+        Element parent = ElementFactory.createDiv();
+        Element child = ElementFactory.createDiv();
+        parent.appendChild(child);
+
+        AtomicBoolean parentAttached = new AtomicBoolean();
+        AtomicBoolean childAttached = new AtomicBoolean();
+
+        child.addAttachListener(event -> {
+            childAttached.set(true);
+            assertFalse(parentAttached.get());
+        });
+        parent.addAttachListener(event -> {
+            parentAttached.set(true);
+            assertTrue(childAttached.get());
+        });
+
+        body.appendChild(parent);
+
+        assertTrue(parentAttached.get());
+        assertTrue(childAttached.get());
+    }
+
+    @Test
+    void testDetachListener_eventOrder_childFirst() {
+        Element body = new UI().getElement();
+        Element parent = ElementFactory.createDiv();
+        Element child = ElementFactory.createDiv();
+        parent.appendChild(child);
+        body.appendChild(parent);
+
+        AtomicBoolean parentDetached = new AtomicBoolean();
+        AtomicBoolean childDetached = new AtomicBoolean();
+
+        child.addDetachListener(event -> {
+            childDetached.set(true);
+            assertFalse(parentDetached.get());
+        });
+        parent.addDetachListener(event -> {
+            parentDetached.set(true);
+            assertTrue(childDetached.get());
+        });
+
+        body.removeAllChildren();
+
+        assertTrue(parentDetached.get());
+        assertTrue(childDetached.get());
+    }
+
+    @Test
+    void testAttachDetach_elementMoved_bothEventsTriggered() {
+        Element body = new UI().getElement();
+        Element parent = ElementFactory.createDiv();
+        Element child = ElementFactory.createDiv();
+
+        parent.appendChild(child);
+        body.appendChild(parent);
+
+        AtomicBoolean attached = new AtomicBoolean();
+        AtomicBoolean detached = new AtomicBoolean();
+
+        child.addAttachListener(event -> {
+            attached.set(true);
+            assertTrue(detached.get());
+        });
+        child.addDetachListener(event -> {
+            detached.set(true);
+            assertFalse(attached.get());
+        });
+
+        body.appendChild(child);
+
+        assertTrue(attached.get());
+        assertTrue(detached.get());
+    }
+
+    @Test
+    void testAttachEvent_stateTreeCanFound() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+
+        AtomicInteger attached = new AtomicInteger();
+
+        child.addAttachListener(event -> {
+            assertNotNull(event.getSource().getNode().getOwner());
+            assertNotEquals(NullOwner.get(),
+                    event.getSource().getNode().getOwner());
+        });
+        child.addAttachListener(event -> attached.incrementAndGet());
+
+        body.appendChild(child);
+        assertEquals(1, attached.get());
+    }
+
+    @Test
+    void testDetachEvent_stateTreeCanFound() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        body.appendChild(child);
+
+        AtomicInteger detached = new AtomicInteger();
+
+        child.addDetachListener(event -> {
+            assertNotNull(event.getSource().getNode().getOwner());
+            assertNotEquals(NullOwner.get(),
+                    event.getSource().getNode().getOwner());
+        });
+        child.addDetachListener(event -> detached.incrementAndGet());
+
+        body.removeAllChildren();
+
+        assertEquals(1, detached.get());
+    }
+
+    @Test
+    void testMoveFromUiToUi_doesNotThrow() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        body.appendChild(child);
+
+        child.removeFromTree();
+
+        body = new UI().getElement();
+        body.appendChild(child);
+        assertEquals(body, child.getParent());
+    }
+
+    @Test
+    void testRemoveFromTree_inDetachListener_removedFromParent() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        body.appendChild(child);
+
+        child.addDetachListener(event -> child.removeFromTree());
+
+        body.removeAllChildren();
+
+        assertEquals(null, child.getParent());
+    }
+
+    @Test
+    void testRemoveFromTree_isVirtualChild_removedFromParent() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+
+        body.getNode().getFeature(VirtualChildrenList.class)
+                .append(child.getNode(), "");
+
+        assertTrue(child.isVirtualChild());
+
+        child.removeFromTree();
+
+        assertFalse(child.isVirtualChild());
+        assertEquals(0,
+                body.getNode().getFeature(VirtualChildrenList.class).size());
+    }
+
+    private static Registration logWhenAttached(Element element,
+            List<String> log, String prefix) {
+        return element.whenAttached(ui -> {
+            log.add(prefix + "attach");
+            return () -> log.add(prefix + "detach");
+        });
+    }
+
+    @Test
+    void whenAttached_notAttached_handlerNotRunUntilAttach() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        List<String> log = new ArrayList<>();
+        logWhenAttached(child, log, "");
+
+        assertEquals(List.of(), log);
+
+        body.appendChild(child);
+        assertEquals(List.of("attach"), log);
+    }
+
+    @Test
+    void whenAttached_alreadyAttached_handlerRunImmediately() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        body.appendChild(child);
+        List<String> log = new ArrayList<>();
+
+        logWhenAttached(child, log, "");
+        assertEquals(List.of("attach"), log);
+    }
+
+    @Test
+    void whenAttached_detach_cleanupRun() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        body.appendChild(child);
+        List<String> log = new ArrayList<>();
+        logWhenAttached(child, log, "");
+
+        child.removeFromParent();
+        assertEquals(List.of("attach", "detach"), log);
+    }
+
+    @Test
+    void whenAttached_reattach_handlerRunAgain() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        List<String> log = new ArrayList<>();
+        logWhenAttached(child, log, "");
+
+        body.appendChild(child);
+        child.removeFromParent();
+        body.appendChild(child);
+
+        assertEquals(List.of("attach", "detach", "attach"), log);
+    }
+
+    @Test
+    void whenAttached_handlerReceivesCurrentUi() {
+        UI ui = new UI();
+        Element child = ElementFactory.createDiv();
+        ui.getElement().appendChild(child);
+
+        List<UI> seen = new ArrayList<>();
+        child.whenAttached(handlerUi -> {
+            seen.add(handlerUi);
+            return null;
+        });
+
+        assertEquals(1, seen.size());
+        assertSame(ui, seen.get(0));
+    }
+
+    @Test
+    void whenAttached_nullCleanup_accepted() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        body.appendChild(child);
+        child.whenAttached(ui -> null);
+
+        child.removeFromParent();
+        body.appendChild(child);
+    }
+
+    @Test
+    void whenAttached_removeRegistrationWhileAttached_cleanupRunAndHandlerNotRunAgain() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        body.appendChild(child);
+        List<String> log = new ArrayList<>();
+        Registration registration = logWhenAttached(child, log, "");
+
+        registration.remove();
+        assertEquals(List.of("attach", "detach"), log);
+
+        child.removeFromParent();
+        body.appendChild(child);
+        assertEquals(List.of("attach", "detach"), log);
+    }
+
+    @Test
+    void whenAttached_removeRegistrationWhileDetached_noCleanupAndHandlerNotRunAgain() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        body.appendChild(child);
+        List<String> log = new ArrayList<>();
+        Registration registration = logWhenAttached(child, log, "");
+        child.removeFromParent();
+
+        registration.remove();
+        assertEquals(List.of("attach", "detach"), log);
+
+        body.appendChild(child);
+        assertEquals(List.of("attach", "detach"), log);
+    }
+
+    @Test
+    void whenAttached_removeRegistrationTwice_cleanupRunOnce() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        body.appendChild(child);
+        List<String> log = new ArrayList<>();
+        Registration registration = logWhenAttached(child, log, "");
+
+        registration.remove();
+        registration.remove();
+        assertEquals(List.of("attach", "detach"), log);
+    }
+
+    @Test
+    void whenAttached_multipleScopes_independent() {
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        body.appendChild(child);
+        List<String> log = new ArrayList<>();
+        Registration first = logWhenAttached(child, log, "first-");
+        logWhenAttached(child, log, "second-");
+
+        first.remove();
+        child.removeFromParent();
+
+        assertEquals(List.of("first-attach", "second-attach", "first-detach",
+                "second-detach"), log);
+    }
+
+    @Test
+    void whenAttached_movedToNewUi_cleanupAndHandlerRunOncePerUi() {
+        // Mimics UIInternalUpdater.moveToNewUI for @PreserveOnRefresh
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        body.appendChild(child);
+        List<String> log = new ArrayList<>();
+        logWhenAttached(child, log, "");
+
+        child.removeFromTree(false);
+        assertEquals(List.of("attach", "detach"), log);
+
+        new UI().getElement().appendChild(child);
+        assertEquals(List.of("attach", "detach", "attach"), log);
+    }
+
+    @Test
+    void whenAttached_nodeReattachedWithoutDetachEvent_cleanupRunBeforeNewAttach() {
+        // A node can be reset and reattached without a detach event reaching
+        // its listeners. The cleanup must still run before the handler runs
+        // again, so that a scope never has two live cleanups at once.
+        Element body = new UI().getElement();
+        Element child = ElementFactory.createDiv();
+        body.appendChild(child);
+        List<String> log = new ArrayList<>();
+        logWhenAttached(child, log, "");
+
+        child.getNode().removeFromTree(false);
+        assertEquals(List.of("attach"), log);
+
+        new UI().getElement().appendChild(child);
+        assertEquals(List.of("attach", "detach", "attach"), log);
+    }
+
+    @Test
+    void whenAttached_failingCleanup_reportedToErrorHandlerAndOtherCleanupsRun() {
+        UI ui = createUI();
+        Element child = ElementFactory.createDiv();
+        ui.getElement().appendChild(child);
+
+        List<ErrorEvent> errors = new ArrayList<>();
+        ui.getSession().setErrorHandler(errors::add);
+
+        child.whenAttached(ignored -> () -> {
+            throw new IllegalStateException("cleanup failed");
+        });
+        List<String> log = new ArrayList<>();
+        logWhenAttached(child, log, "");
+
+        child.removeFromParent();
+
+        assertEquals(List.of("attach", "detach"), log);
+        assertEquals(1, errors.size());
+        assertEquals("cleanup failed",
+                errors.get(0).getThrowable().getMessage());
+    }
+
+    @Test
+    void whenAttached_nullHandler_throws() {
+        Element child = ElementFactory.createDiv();
+        assertThrows(NullPointerException.class,
+                () -> child.whenAttached(null));
+    }
+
+    private StreamResource createEmptyResource(String resName) {
+        return new StreamResource(resName,
+                () -> new ByteArrayInputStream(new byte[0]));
+    }
+
+    @SuppressWarnings("serial")
+    private UI createUI() {
+        VaadinSession session = new AlwaysLockedVaadinSession(
+                new MockVaadinServletService());
+        UI ui = new UI() {
+            @Override
+            public VaadinSession getSession() {
+                return session;
+            }
+        };
+        return ui;
+    }
+
+    @Test
+    void insertAtCurrentPositionNoOp() {
+        // Must have an UI to get attach events
+        UI ui = new UI();
+        Element parent = ui.getElement();
+        Element child = ElementFactory.createDiv();
+
+        parent.appendChild(child);
+
+        child.addDetachListener(e -> fail("Child should not be detached"));
+        parent.insertChild(0, child);
+    }
+
+    @Test
+    void textNodeTransformsNullToEmptyAndDoesNotThrowException() {
+        Element e = Element.createText(null);
+        assertEquals("", e.getText());
+    }
+
+    @Test
+    void textNodeOuterHtml() {
+        Element e = Element.createText("foobar");
+        assertEquals("foobar", e.getOuterHTML());
+    }
+
+    @Test
+    void singleElementOuterHtml() {
+        Element e = ElementFactory.createAnchor();
+        assertEquals("<a></a>", e.getOuterHTML());
+    }
+
+    @Test
+    void elementTreeOuterHtml() {
+        Element div = ElementFactory.createDiv();
+        Element span = ElementFactory.createSpan();
+        Element button = ElementFactory.createButton("hello");
+
+        div.appendChild(span);
+        span.appendChild(button);
+
+        assertEquals("<div>\n <span><button>hello</button></span>\n</div>",
+                div.getOuterHTML());
+    }
+
+    @Test
+    void elementAttributesOuterHtml() {
+        Element div = ElementFactory.createDiv();
+        div.setAttribute("foo", "bar");
+        div.getStyle().setWidth("20px");
+        div.getClassList().add("cls");
+        div.setAttribute("pin", "");
+
+        assertEquals(
+                "<div pin foo=\"bar\" style=\"width:20px\" class=\"cls\"></div>",
+                div.getOuterHTML());
+    }
+
+    @Test
+    void elementAttributeSpecialCharactersOuterHtml() {
+        Element div = ElementFactory.createDiv();
+        div.setAttribute("foo", "bar\"'&quot;");
+
+        assertEquals("<div foo=\"bar&quot;'&amp;quot;\"></div>",
+                div.getOuterHTML());
+    }
+
+    @Test
+    void htmlComponentOuterHtml() {
+        Html html = new Html(
+                "<div style='background:green'><span><button>hello</button></span></div>");
+        assertEquals("""
+                <div style="background:green">
+                 <span><button>hello</button></span>
+                </div>""", html.getElement().getOuterHTML());
+    }
+
+    @Test
+    void callFunctionBeforeAttach() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        element.callJsFunction("noArgsMethod");
+        ui.getElement().appendChild(element);
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        assertPendingFunctionCall(ui, element, "noArgsMethod");
+    }
+
+    @Test
+    void callFunctionAfterAttach() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+        element.callJsFunction("noArgsMethod");
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        assertPendingFunctionCall(ui, element, "noArgsMethod");
+    }
+
+    @Test
+    void callFunctionBeforeDetach() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+        element.callJsFunction("noArgsMethod");
+        ui.getElement().removeAllChildren();
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        List<PendingJavaScriptInvocation> invocations = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertTrue(invocations.isEmpty());
+    }
+
+    @Test
+    void callFunctionBeforeReAttach() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+        element.callJsFunction("noArgsMethod");
+
+        Element div = ElementFactory.createDiv();
+        ui.getElement().appendChild(div);
+        div.appendChild(element);
+
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        assertPendingFunctionCall(ui, element, "noArgsMethod");
+    }
+
+    @Test
+    void callFunctionTwoParams() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        element.callJsFunction("method", "foo", 123);
+        ui.getElement().appendChild(element);
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        assertPendingFunctionCall(ui, element, "method", "foo", 123);
+    }
+
+    @Test
+    void callFunctionWithBean() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        SimpleBean bean = new SimpleBean();
+        element.callJsFunction("method", bean);
+        ui.getElement().appendChild(element);
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        assertPendingFunctionCall(ui, element, "method", bean);
+    }
+
+    @Test
+    void callFunctionOnProperty() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        element.callJsFunction("property.other.method");
+        ui.getElement().appendChild(element);
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        // The browser reads the path and calls the function it names, so the
+        // name travels as it was written however many properties it goes
+        // through
+        assertPendingFunctionCall(ui, element, "property.other.method");
+    }
+
+    @Test
+    void executeJsWithDefinition_schedulesTheDeclaredExpressionAndCarriesTheCall() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+
+        element.executeJs(TestJs.class).method("foo");
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        List<PendingJavaScriptInvocation> pendingJs = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertEquals(1, pendingJs.size());
+        JavaScriptInvocation invocation = pendingJs.get(0).getInvocation();
+
+        assertEquals("this.method($0)", invocation.getExpression(),
+                "the declared expression should not be wrapped, since the generated function is what runs");
+        assertEquals(List.of("foo", element), invocation.getParameters(),
+                "the arguments should be followed by the element to apply the function to");
+        assertEquals(new JsCall(TestJs.class, "method", List.of("foo")),
+                invocation.getJsCall());
+    }
+
+    @Test
+    void executeJsWithDefinition_methodReturningAResult_schedulesAndReturnsIt() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+
+        PendingJavaScriptResult result = element.executeJs(ResultJs.class)
+                .readValue();
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        List<PendingJavaScriptInvocation> pendingJs = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertEquals(1, pendingJs.size());
+        assertSame(pendingJs.get(0), result,
+                "the result of the call should be the invocation the element scheduled");
+    }
+
+    @Test
+    void executeJsWithDefinition_variadicMethod_trailingArgumentsSentOneByOne() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+
+        element.executeJs(TestJs.class).methodWithMany("foo", "bar", "baz");
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        List<PendingJavaScriptInvocation> pendingJs = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertEquals(1, pendingJs.size());
+        JavaScriptInvocation invocation = pendingJs.get(0).getInvocation();
+
+        assertEquals(List.of("foo", "bar", "baz", element),
+                invocation.getParameters(),
+                "a trailing argument should reach the client on its own, so that the generated function collects it into its rest parameter");
+    }
+
+    @JsDefinition
+    interface ResultJs extends Serializable {
+        @JsExpression("return this.value;")
+        PendingJavaScriptResult readValue();
+    }
+
+    @JsDefinition
+    interface TestJs extends Serializable {
+        @JsExpression("this.method($0)")
+        void method(String value);
+
+        @JsExpression("this.method($0, ...$1)")
+        void methodWithMany(String value, Object... rest);
+    }
+
+    @Test
+    void addJsInitializer_nullExpression_throws() {
+        Element element = ElementFactory.createDiv();
+        assertThrows(NullPointerException.class,
+                () -> element.addJsInitializer(null));
+    }
+
+    @Test
+    void addJsInitializer_runsOnAttach_emitsInitInvocation() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        element.addJsInitializer("return () => {};", "foo");
+        ui.getElement().appendChild(element);
+
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        List<PendingJavaScriptInvocation> pending = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertEquals(1, pending.size());
+
+        JavaScriptInvocation invocation = pending.get(0).getInvocation();
+        assertTrue(
+                invocation.getExpression().contains("this.registerInitializer"),
+                "Wrapper expression should delegate to registerInitializer");
+        assertFalse(invocation.getExpression().contains("return () => {};"),
+                "Wrapper expression must not embed user JavaScript");
+
+        List<Object> params = invocation.getParameters();
+        assertEquals(3, params.size(),
+                "Expected [element, initializerId, userFunction]");
+        assertEquals(element, params.get(0));
+        assertEquals(Integer.valueOf(0), params.get(1));
+        assertInstanceOf(JsFunction.class, params.get(2));
+        JsFunction userFn = (JsFunction) params.get(2);
+        assertEquals("return () => {};", userFn.getBody());
+        assertEquals(List.of("foo"), userFn.getCaptures());
+    }
+
+    @Test
+    void addJsInitializer_sameRoundTripDetachReattach_doesNotRerun() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+        element.addJsInitializer("return () => {};");
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+        // Drain initial init invocation and advance wasAttached
+        ui.getInternals().dumpPendingJavaScriptInvocations();
+        ui.getInternals().getStateTree().collectChanges(c -> {
+        });
+
+        // Same round trip: remove and add back without collectChanges
+        ui.getElement().removeAllChildren();
+        ui.getElement().appendChild(element);
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        List<PendingJavaScriptInvocation> pending = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertTrue(pending.isEmpty(),
+                "Init should not be re-emitted when the client kept the DOM");
+    }
+
+    @Test
+    void addJsInitializer_crossRoundTripDetachReattach_rerunsInit() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+        element.addJsInitializer("return () => {};");
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+        ui.getInternals().dumpPendingJavaScriptInvocations();
+        ui.getInternals().getStateTree().collectChanges(c -> {
+        });
+
+        // Detach, flush response (collectChanges sets wasAttached=false)
+        ui.getElement().removeAllChildren();
+        ui.getInternals().getStateTree().collectChanges(c -> {
+        });
+
+        // Re-attach in the next round trip
+        ui.getElement().appendChild(element);
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        List<PendingJavaScriptInvocation> pending = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertEquals(1, pending.size(),
+                "Init should be re-emitted when the client discarded the DOM");
+        assertTrue(pending.get(0).getInvocation().getExpression()
+                .contains("this.registerInitializer"));
+    }
+
+    @Test
+    void addJsInitializer_remove_sendsDispose() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+        Registration registration = element
+                .addJsInitializer("return () => {};");
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+        ui.getInternals().dumpPendingJavaScriptInvocations();
+
+        registration.remove();
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        List<PendingJavaScriptInvocation> pending = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertEquals(1, pending.size());
+        assertTrue(pending.get(0).getInvocation().getExpression()
+                .contains("this.disposeInitializer"));
+    }
+
+    @Test
+    void addJsInitializer_removeTwice_sendsDisposeOnce() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+        Registration registration = element
+                .addJsInitializer("return () => {};");
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+        ui.getInternals().dumpPendingJavaScriptInvocations();
+
+        registration.remove();
+        registration.remove();
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        List<PendingJavaScriptInvocation> pending = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertEquals(1, pending.size(),
+                "remove() called twice should send dispose only once");
+    }
+
+    @Test
+    void addJsInitializer_removeBeforeFlush_doesNotSendAnything() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+        Registration registration = element
+                .addJsInitializer("return () => {};");
+        // Remove before the init JS has been collected
+        registration.remove();
+
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+        List<PendingJavaScriptInvocation> pending = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertTrue(pending.isEmpty(),
+                "Removed-before-flush registration should not send init nor dispose");
+    }
+
+    @Test
+    void addJsInitializer_attachDetachAttachSameRoundTrip_emitsOnlyOneInit() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+        element.addJsInitializer("return () => {};");
+
+        // Detach and re-attach again within the same round trip, before any
+        // flush. Only one init should be queued for the eventual flush.
+        ui.getElement().removeAllChildren();
+        ui.getElement().appendChild(element);
+
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        List<PendingJavaScriptInvocation> pending = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertEquals(1, pending.size(),
+                "Attach + detach + attach in one round trip should emit exactly one init");
+    }
+
+    @Test
+    void addJsInitializer_addedWhileDetached_emitsNothingUntilAttach() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        element.addJsInitializer("return () => {};");
+
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+        assertTrue(
+                ui.getInternals().dumpPendingJavaScriptInvocations().isEmpty(),
+                "No init should be emitted while the element is detached");
+
+        ui.getElement().appendChild(element);
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        List<PendingJavaScriptInvocation> pending = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertEquals(1, pending.size(),
+                "Init should be emitted once the element is attached");
+    }
+
+    @Test
+    void addJsInitializer_multipleInitializers_emitDistinctIds() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+        element.addJsInitializer("return () => {};");
+        element.addJsInitializer("return () => {};");
+
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        List<PendingJavaScriptInvocation> pending = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertEquals(2, pending.size());
+        // Init params are [element, initializerId, userFunction].
+        assertEquals(Integer.valueOf(0),
+                pending.get(0).getInvocation().getParameters().get(1));
+        assertEquals(Integer.valueOf(1),
+                pending.get(1).getInvocation().getParameters().get(1));
+    }
+
+    @Test
+    void addJsInitializer_removeOneOfMultiple_disposesOnlyThatOne() {
+        UI ui = new MockUI();
+        Element element = ElementFactory.createDiv();
+        ui.getElement().appendChild(element);
+        Registration first = element.addJsInitializer("return () => {};");
+        element.addJsInitializer("return () => {};");
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+        ui.getInternals().dumpPendingJavaScriptInvocations();
+
+        first.remove();
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        List<PendingJavaScriptInvocation> pending = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertEquals(1, pending.size());
+        JavaScriptInvocation invocation = pending.get(0).getInvocation();
+        assertTrue(
+                invocation.getExpression().contains("this.disposeInitializer"));
+        // Dispose params are [element, initializerId].
+        assertEquals(Integer.valueOf(0), invocation.getParameters().get(1));
+    }
+
+    @Test
+    void addJsInitializer_serializeAndDeserializeOwner_succeeds()
+            throws Exception {
+        Element element = ElementFactory.createDiv();
+        element.addJsInitializer("return () => {};");
+
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (ObjectOutputStream out = new ObjectOutputStream(bytes)) {
+            out.writeObject(element.getNode());
+        }
+        try (ObjectInputStream in = new ObjectInputStream(
+                new ByteArrayInputStream(bytes.toByteArray()))) {
+            assertInstanceOf(StateNode.class, in.readObject());
+        }
+    }
+
+    @Test
+    void attachShadowRoot_shadowRootCreatedAndChildrenArePreserved() {
+        Element element = ElementFactory.createDiv();
+        Element button = ElementFactory.createButton();
+        Element emphasis = ElementFactory.createEmphasis();
+        element.appendChild(button, emphasis);
+
+        ShadowRoot shadow = element.attachShadow();
+        assertNotNull(shadow);
+        assertEquals(element, shadow.getHost());
+        assertEquals(shadow, element.getShadowRoot().get());
+        assertEquals(2, element.getChildCount());
+        assertEquals(2, element.getChildren().count());
+        assertEquals(button, element.getChild(0));
+        assertEquals(emphasis, element.getChild(1));
+    }
+
+    @Test
+    void getShadowRoot_shadowRootIsEmpty() {
+        Element element = ElementFactory.createDiv();
+        assertFalse(element.getShadowRoot().isPresent());
+    }
+
+    @Test
+    void getParentNode_parentNodeIsTheSameAsParent() {
+        Element element = ElementFactory.createDiv();
+        Element child = ElementFactory.createDiv();
+
+        element.appendChild(child);
+
+        assertEquals(child.getParent(), child.getParentNode());
+    }
+
+    @Test
+    void getParentNode_elementInShadowRoot_parentIsNull() {
+        ShadowRoot element = ElementFactory.createDiv().attachShadow();
+        Element child = ElementFactory.createDiv();
+
+        element.appendChild(child);
+
+        assertNull(child.getParent());
+        assertEquals(element, child.getParentNode());
+    }
+
+    @Test
+    void parentIsDisabled_childIsDisabled() {
+        Element parent = ElementFactory.createDiv();
+        Element child = ElementFactory.createDiv();
+
+        parent.appendChild(child);
+
+        assertTrue(parent.isEnabled(), "Parent should be enabled");
+        assertTrue(child.isEnabled(), "Child should be enabled");
+
+        parent.setEnabled(false);
+
+        assertFalse(parent.isEnabled(), "Parent should be disabled");
+        assertFalse(child.isEnabled(), "Child should be disabled");
+
+        child.removeFromParent();
+
+        assertTrue(child.isEnabled(), "Child should be enabled");
+    }
+
+    @Test
+    void emptyElement_setDisabled_noChildFeatures() {
+        Element element = ElementFactory.createDiv();
+
+        element.setEnabled(false);
+
+        BasicElementStateProviderTest.assertNoChildFeatures(element);
+    }
+
+    @Test
+    void emptyElement_isVirtualChild_noChildFeatures() {
+        Element element = ElementFactory.createDiv();
+
+        element.isVirtualChild();
+
+        BasicElementStateProviderTest.assertNoChildFeatures(element);
+    }
+
+    @Test
+    void elementWithoutComponent_getComponentFeature() {
+        Element element = ElementFactory.createDiv();
+        element.appendChild(ElementFactory.createDiv());
+
+        element.getComponent();
+
+        assertFalse(element.getNode()
+                .getFeatureIfInitialized(ComponentMapping.class).isPresent(),
+                "getComponent() shouldn't initialize a component mapping feature");
+    }
+
+    @Test
+    void readMissingProperty_noFeatureInitialized() {
+        Element element = ElementFactory.createDiv();
+
+        element.getProperty("foo");
+        element.hasProperty("foo");
+        element.removeProperty("foo");
+        element.getPropertyNames().collect(Collectors.toList());
+
+        assertFalse(element.getNode()
+                .getFeatureIfInitialized(ElementPropertyMap.class).isPresent(),
+                "reading a property value shouldn't initialize a property map feature");
+    }
+
+    @Test
+    void readMissingAttribute_noFeatureInitialized() {
+        Element element = ElementFactory.createDiv();
+
+        element.getAttribute("foo");
+        element.hasAttribute("foo");
+        element.removeAttribute("foo");
+        element.getAttributeNames().collect(Collectors.toList());
+
+        assertFalse(element.getNode()
+                .getFeatureIfInitialized(ElementAttributeMap.class).isPresent(),
+                "reading an attribute value shouldn't initialize an attribute map feature");
+    }
+
+    @Test
+    void virtualChildren_areIdentifiedAsSuch() {
+        Element parent = ElementFactory.createDiv();
+        Element child = ElementFactory.createDiv();
+        Element virtualChild = ElementFactory.createDiv();
+        Element grandVirtualChild = ElementFactory.createDiv();
+
+        parent.appendChild(child);
+        parent.appendVirtualChild(virtualChild);
+        virtualChild.appendChild(grandVirtualChild);
+
+        assertFalse(parent.isVirtualChild());
+        assertFalse(child.isVirtualChild());
+        assertTrue(virtualChild.isVirtualChild());
+        assertFalse(grandVirtualChild.isVirtualChild());
+    }
+
+    @Test
+    void domPropertyListener_registersListenerAndDomTrigger() {
+        Element element = ElementFactory.createDiv();
+
+        AtomicReference<Serializable> listenerValue = new AtomicReference<>();
+
+        element.addPropertyChangeListener("property", "event", event -> {
+            if (listenerValue.getAndSet(event.getValue()) != null) {
+                fail("Unexpected event");
+            }
+        });
+
+        assertEquals(DisabledUpdateMode.ONLY_WHEN_ENABLED,
+                element.getNode().getFeature(ElementListenerMap.class)
+                        .getPropertySynchronizationMode("property"),
+                "The property should be synchronized");
+
+        ElementListenerMap listenerMap = element.getNode()
+                .getFeature(ElementListenerMap.class);
+
+        assertEquals(
+                Collections.singleton(
+                        JsonConstants.SYNCHRONIZE_PROPERTY_TOKEN + "property"),
+                ElementListenersTest.getExpressions(listenerMap, "event"),
+                "A DOM event synchronization should be defined");
+
+        element.setProperty("property", "value");
+        assertEquals(listenerValue.get(), "value",
+                "Listener shold be registered");
+    }
+
+    @Test
+    void domPropertyListener_unregisterCleansEverything() {
+        Element element = ElementFactory.createDiv();
+
+        DomListenerRegistration registration = element
+                .addPropertyChangeListener("property", "event", event -> {
+                    fail("Unexpected event");
+                });
+        registration.remove();
+
+        assertNull(
+                element.getNode().getFeature(ElementListenerMap.class)
+                        .getPropertySynchronizationMode("property"),
+                "The property should not be synchronized");
+
+        ElementListenerMap listenerMap = element.getNode()
+                .getFeature(ElementListenerMap.class);
+
+        assertEquals(Collections.emptySet(),
+                ElementListenersTest.getExpressions(listenerMap, "event"),
+                "There should be no DOM listener");
+
+        // Should not trigger assert in the listener
+        element.setProperty("property", "value");
+    }
+
+    @Test
+    void removingVirtualChildrenIsPossible() {
+        Element parent = new Element("root");
+        Element child1 = new Element("main");
+        Element child2 = new Element("menu");
+
+        parent.appendVirtualChild(child1, child2);
+
+        parent.removeVirtualChild(child2, child1);
+
+        assertNull(child1.getParent());
+        assertFalse(child1.isVirtualChild());
+
+        assertNull(child2.getParent());
+        assertFalse(child2.isVirtualChild());
+    }
+
+    @Test
+    void removeVirtualChildren_notVirtualChild_fails() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element parent = new Element("root");
+            Element child1 = new Element("main");
+
+            parent.appendChild(child1);
+
+            parent.removeVirtualChild(child1);
+        });
+    }
+
+    @Test
+    void removeFromParent_virtualChild_fails() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            Element parent = new Element("root");
+            Element child1 = new Element("main");
+
+            parent.appendVirtualChild(child1);
+
+            child1.removeFromParent();
+        });
+    }
+
+    @Test
+    void executeJavaScript_delegatesToExecJs() {
+        AtomicReference<String> invokedExpression = new AtomicReference<>();
+        AtomicReference<Object[]> invokedParams = new AtomicReference<>();
+
+        Element element = new Element("div") {
+            @Override
+            public PendingJavaScriptResult executeJs(String expression,
+                    Object... parameters) {
+                String oldExpression = invokedExpression.getAndSet(expression);
+                assertNull(oldExpression, "There should be no old expression");
+
+                Object[] oldParams = invokedParams.getAndSet(parameters);
+                assertNull(oldParams, "There should be no old params");
+
+                return null;
+            }
+        };
+
+        element.executeJs("foo", 1, true);
+
+        assertEquals("foo", invokedExpression.get());
+        assertEquals(Integer.valueOf(1), invokedParams.get()[0]);
+        assertEquals(Boolean.TRUE, invokedParams.get()[1]);
+    }
+
+    @Test
+    void givenTypeDefinedArray_ArrayStoreExceptionNotThrown() {
+        Element element = new Element("div") {
+            @Override
+            public PendingJavaScriptResult executeJs(String expression,
+                    Object... parameters) {
+                Serializable[] wrappedParameters;
+                if (parameters.length == 0) {
+                    wrappedParameters = new Serializable[] { this };
+                } else {
+                    wrappedParameters = Arrays.copyOf(parameters,
+                            parameters.length + 1, Serializable[].class);
+                    wrappedParameters[parameters.length] = this;
+                }
+                return null;
+            }
+        };
+
+        element.executeJs("foo", new Component[] { new Div() });
+    }
+
+    @Test
+    void callFunction_delegatesToCallJsFunction() {
+        AtomicReference<String> invokedFuction = new AtomicReference<>();
+        AtomicReference<Object[]> invokedParams = new AtomicReference<>();
+
+        Element element = new Element("div") {
+            @Override
+            public PendingJavaScriptResult callJsFunction(String functionName,
+                    Object... arguments) {
+                String oldExpression = invokedFuction.getAndSet(functionName);
+                assertNull(oldExpression,
+                        "There should be no old function name");
+
+                Object[] oldParams = invokedParams.getAndSet(arguments);
+                assertNull(oldParams, "There should be no old params");
+
+                return null;
+            }
+        };
+
+        element.callJsFunction("foo", 1, true);
+
+        assertEquals("foo", invokedFuction.get());
+        assertEquals(Integer.valueOf(1), invokedParams.get()[0]);
+        assertEquals(Boolean.TRUE, invokedParams.get()[1]);
+    }
+
+    @Test
+    void sizeSignal_isReadOnlyAndCached() {
+        UI ui = new MockUI();
+        Element div = ElementFactory.createDiv();
+        ui.getElement().appendChild(div);
+
+        Signal<Size> signal = div.sizeSignal();
+
+        assertFalse(signal instanceof ValueSignal,
+                "sizeSignal() should return a read-only signal");
+        assertEquals(new Size(0, 0), signal.peek());
+        assertSame(signal, div.sizeSignal(),
+                "sizeSignal() should return the same signal for an element");
+    }
+
+    @Test
+    void sizeSignal_updatedByClientReportedSize() {
+        UI ui = new MockUI();
+        Element div = ElementFactory.createDiv();
+        ui.getElement().appendChild(div);
+
+        Signal<Size> signal = div.sizeSignal();
+
+        reportSize(div, 800, 600);
+        assertEquals(new Size(800, 600), signal.peek());
+
+        reportSize(div, 1024, 768);
+        assertEquals(new Size(1024, 768), signal.peek());
+    }
+
+    @Test
+    void sizeSignal_detachedAndReattached_keepsSignalAndLastSize() {
+        UI ui = new MockUI();
+        Element div = ElementFactory.createDiv();
+        ui.getElement().appendChild(div);
+
+        Signal<Size> signal = div.sizeSignal();
+        reportSize(div, 800, 600);
+
+        div.removeFromParent();
+
+        assertEquals(new Size(800, 600), signal.peek(),
+                "the last reported size should be kept while detached");
+
+        ui.getElement().appendChild(div);
+
+        assertSame(signal, div.sizeSignal(),
+                "sizeSignal() should return the same signal after re-attach");
+    }
+
+    @Override
+    protected Element createParentNode() {
+        return ElementFactory.createDiv();
+    }
+
+    @Override
+    protected void assertChild(Node<?> parent, int index, Element child) {
+        assertEquals(parent, child.getParent());
+        assertEquals(child, parent.getChild(index));
+    }
+
+    private void assertPendingJs(UI ui, String js, Object... arguments) {
+        List<PendingJavaScriptInvocation> pendingJs = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        JavaScriptInvocation expected = new JavaScriptInvocation(js, arguments);
+        assertEquals(1, pendingJs.size());
+        assertInvocationEquals(expected, pendingJs.get(0).getInvocation());
+
+    }
+
+    /**
+     * Asserts that the only scheduled invocation is the call of the named
+     * function on the given element, which runs the JavaScript declared for
+     * calling a function rather than an expression naming the function.
+     */
+    private void assertPendingFunctionCall(UI ui, Element element,
+            String functionName, Object... arguments) {
+        List<PendingJavaScriptInvocation> pendingJs = ui.getInternals()
+                .dumpPendingJavaScriptInvocations();
+        assertEquals(1, pendingJs.size());
+        JavaScriptInvocation invocation = pendingJs.get(0).getInvocation();
+
+        JsCall call = invocation.getJsCall();
+        assertEquals(Element.CallFunctionJs.class, call.definitionType(),
+                "the call should run the JavaScript declared for calling a function");
+
+        List<Object> expected = new ArrayList<>();
+        expected.add(functionName);
+        Collections.addAll(expected, arguments);
+        assertEquals(expected, call.flattenArguments(),
+                "the name of the function should be followed by the arguments of the call");
+
+        expected.add(element);
+        assertEquals(expected, invocation.getParameters(),
+                "and the element to call the function on should be last");
+    }
+
+    private void assertInvocationEquals(JavaScriptInvocation expected,
+            JavaScriptInvocation actual) {
+        assertEquals(expected.getExpression(), actual.getExpression());
+        assertArrayEquals(expected.getParameters().toArray(),
+                actual.getParameters().toArray());
+
+    }
+
+    private static ArrayNode createNumberArray(double... items) {
+        return DoubleStream.of(items).mapToObj(JacksonUtils::createNode)
+                .collect(JacksonUtils.asArray());
+    }
+
+    /**
+     * Simulates the browser-side resize observer reporting a new size through
+     * the return channel that the size trigger registered on the element.
+     */
+    private void reportSize(Element element, int width, int height) {
+        ReturnChannelRegistration channel = element.getNode()
+                .getFeature(ReturnChannelMap.class).get(0);
+
+        ObjectNode size = JacksonUtils.createObjectNode();
+        size.put("width", width);
+        size.put("height", height);
+        ArrayNode arguments = JacksonUtils.createArrayNode();
+        arguments.add(size);
+
+        channel.invoke(arguments);
+    }
+
+    @Tag("div")
+    private static class Div extends Component {
+    }
+
+}

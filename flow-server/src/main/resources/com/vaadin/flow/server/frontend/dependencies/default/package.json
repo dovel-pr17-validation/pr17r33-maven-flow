@@ -1,0 +1,14 @@
+{
+  "private": true,
+  "description": "A list of default Flow dependencies",
+  "dependencies": {
+    "@polymer/polymer": "3.5.2",
+    "@vaadin/common-frontend": "0.0.25",
+    "lit": "3.3.3"
+  },
+  "devDependencies": {
+    "@typescript/native": "npm:typescript@7.0.2",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "strip-css-comments": "5.0.0"
+  }
+}

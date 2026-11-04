@@ -1,0 +1,1254 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.frontend;
+
+import java.io.File;
+import java.io.IOException;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Isolated;
+import org.mockito.ArgumentCaptor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.flow.internal.FrontendUtils;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.internal.MockLogger;
+import com.vaadin.flow.internal.ReflectTools;
+import com.vaadin.flow.server.Constants;
+import com.vaadin.flow.server.frontend.installer.NodeInstaller;
+import com.vaadin.flow.server.frontend.scanner.ClassFinder;
+import com.vaadin.tests.util.MockOptions;
+
+import static com.vaadin.flow.server.Constants.PACKAGE_JSON;
+import static com.vaadin.flow.server.Constants.TARGET;
+import static com.vaadin.flow.server.frontend.NodeUpdater.DEPENDENCIES;
+import static com.vaadin.flow.server.frontend.NodeUpdater.DEV_DEPENDENCIES;
+import static com.vaadin.flow.server.frontend.NodeUpdater.HASH_KEY;
+import static com.vaadin.flow.server.frontend.NodeUpdater.PROJECT_FOLDER;
+import static com.vaadin.flow.server.frontend.NodeUpdater.VAADIN_DEP_KEY;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyList;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.matches;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@Isolated
+@Tag("com.vaadin.flow.testcategory.SlowTests")
+class TaskRunNpmInstallTest {
+
+    @TempDir
+    File temporaryFolder;
+
+    private NodeUpdater nodeUpdater;
+
+    private TaskRunNpmInstall task;
+
+    protected File npmFolder;
+
+    protected ClassFinder finder;
+
+    protected Logger logger = spy(LoggerFactory.getLogger(NodeUpdater.class));
+
+    protected Options options;
+
+    @BeforeEach
+    void setUp() throws IOException, NoSuchFieldException {
+        npmFolder = Files.createTempDirectory(temporaryFolder.toPath(), "tmp")
+                .toFile();
+        options = new MockOptions(npmFolder).withBuildDirectory(TARGET)
+                .withBundleBuild(true);
+        finder = options.getClassFinder();
+        nodeUpdater = new NodeUpdater(options) {
+
+            @Override
+            public void execute() {
+            }
+
+            @Override
+            Logger log() {
+                return logger;
+            }
+
+        };
+        task = createTask(new ArrayList<>());
+        ReflectTools.setJavaFieldValue(
+                new FrontendTools(
+                        new FrontendToolsSettings(npmFolder.getAbsolutePath(),
+                                () -> npmFolder.getAbsolutePath())),
+                FrontendTools.class.getDeclaredField("activeNodeInstallation"),
+                null);
+    }
+
+    protected TaskRunNpmInstall createTask(List<String> additionalPostInstall) {
+        options.withPostinstallPackages(additionalPostInstall);
+        options.withNodeVersion(FrontendTools.DEFAULT_NODE_VERSION)
+                .withNodeDownloadRoot(
+                        URI.create(NodeInstaller.DEFAULT_NODEJS_DOWNLOAD_ROOT));
+
+        return new TaskRunNpmInstall(getNodeUpdater(), options);
+    }
+
+    @Test
+    void runNpmInstall_emptyDir_npmInstallIsExecuted()
+            throws ExecutionFailedException, IOException {
+        File nodeModules = options.getNodeModulesFolder();
+        nodeModules.mkdir();
+        getNodeUpdater().modified = false;
+
+        ensurePackageJson();
+        task.execute();
+
+        verify(logger).info(getRunningMsg());
+    }
+
+    @Test
+    void runNpmInstallAndCi_emptyDir_npmInstallAndCiIsExecuted()
+            throws ExecutionFailedException, IOException {
+        assumeNPMIsInUse();
+
+        File nodeModules = options.getNodeModulesFolder();
+        nodeModules.mkdir();
+        getNodeUpdater().modified = false;
+
+        ensurePackageJson();
+
+        task.execute();
+        verify(logger).info(getRunningMsg());
+
+        deleteDirectory(nodeModules);
+
+        options.withCiBuild(true);
+        task.execute();
+        verify(logger).info(getRunningMsg());
+    }
+
+    @Test
+    void runNpmCi_emptyDir_npmCiFails() throws IOException {
+        assumeNPMIsInUse();
+
+        File nodeModules = options.getNodeModulesFolder();
+        nodeModules.mkdir();
+        getNodeUpdater().modified = false;
+
+        ensurePackageJson();
+
+        options.withCiBuild(true);
+
+        assertThrows(ExecutionFailedException.class, task::execute);
+    }
+
+    @Test
+    void runNpmInstall_nodeModulesContainsStaging_npmInstallIsExecuted()
+            throws ExecutionFailedException, IOException {
+        File nodeModules = options.getNodeModulesFolder();
+        nodeModules.mkdir();
+        File staging = new File(nodeModules, ".staging");
+        staging.mkdir();
+        getNodeUpdater().modified = false;
+        ensurePackageJson();
+        task.execute();
+
+        verify(logger).info(getRunningMsg());
+    }
+
+    @Test
+    void runNpmInstall_toolIsChanged_nodeModulesIsRemoved()
+            throws ExecutionFailedException, IOException {
+        File nodeModules = options.getNodeModulesFolder();
+        nodeModules.mkdir();
+
+        ensurePackageJson();
+
+        getNodeUpdater().modified = true;
+        File yaml = new File(nodeModules, ".modules.yaml");
+        yaml.createNewFile();
+        task.execute();
+
+        assertFalse(yaml.exists());
+    }
+
+    @Test
+    void runNpmInstall_toolIsNotChanged_nodeModulesIsNotRemoved()
+            throws ExecutionFailedException, IOException {
+        File nodeModules = options.getNodeModulesFolder();
+        nodeModules.mkdir();
+
+        getNodeUpdater().modified = true;
+        File fakeFile = new File(nodeModules, ".fake.file");
+        fakeFile.createNewFile();
+        ensurePackageJson();
+        task.execute();
+
+        assertTrue(fakeFile.exists());
+    }
+
+    @Test
+    void runNpmInstall_nonEmptyDirNoLocalHash_npmInstallIsExecuted()
+            throws IOException, ExecutionFailedException {
+        File nodeModules = options.getNodeModulesFolder();
+        nodeModules.mkdir();
+        new File(nodeModules, "foo").createNewFile();
+        getNodeUpdater().modified = false;
+        ensurePackageJson();
+        task.execute();
+
+        verify(logger).info(getRunningMsg());
+    }
+
+    @Test
+    void runNpmInstall_nonEmptyDirNoHashMatch_npmInstallIsExecuted()
+            throws IOException, ExecutionFailedException {
+        File nodeModules = options.getNodeModulesFolder();
+        nodeModules.mkdir();
+        new File(nodeModules, "foo").createNewFile();
+        writeLocalHash("faulty");
+        getNodeUpdater().modified = false;
+
+        ensurePackageJson();
+        task.execute();
+
+        verify(logger).info(getRunningMsg());
+    }
+
+    @Test
+    void runNpmInstall_matchingHash_npmInstallIsNotExecuted()
+            throws IOException, ExecutionFailedException {
+        File nodeModules = options.getNodeModulesFolder();
+        nodeModules.mkdir();
+
+        new File(nodeModules, "foo").createNewFile();
+
+        writeLocalHash("");
+        getNodeUpdater().modified = false;
+        task.execute();
+
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(logger).info(captor.capture(), matches(getToolName()),
+                matches(getCommand()), matches(nodeModules.getAbsolutePath()
+                        .replaceAll("\\\\", "\\\\\\\\")),
+                any(), matches(Constants.PACKAGE_JSON));
+        assertEquals(
+                "Skipping `{} {}` because the frontend packages are already installed in the folder '{}' and the hash in the file '{}' is the same as in '{}'",
+                captor.getValue());
+    }
+
+    @Test
+    void runNpmInstall_matchingHashButEmptyModules_npmInstallIsExecuted()
+            throws IOException, ExecutionFailedException {
+        File nodeModules = options.getNodeModulesFolder();
+        nodeModules.mkdir();
+
+        writeLocalHash("");
+        getNodeUpdater().modified = false;
+        ensurePackageJson();
+        task.execute();
+
+        verify(logger).info(getRunningMsg());
+    }
+
+    void writeLocalHash(String hash) throws IOException {
+        final ObjectNode localHash = JacksonUtils.createObjectNode();
+        localHash.put(HASH_KEY, hash);
+
+        final File localHashFile = new File(options.getNodeModulesFolder(),
+                ".vaadin/vaadin.json");
+        Files.createDirectories(localHashFile.toPath().getParent());
+        getNodeUpdater().writePackageFile(localHash, localHashFile);
+    }
+
+    @Test
+    void runNpmInstall_modified_npmInstallIsExecuted()
+            throws ExecutionFailedException, IOException {
+        getNodeUpdater().modified = true;
+        ensurePackageJson();
+        task.execute();
+
+        verify(logger).info(getRunningMsg());
+    }
+
+    @Test
+    void runNpmInstall_vaadinHomeNodeIsAFolder_nodeIsReinstalled()
+            throws IOException, ExecutionFailedException {
+
+        options.withHomeNodeExecRequired(true)
+                .withNodeVersion(FrontendTools.DEFAULT_NODE_VERSION)
+                .withNodeDownloadRoot(
+                        URI.create(NodeInstaller.DEFAULT_NODEJS_DOWNLOAD_ROOT));
+
+        assertRunNpmInstallInstallsNewNode_whenVaadinHomeNodeIsAFolder(
+                new TaskRunNpmInstall(getNodeUpdater(), options));
+    }
+
+    @Test
+    void runNpmInstall_externalUpdateOfPackages_npmInstallIsRerun()
+            throws ExecutionFailedException, IOException {
+        getNodeUpdater().modified = true;
+
+        // manually fake TaskUpdatePackages.
+        ObjectNode packageJson = getNodeUpdater().getPackageJson();
+        updatePackageHash(packageJson);
+        getNodeUpdater().writePackageFile(packageJson);
+
+        task.execute();
+
+        final File localHashFile = new File(options.getNodeModulesFolder(),
+                ".vaadin/vaadin.json");
+        assertTrue(localHashFile.exists(),
+                "Local has file was not created after install.");
+
+        String fileContent = Files.readString(localHashFile.toPath());
+        JsonNode localHash = JacksonUtils.readTree(fileContent);
+        assertNotEquals("", localHash.get(HASH_KEY).asString(),
+                "We should have a non empty hash key");
+
+        // Update package json and hash as if someone had pushed to code repo.
+        packageJson = getNodeUpdater().getPackageJson();
+        ((ObjectNode) packageJson.get(VAADIN_DEP_KEY).get(DEPENDENCIES))
+                .put("a-avataaar", "^1.2.5");
+        String hash = packageJson.get(VAADIN_DEP_KEY).get(HASH_KEY).asString();
+        updatePackageHash(packageJson);
+
+        assertNotEquals(hash,
+                packageJson.get(VAADIN_DEP_KEY).get(HASH_KEY).asString(),
+                "Hash should have been updated");
+
+        getNodeUpdater().writePackageFile(packageJson);
+        logger = mock(Logger.class);
+
+        task.execute();
+
+        verify(logger).info(getRunningMsg());
+    }
+
+    protected void setupPostinstallPackages() throws IOException {
+        File nodeModules = options.getNodeModulesFolder();
+        nodeModules.mkdir();
+        getNodeUpdater().modified = false;
+
+        // Pre-populate node_modules/@vaadin/vaadin-usage-statistics/ so that
+        // shouldRunNpmInstall() sees a non-empty node_modules directory.
+        // Note: cleanUp() deletes node_modules before the actual install runs,
+        // so this copy won't survive — the install source is fake-stats/ below.
+        File statsDir = new File(nodeModules,
+                "@vaadin/vaadin-usage-statistics");
+        statsDir.mkdirs();
+        File statsPackageJson = new File(statsDir, "package.json");
+        String statsPackageJsonContents = new String(getClass()
+                .getResourceAsStream("fake-package-with-postinstall.json")
+                .readAllBytes(), StandardCharsets.UTF_8);
+        Files.writeString(statsPackageJson.toPath(), statsPackageJsonContents);
+
+        // Local install source for "@vaadin/vaadin-usage-statistics".
+        // Must live outside node_modules/ because cleanUp() deletes it
+        // before npm/pnpm install. Using a local path avoids fetching a
+        // non-existent version from the registry.
+        File fakeStatsPackageJson = new File(
+                new File(nodeModules.getParentFile(), "fake-stats"),
+                "package.json");
+        fakeStatsPackageJson.getParentFile().mkdirs();
+        Files.writeString(fakeStatsPackageJson.toPath(),
+                statsPackageJsonContents);
+
+        // Fake that we have installed "foo" (not in the default postinstall
+        // list unless explicitly added)
+        File fooPackageJson = new File(
+                new File(nodeModules.getParentFile(), "fake-foo"),
+                "package.json");
+        String fooPackageJsonContents = new String(getClass()
+                .getResourceAsStream("fake-package-with-postinstall.json")
+                .readAllBytes(), StandardCharsets.UTF_8);
+        fooPackageJson.getParentFile().mkdirs();
+        Files.writeString(fooPackageJson.toPath(), fooPackageJsonContents);
+
+        File packageJsonFile = ensurePackageJson();
+        JsonNode packageJson = getNodeUpdater().getPackageJson();
+        ((ObjectNode) packageJson.get(DEV_DEPENDENCIES))
+                .put("@vaadin/vaadin-usage-statistics", "./fake-stats");
+        ((ObjectNode) packageJson.get(DEV_DEPENDENCIES)).put("foo",
+                "./fake-foo");
+        Files.writeString(packageJsonFile.toPath(), packageJson.toString());
+
+    }
+
+    @Test
+    void runNpmInstall_noPostinstallScript_postIntstallNotExecuted()
+            throws IOException, ExecutionFailedException {
+        setupPostinstallPackages();
+
+        // Remove postinstall script from "@vaadin/vaadin-usage-statistics"
+        // in both the source directory and the node_modules copy, so that
+        // even after npm/pnpm re-installs from source, no postinstall exists
+        JsonNode statsPackageJsonContents = JacksonUtils
+                .readTree(new String(getClass()
+                        .getResourceAsStream(
+                                "fake-package-with-postinstall.json")
+                        .readAllBytes(), StandardCharsets.UTF_8));
+        ((ObjectNode) statsPackageJsonContents.get("scripts"))
+                .remove("postinstall");
+        String noPostinstallContent = statsPackageJsonContents.toString();
+
+        File statsSourcePackageJson = new File(
+                new File(options.getNpmFolder(), "fake-stats"), "package.json");
+        Files.writeString(statsSourcePackageJson.toPath(),
+                noPostinstallContent);
+
+        File statsNodeModulesPackageJson = new File(
+                new File(options.getNodeModulesFolder(),
+                        "@vaadin/vaadin-usage-statistics"),
+                "package.json");
+        Files.writeString(statsNodeModulesPackageJson.toPath(),
+                noPostinstallContent);
+
+        logger = new MockLogger();
+        assertTrue(logger.isDebugEnabled());
+        task.execute();
+
+        assertFalse(((MockLogger) logger).getLogs().contains(
+                "Running postinstall for '@vaadin/vaadin-usage-statistics'"),
+                "@vaadin/vaadin-usage-statistics without postinstall should not have been executed");
+    }
+
+    @Test
+    void runNpmInstall_postInstall_runOnlyForDefaultPackages()
+            throws ExecutionFailedException, IOException {
+        setupPostinstallPackages();
+        task.execute();
+
+        assertTrue(
+                new File(
+                        new File(options.getNodeModulesFolder(),
+                                "@vaadin/vaadin-usage-statistics"),
+                        "postinstall-file.txt").exists(),
+                "Postinstall for '@vaadin/vaadin-usage-statistics' was not run");
+        assertFalse(
+                new File(new File(options.getNodeModulesFolder(), "foo"),
+                        "postinstall-file.txt").exists(),
+                "Postinstall for 'foo' should not have been run");
+    }
+
+    @Test
+    void runNpmInstall_postInstall_runForDefinedAdditionalPackages()
+            throws ExecutionFailedException, IOException {
+        setupPostinstallPackages();
+        task = createTask(List.of("foo"));
+        task.execute();
+
+        assertTrue(
+                new File(
+                        new File(options.getNodeModulesFolder(),
+                                "@vaadin/vaadin-usage-statistics"),
+                        "postinstall-file.txt").exists(),
+                "Postinstall for '@vaadin/vaadin-usage-statistics' was not run");
+        assertTrue(
+                new File(new File(options.getNodeModulesFolder(), "foo"),
+                        "postinstall-file.txt").exists(),
+                "Postinstall for 'foo' was not run");
+    }
+
+    // https://github.com/vaadin/flow/issues/17663
+    @Test
+    @Timeout(30)
+    void runNpmInstall_postInstallWritingLotsOfOutput_processDoesNotStuck()
+            throws ExecutionFailedException, IOException {
+        setupPostinstallPackages();
+
+        File nodeModules = options.getNodeModulesFolder();
+        File fooPackageJson = new File(
+                new File(nodeModules.getParentFile(), "fake-foo"),
+                "package.json");
+        String fooPackageJsonContents = new String(getClass()
+                .getResourceAsStream(
+                        "fake-package-with-postinstall-writing-to-console.json")
+                .readAllBytes(), StandardCharsets.UTF_8);
+        Files.writeString(fooPackageJson.toPath(), fooPackageJsonContents);
+
+        task = createTask(List.of("foo"));
+        task.execute();
+
+        assertTrue(
+                new File(new File(options.getNodeModulesFolder(), "foo"),
+                        "postinstall-console-file.txt").exists(),
+                "Postinstall for 'foo' was not run");
+    }
+
+    // https://github.com/vaadin/flow/issues/21662
+    @Test
+    void runNpmInstall_postInstallFails_buildFailsWithTheScriptOutput()
+            throws IOException {
+        setupPostinstallPackages();
+
+        File nodeModules = options.getNodeModulesFolder();
+        File fooPackageJson = new File(
+                new File(nodeModules.getParentFile(), "fake-foo"),
+                "package.json");
+        Files.writeString(fooPackageJson.toPath(),
+                new String(getClass()
+                        .getResourceAsStream(
+                                "fake-package-with-failing-postinstall.json")
+                        .readAllBytes(), StandardCharsets.UTF_8));
+
+        task = createTask(List.of("foo"));
+
+        ExecutionFailedException exception = assertThrows(
+                ExecutionFailedException.class, () -> task.execute());
+        assertTrue(
+                exception.getMessage().contains("'foo'") && exception
+                        .getMessage().contains("failing on purpose"),
+                "the failure should name the package and report what the "
+                        + "script printed, was: " + exception.getMessage());
+    }
+
+    @Test
+    void shouldRunNpmInstallWhenFolderChanges() throws Exception {
+        setupPostinstallPackages();
+
+        String packageJsonHash = getNodeUpdater().getPackageJson()
+                .get(VAADIN_DEP_KEY).get(HASH_KEY).asString();
+        ObjectNode vaadinJson = JacksonUtils.createObjectNode();
+        vaadinJson.put(HASH_KEY, packageJsonHash);
+        vaadinJson.put(PROJECT_FOLDER, npmFolder.getAbsolutePath());
+        File vaadinJsonFile = getNodeUpdater().getVaadinJsonFile();
+        Files.createDirectories(vaadinJsonFile.toPath().getParent());
+        Files.writeString(vaadinJsonFile.toPath(), vaadinJson.toString());
+
+        assertFalse(task.isVaadinHashOrProjectFolderUpdated());
+        vaadinJson.put(PROJECT_FOLDER, npmFolder.getAbsolutePath() + "foo");
+        Files.writeString(vaadinJsonFile.toPath(), vaadinJson.toString());
+        assertTrue(task.isVaadinHashOrProjectFolderUpdated());
+    }
+
+    /**
+     * Update the vaadin package hash to match dependencies. The hash is
+     * calculated from dependencies and devDependencies but not from the vaadin
+     * object. We copy the vaadin object dependencies and calculate the hash,
+     * then we remove the dependencies and devDependencies to not have to
+     * install anything for the test to keep the running time in ~1.4s instead
+     * of ~50s
+     *
+     * @param packageJson
+     *            package.json json object
+     */
+    void updatePackageHash(ObjectNode packageJson) {
+        final ObjectNode vaadinDep = (ObjectNode) packageJson
+                .get(VAADIN_DEP_KEY).get(DEPENDENCIES);
+        ObjectNode dependencies = JacksonUtils.createObjectNode();
+        for (String key : JacksonUtils.getKeys(vaadinDep)) {
+            dependencies.put(key, vaadinDep.get(key).asString());
+        }
+        ObjectNode vaadinDevDep = (ObjectNode) packageJson.get(VAADIN_DEP_KEY)
+                .get(DEV_DEPENDENCIES);
+        ObjectNode devDependencies = JacksonUtils.createObjectNode();
+        for (String key : JacksonUtils.getKeys(vaadinDevDep)) {
+            devDependencies.put(key, vaadinDevDep.get(key).asString());
+        }
+        packageJson.set(DEPENDENCIES, dependencies);
+        packageJson.set(DEV_DEPENDENCIES, devDependencies);
+        ((ObjectNode) packageJson.get(VAADIN_DEP_KEY)).put(HASH_KEY,
+                TaskUpdatePackages.generatePackageJsonHash(packageJson,
+                        Map.of()));
+        packageJson.remove(DEPENDENCIES);
+        packageJson.remove(DEV_DEPENDENCIES);
+    }
+
+    protected void assertRunNpmInstallInstallsNewNode_whenVaadinHomeNodeIsAFolder(
+            TaskRunNpmInstall task)
+            throws IOException, ExecutionFailedException {
+        String userHome = "user.home";
+        String originalHome = System.getProperty(userHome);
+        File home = Files.createTempDirectory(temporaryFolder.toPath(), "tmp")
+                .toFile();
+        System.setProperty(userHome, home.getPath());
+        try {
+            File homeDir = new File(home, ".vaadin");
+            File node = new File(homeDir,
+                    FrontendUtils.isWindows()
+                            ? "node-" + FrontendTools.DEFAULT_NODE_VERSION
+                                    + "/node.exe"
+                            : "node-" + FrontendTools.DEFAULT_NODE_VERSION
+                                    + "/bin/node");
+            Files.createDirectories(node.toPath());
+
+            assertTrue(node.isDirectory(),
+                    "node executable should be a directory");
+
+            task.execute();
+
+            assertFalse(node.isDirectory(),
+                    "node executable should have been reinstalled");
+            assertTrue(node.canExecute(),
+                    "node executable should be executable");
+        } finally {
+            System.setProperty(userHome, originalHome);
+        }
+    }
+
+    protected String getRunningMsg() {
+
+        return "Running `" + getToolName() + " " + getCommand() + "` to "
+                + "resolve and optionally download frontend dependencies. "
+                + "This may take a moment, please stand by...";
+    }
+
+    private String getCommand() {
+        String command = "install";
+        if (options.isCiBuild()) {
+            if ("pnpm".equals(getToolName())) {
+                command += " --frozen-lockfile";
+            } else {
+                command = "ci";
+            }
+        } else if ("pnpm".equals(getToolName())) {
+            command += " --no-frozen-lockfile";
+        }
+        return command;
+    }
+
+    protected NodeUpdater getNodeUpdater() {
+        return nodeUpdater;
+    }
+
+    protected ClassFinder getClassFinder() {
+        return finder;
+    }
+
+    protected String getToolName() {
+        return "npm";
+    }
+
+    private File ensurePackageJson() throws IOException {
+        File file = new File(npmFolder, PACKAGE_JSON);
+        if (!file.exists()) {
+            JsonNode packageJson = getNodeUpdater().getPackageJson();
+            getNodeUpdater().writePackageFile(packageJson);
+        }
+        return file;
+    }
+
+    void deleteDirectory(File dir) throws IOException {
+        Files.walk(dir.toPath()).sorted(Comparator.reverseOrder())
+                .map(Path::toFile).forEach(File::delete);
+    }
+
+    @Test
+    void verifyPackageLockAndClean_lockfileVersion3_fileNotRemoved()
+            throws IOException {
+        assumeNPMIsInUse();
+
+        File packageLockFile = new File(npmFolder, "package-lock.json");
+        String packageLockContent = """
+                {
+                  "name": "test-project",
+                  "version": "1.0.0",
+                  "lockfileVersion": 3,
+                  "requires": true,
+                  "packages": {}
+                }
+                """;
+        Files.writeString(packageLockFile.toPath(), packageLockContent);
+
+        task.verifyPackageLockAndClean();
+
+        assertTrue(packageLockFile.exists(),
+                "package-lock.json with version 3 should not be removed");
+    }
+
+    @Test
+    void verifyPackageLockAndClean_lockfileVersion2_fileRemoved()
+            throws IOException {
+        assumeNPMIsInUse();
+
+        File packageLockFile = new File(npmFolder, "package-lock.json");
+        String packageLockContent = """
+                {
+                  "name": "test-project",
+                  "version": "1.0.0",
+                  "lockfileVersion": 2,
+                  "requires": true,
+                  "packages": {}
+                }
+                """;
+        Files.writeString(packageLockFile.toPath(), packageLockContent);
+
+        task.verifyPackageLockAndClean();
+
+        assertFalse(packageLockFile.exists(),
+                "package-lock.json with version 2 should be removed");
+    }
+
+    @Test
+    void verifyPackageLockAndClean_lockfileVersion1_fileRemoved()
+            throws IOException {
+        assumeNPMIsInUse();
+
+        File packageLockFile = new File(npmFolder, "package-lock.json");
+        String packageLockContent = """
+                {
+                  "name": "test-project",
+                  "version": "1.0.0",
+                  "lockfileVersion": 1,
+                  "requires": true,
+                  "dependencies": {}
+                }
+                """;
+        Files.writeString(packageLockFile.toPath(), packageLockContent);
+
+        task.verifyPackageLockAndClean();
+
+        assertFalse(packageLockFile.exists(),
+                "package-lock.json with version 1 should be removed");
+    }
+
+    @Test
+    void verifyPackageLockAndClean_withSpaces_correctlyParsed()
+            throws IOException {
+        File packageLockFile = new File(npmFolder, "package-lock.json");
+        String packageLockContent = """
+                {
+                  "name": "test-project",
+                  "version": "1.0.0",
+                  "lockfileVersion"  :  3,
+                  "requires": true,
+                  "packages": {}
+                }
+                """;
+        Files.writeString(packageLockFile.toPath(), packageLockContent);
+
+        task.verifyPackageLockAndClean();
+
+        assertTrue(packageLockFile.exists(),
+                "package-lock.json with version 3 (with spaces) should not be removed");
+    }
+
+    @Test
+    void verifyPackageLockAndClean_pnpmEnabled_fileNotChecked()
+            throws IOException {
+        options.withEnablePnpm(true);
+        task = createTask(new ArrayList<>());
+
+        File packageLockFile = new File(npmFolder, "package-lock.json");
+        String packageLockContent = """
+                {
+                  "name": "test-project",
+                  "version": "1.0.0",
+                  "lockfileVersion": 2,
+                  "requires": true,
+                  "packages": {}
+                }
+                """;
+        Files.writeString(packageLockFile.toPath(), packageLockContent);
+
+        task.verifyPackageLockAndClean();
+
+        assertTrue(packageLockFile.exists(),
+                "package-lock.json should not be checked when pnpm is enabled");
+    }
+
+    @Test
+    void verifyPackageLockAndClean_noLockfile_doesNotThrow() {
+        File packageLockFile = new File(npmFolder, "package-lock.json");
+        assertFalse(packageLockFile.exists(),
+                "package-lock.json should not exist");
+
+        // Should not throw any exception
+        task.verifyPackageLockAndClean();
+
+        assertFalse(packageLockFile.exists(),
+                "package-lock.json should still not exist");
+    }
+
+    private void assumeNPMIsInUse() {
+        assumeTrue(getClass().equals(TaskRunNpmInstallTest.class));
+    }
+
+    @Test
+    void minimumFrontendPackageAge_pnpm_usesMinimumReleaseAgeInMinutes() {
+        // 2 days = 2880 minutes; pnpm setting form
+        assertEquals("--config.minimum-release-age=2880",
+                TaskRunNpmInstall.getMinimumFrontendPackageAgeArgument(
+                        new MockOptions(npmFolder).withEnablePnpm(true), 2,
+                        false));
+    }
+
+    @Test
+    void minimumFrontendPackageAge_bun_usesMinimumReleaseAgeInSeconds() {
+        // 2 days = 172800 seconds
+        assertEquals("--minimum-release-age=172800",
+                TaskRunNpmInstall.getMinimumFrontendPackageAgeArgument(
+                        new MockOptions(npmFolder).withEnableBun(true), 2,
+                        false));
+    }
+
+    @Test
+    void resolveMinimumFrontendPackageAge_nothingConfigured_usesDefault() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+
+        assertEquals("--min-release-age="
+                + TaskRunNpmInstall.DEFAULT_MINIMUM_FRONTEND_PACKAGE_AGE_DAYS,
+                resolveMinimumFrontendPackageAgeArgument(
+                        new MockOptions(npmFolder), tools).orElseThrow());
+    }
+
+    @Test
+    void resolveMinimumFrontendPackageAge_zeroConfigured_noArgumentAndNoAge() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        Options options = new MockOptions(npmFolder)
+                .withMinimumFrontendPackageAgeDays(0);
+
+        // nothing blocks a version, so nothing has to be excluded either
+        assertMinimumFrontendPackageAge(options, tools, false, null);
+
+        // an age npm is configured with is a value that blocks nothing too
+        when(tools.getConfiguredSetting(anyList(), eq(npmFolder),
+                eq("min-release-age"), eq("before")))
+                .thenReturn(Optional.of("0"));
+
+        assertMinimumFrontendPackageAge(options, tools, false, null);
+    }
+
+    private MockLogger assertMinimumFrontendPackageAge(Options options,
+            FrontendTools tools, boolean applies, String argument) {
+        MockLogger logger = new MockLogger();
+        TaskRunNpmInstall.MinimumFrontendPackageAge minimumAge = TaskRunNpmInstall
+                .resolveMinimumFrontendPackageAge(options, tools,
+                        List.of(TaskRunNpmInstall.getToolName(options)),
+                        logger);
+
+        assertEquals(applies, minimumAge.applies());
+        assertEquals(Optional.ofNullable(argument), minimumAge.argument());
+        return logger;
+    }
+
+    @Test
+    void resolveMinimumFrontendPackageAge_npmrcValue_doesNotOverrideIt() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        when(tools.getConfiguredSetting(anyList(), eq(npmFolder),
+                eq("min-release-age"), eq("before")))
+                .thenReturn(Optional.of("7"));
+
+        // No argument is passed, so npm applies its own configuration
+        MockLogger logger = assertMinimumFrontendPackageAge(
+                new MockOptions(npmFolder), tools, true, null);
+
+        // the value npm reports is a number of days
+        assertTrue(logger.getLogs().contains("configured for npm (7 days)"),
+                logger.getLogs());
+    }
+
+    @Test
+    void resolveMinimumFrontendPackageAge_npmReportsNpmrcValueAsBefore_doesNotOverrideIt() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        // npm 11.10 to 11.13 turn a configured min-release-age into the date
+        // of the before setting and report min-release-age as unset, while
+        // still applying the configured age to an install. npm older than
+        // 11.10 has no min-release-age setting at all, and a project may
+        // configure before itself, so a date is what npm reports in any of
+        // those cases
+        when(tools.getConfiguredSetting(anyList(), eq(npmFolder),
+                eq("min-release-age"), eq("before")))
+                .thenReturn(Optional.of("2026-06-08T08:04:31.925Z"));
+
+        // No argument is passed, so npm applies its own configuration, and a
+        // date blocks a version too new even though it is not a day count
+        MockLogger logger = assertMinimumFrontendPackageAge(
+                new MockOptions(npmFolder), tools, true, null);
+
+        // a date is reported as a date instead of as a number of days
+        assertTrue(logger.getLogs().contains(
+                "(no versions released after 2026-06-08T08:04:31.925Z)"),
+                logger.getLogs());
+    }
+
+    @Test
+    void resolveMinimumFrontendPackageAge_configuredInVaadin_overridesNpmrcValue() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        when(tools.getConfiguredSetting(anyList(), eq(npmFolder),
+                eq("min-release-age"), eq("before")))
+                .thenReturn(Optional.of("7"));
+
+        assertEquals("--min-release-age=3",
+                resolveMinimumFrontendPackageAgeArgument(
+                        new MockOptions(npmFolder)
+                                .withMinimumFrontendPackageAgeDays(3),
+                        tools).orElseThrow());
+    }
+
+    @Test
+    void resolveMinimumFrontendPackageAge_npmTooOldWithNothingConfigured_usesBeforeDefault() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        when(tools.npmSupportsMinReleaseAge(anyList())).thenReturn(false);
+
+        assertTrue(resolveMinimumFrontendPackageAgeArgument(
+                new MockOptions(npmFolder), tools).orElseThrow()
+                .startsWith("--before="));
+    }
+
+    @Test
+    void resolveMinimumFrontendPackageAge_pnpmConfiguredValue_doesNotOverrideIt() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        // pnpm names the setting minimumReleaseAge, unlike npm
+        when(tools.getConfiguredSetting(anyList(), eq(npmFolder),
+                eq("minimumReleaseAge"), eq("minimum-release-age")))
+                .thenReturn(Optional.of("4320"));
+
+        // No argument is passed, so pnpm applies its own configuration
+        MockLogger logger = assertMinimumFrontendPackageAge(
+                new MockOptions(npmFolder).withEnablePnpm(true), tools, true,
+                null);
+
+        // the value pnpm reports is a number of minutes
+        assertTrue(
+                logger.getLogs().contains("configured for pnpm (4320 minutes)"),
+                logger.getLogs());
+    }
+
+    @Test
+    void resolveMinimumFrontendPackageAge_bun_configurationIsNotRead() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        // whatever bun might resolve is ignored, as bun cannot report it
+        when(tools.getConfiguredSetting(anyList(), any(), any(String[].class)))
+                .thenReturn(Optional.of("4320"));
+
+        // bunfig.toml is not looked at, so the default is applied
+        assertEquals("--minimum-release-age="
+                + TaskRunNpmInstall.DEFAULT_MINIMUM_FRONTEND_PACKAGE_AGE_DAYS
+                        * 24 * 60 * 60,
+                resolveMinimumFrontendPackageAgeArgument(
+                        new MockOptions(npmFolder).withEnableBun(true), tools)
+                        .orElseThrow());
+        verify(tools, never()).getConfiguredSetting(anyList(), any(),
+                any(String[].class));
+    }
+
+    @Test
+    void resolveMinimumFrontendPackageAge_zeroConfiguredWithNpmrcValue_ageStillApplies() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        // npm keeps applying the 7 days of its own configuration, as Vaadin
+        // only leaves out the command line argument
+        when(tools.getConfiguredSetting(anyList(), eq(npmFolder),
+                eq("min-release-age"), eq("before")))
+                .thenReturn(Optional.of("7"));
+        Options options = new MockOptions(npmFolder)
+                .withMinimumFrontendPackageAgeDays(0);
+
+        TaskRunNpmInstall.MinimumFrontendPackageAge minimumAge = TaskRunNpmInstall
+                .resolveMinimumFrontendPackageAge(options, tools,
+                        List.of("npm"),
+                        LoggerFactory.getLogger(TaskRunNpmInstallTest.class));
+
+        assertTrue(minimumAge.applies());
+        assertFalse(minimumAge.argument().isPresent());
+        // so the packages Vaadin publishes are excluded from it
+        assertEquals(List.of("--min-release-age-exclude=@vaadin/*"),
+                TaskRunNpmInstall
+                        .resolveMinimumFrontendPackageAgeExcludeArguments(
+                                options, tools, List.of("npm"),
+                                minimumAge.applies(), new MockLogger()));
+    }
+
+    @Test
+    void resolveMinimumFrontendPackageAge_npmrcValueOfZero_noAgeApplies() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        // npm is configured not to block anything, so neither does Vaadin
+        when(tools.getConfiguredSetting(anyList(), eq(npmFolder),
+                eq("min-release-age"), eq("before")))
+                .thenReturn(Optional.of("0"));
+
+        TaskRunNpmInstall.MinimumFrontendPackageAge minimumAge = TaskRunNpmInstall
+                .resolveMinimumFrontendPackageAge(new MockOptions(npmFolder),
+                        tools, List.of("npm"),
+                        LoggerFactory.getLogger(TaskRunNpmInstallTest.class));
+
+        assertFalse(minimumAge.applies());
+        assertFalse(minimumAge.argument().isPresent());
+    }
+
+    @Test
+    void minimumFrontendPackageAgeExclude_npm_excludesVaadinPackages() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        MockLogger logger = new MockLogger();
+
+        assertEquals(List.of("--min-release-age-exclude=@vaadin/*"),
+                resolveMinimumFrontendPackageAgeExcludeArguments(
+                        new MockOptions(npmFolder), tools, logger));
+        assertEquals("", logger.getLogs(),
+                "excluding the packages needs no warning");
+    }
+
+    @Test
+    void minimumFrontendPackageAgeExclude_pnpm_excludesVaadinPackagesAsAList() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        MockLogger logger = new MockLogger();
+
+        // a single occurrence stays a string, which pnpm 11 reads as
+        // excluding every package
+        assertEquals(
+                List.of("--config.minimum-release-age-exclude=@vaadin/*",
+                        "--config.minimum-release-age-exclude=@vaadin/*"),
+                resolveMinimumFrontendPackageAgeExcludeArguments(
+                        new MockOptions(npmFolder).withEnablePnpm(true), tools,
+                        logger));
+    }
+
+    @Test
+    void minimumFrontendPackageAgeExclude_configuredPatterns_areKept() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        // a command line value replaces the configured list instead of
+        // adding to it, so the configured patterns are passed along
+        when(tools.getConfiguredSettingValues(anyList(), eq(npmFolder),
+                eq("min-release-age-exclude")))
+                .thenReturn(List.of("@acme/*", "internal-tooling"));
+
+        assertEquals(
+                List.of("--min-release-age-exclude=@acme/*",
+                        "--min-release-age-exclude=internal-tooling",
+                        "--min-release-age-exclude=@vaadin/*"),
+                resolveMinimumFrontendPackageAgeExcludeArguments(
+                        new MockOptions(npmFolder), tools, new MockLogger()));
+    }
+
+    @Test
+    void minimumFrontendPackageAgeExclude_npmTooOld_warnsInsteadOfExcluding() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        // npm older than 11.17 only warns about an unknown configuration
+        when(tools.npmSupportsMinReleaseAgeExclude(anyList()))
+                .thenReturn(false);
+        MockLogger logger = new MockLogger();
+
+        assertEquals(List.of(),
+                resolveMinimumFrontendPackageAgeExcludeArguments(
+                        new MockOptions(npmFolder), tools, logger));
+        assertWarnsAboutTheFirstDay(logger);
+        assertTrue(logger.getLogs()
+                .contains(FrontendTools.MIN_NPM_VERSION_FOR_RELEASE_AGE_EXCLUDE
+                        .getFullVersion())
+                && logger.getLogs().contains(
+                        FrontendTools.MIN_NODE_VERSION_FOR_RELEASE_AGE_EXCLUDE
+                                .getFullVersion()),
+                "the warning should name the npm version to upgrade to and "
+                        + "the Node.js version that ships it, was: "
+                        + logger.getLogs());
+    }
+
+    @Test
+    void minimumFrontendPackageAgeExclude_pnpmTooOld_warnsInsteadOfExcluding() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        // pnpm 10.16 ignores the setting
+        when(tools.pnpmSupportsMinimumReleaseAgeExclude(anyList()))
+                .thenReturn(false);
+        MockLogger logger = new MockLogger();
+
+        assertEquals(List.of(),
+                resolveMinimumFrontendPackageAgeExcludeArguments(
+                        new MockOptions(npmFolder).withEnablePnpm(true), tools,
+                        logger));
+        assertWarnsAboutTheFirstDay(logger);
+        assertTrue(logger.getLogs().contains("10.17.0"),
+                "the warning should name the pnpm version to upgrade to, was: "
+                        + logger.getLogs());
+    }
+
+    @Test
+    void minimumFrontendPackageAgeExclude_bun_warnsInsteadOfExcluding() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        MockLogger logger = new MockLogger();
+
+        // bun can only exclude packages through bunfig.toml, and only by
+        // their exact name
+        assertEquals(List.of(),
+                resolveMinimumFrontendPackageAgeExcludeArguments(
+                        new MockOptions(npmFolder).withEnableBun(true), tools,
+                        logger));
+        assertWarnsAboutTheFirstDay(logger);
+        assertTrue(
+                logger.getLogs().contains("minimumReleaseAgeExcludes")
+                        && logger.getLogs().contains("@vaadin/*"),
+                "the warning should name the bunfig.toml setting to list the "
+                        + "packages in, was: " + logger.getLogs());
+    }
+
+    @Test
+    void minimumFrontendPackageAgeExclude_bunfigListsThePackages_noWarning()
+            throws IOException {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        MockLogger logger = new MockLogger();
+        Files.writeString(new File(npmFolder, "bunfig.toml").toPath(), """
+                [install]
+                minimumReleaseAgeExcludes = ["@vaadin/react-components"]
+                """);
+
+        assertEquals(List.of(),
+                resolveMinimumFrontendPackageAgeExcludeArguments(
+                        new MockOptions(npmFolder).withEnableBun(true), tools,
+                        logger));
+        assertEquals("", logger.getLogs(),
+                "a project that lists the packages itself needs no warning");
+    }
+
+    @Test
+    void minimumFrontendPackageAgeExclude_bunfigListsOtherPackages_warns()
+            throws IOException {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        MockLogger logger = new MockLogger();
+        // the packages Vaadin publishes are not among the excluded ones,
+        // mentioning them elsewhere in the file is not enough
+        Files.writeString(new File(npmFolder, "bunfig.toml").toPath(), """
+                [install]
+                # @vaadin/react-components
+                minimumReleaseAgeExcludes = ["react"]
+                """);
+
+        assertEquals(List.of(),
+                resolveMinimumFrontendPackageAgeExcludeArguments(
+                        new MockOptions(npmFolder).withEnableBun(true), tools,
+                        logger));
+        assertWarnsAboutTheFirstDay(logger);
+    }
+
+    @Test
+    void minimumFrontendPackageAgeExclude_noAgeApplies_noArgumentOrWarning() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        MockLogger logger = new MockLogger();
+
+        // nothing is blocked, so nothing has to be excluded either
+        assertEquals(List.of(),
+                TaskRunNpmInstall
+                        .resolveMinimumFrontendPackageAgeExcludeArguments(
+                                new MockOptions(npmFolder).withEnableBun(true),
+                                tools, List.of("bun"), false, logger));
+        assertEquals("", logger.getLogs());
+    }
+
+    @Test
+    void minimumFrontendPackageAgeExclude_npmrcValue_isStillExcludedFrom() {
+        FrontendTools tools = mockToolsWithoutMinimumReleaseAge();
+        when(tools.getConfiguredSetting(anyList(), eq(npmFolder),
+                eq("min-release-age"), eq("before")))
+                .thenReturn(Optional.of("7"));
+        Options options = new MockOptions(npmFolder);
+
+        // the age npm resolves itself is kept, but the packages Vaadin
+        // publishes are excluded from it
+        assertFalse(resolveMinimumFrontendPackageAgeArgument(options, tools)
+                .isPresent());
+        assertEquals(List.of("--min-release-age-exclude=@vaadin/*"),
+                resolveMinimumFrontendPackageAgeExcludeArguments(options, tools,
+                        new MockLogger()));
+    }
+
+    @Test
+    void postinstallArguments_pnpm_doesNotVerifyTheDependencies() {
+        // the install pnpm would start to check node_modules repeats the one
+        // Vaadin just ran, without the exclusions and without --ignore-scripts
+        assertEquals(List.of("--config.verify-deps-before-run=false"),
+                TaskRunNpmInstall.resolvePostinstallArguments(
+                        new MockOptions(npmFolder).withEnablePnpm(true)));
+    }
+
+    @Test
+    void postinstallArguments_npmAndBun_needNone() {
+        // neither checks anything before running a script, and bun rejects an
+        // argument it is not expecting
+        assertEquals(List.of(), TaskRunNpmInstall
+                .resolvePostinstallArguments(new MockOptions(npmFolder)));
+        assertEquals(List.of(), TaskRunNpmInstall.resolvePostinstallArguments(
+                new MockOptions(npmFolder).withEnableBun(true)));
+    }
+
+    private void assertWarnsAboutTheFirstDay(MockLogger logger) {
+        assertTrue(logger.getLogs().contains("first day"),
+                "the build should be warned that an installation may fail "
+                        + "during the first day after a Vaadin release, was: "
+                        + logger.getLogs());
+    }
+
+    private FrontendTools mockToolsWithoutMinimumReleaseAge() {
+        FrontendTools tools = mock(FrontendTools.class);
+        when(tools.npmSupportsMinReleaseAge(anyList())).thenReturn(true);
+        when(tools.npmSupportsMinReleaseAgeExclude(anyList())).thenReturn(true);
+        when(tools.pnpmSupportsMinimumReleaseAgeExclude(anyList()))
+                .thenReturn(true);
+        when(tools.getConfiguredSetting(anyList(), any(), any(String[].class)))
+                .thenReturn(Optional.empty());
+        when(tools.getConfiguredSettingValues(anyList(), any(),
+                any(String[].class))).thenReturn(List.of());
+        return tools;
+    }
+
+    private List<String> resolveMinimumFrontendPackageAgeExcludeArguments(
+            Options options, FrontendTools tools, Logger logger) {
+        return TaskRunNpmInstall
+                .resolveMinimumFrontendPackageAgeExcludeArguments(options,
+                        tools, List.of(TaskRunNpmInstall.getToolName(options)),
+                        true, logger);
+    }
+
+    private Optional<String> resolveMinimumFrontendPackageAgeArgument(
+            Options options, FrontendTools tools) {
+        return TaskRunNpmInstall
+                .resolveMinimumFrontendPackageAge(options, tools,
+                        List.of("npm"),
+                        LoggerFactory.getLogger(TaskRunNpmInstallTest.class))
+                .argument();
+    }
+
+    @Test
+    void isNetworkFailure_connectionResetOutput_detected() {
+        assertTrue(TaskRunNpmInstall.isNetworkFailure(
+                """
+                        npm warn deprecated sourcemap-codec@1.4.8: Please use @jridgewell/sourcemap-codec instead
+                        npm error code ECONNRESET
+                        npm error network aborted
+                        npm error network This is a problem related to network connectivity.
+                        """));
+    }
+
+    @Test
+    void isNetworkFailure_missingDependencyOutput_notDetected() {
+        assertFalse(TaskRunNpmInstall.isNetworkFailure(
+                """
+                        npm error code E404
+                        npm error 404 Not Found - GET https://registry.npmjs.org/@vaadin/no-such-package
+                        npm error 404 '@vaadin/no-such-package@^1.0.0' is not in this registry.
+                        """));
+    }
+
+}

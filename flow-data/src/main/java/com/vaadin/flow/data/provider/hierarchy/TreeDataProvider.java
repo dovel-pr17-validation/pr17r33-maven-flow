@@ -1,0 +1,92 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.data.provider.hierarchy;
+
+/**
+ * An in-memory data provider for listing components that display hierarchical
+ * data. Uses an instance of {@link TreeData} as its source of data.
+ *
+ * @author Vaadin Ltd
+ * @since 1.1
+ *
+ * @param <T>
+ *            data type
+ */
+public class TreeDataProvider<T>
+        extends InMemoryHierarchicalDataProvider<T, TreeData<T>> {
+
+    /**
+     * Constructs a new TreeDataProvider.
+     * <p>
+     * The data provider should be refreshed after making changes to the
+     * underlying {@link TreeData} instance.
+     *
+     * @param treeData
+     *            the backing {@link TreeData} for this provider, not
+     *            {@code null}
+     * @deprecated this constructor currently defaults to
+     *             {@link HierarchyFormat#NESTED}, but starting from Vaadin 26
+     *             it will default to {@link HierarchyFormat#FLATTENED} instead.
+     *             This may affect TreeGrid methods whose behavior depends on
+     *             the hierarchy format, such as {@code scrollToIndex}. Switch
+     *             to {@link #TreeDataProvider(TreeData, HierarchyFormat)} and
+     *             pass {@link HierarchyFormat#NESTED} explicitly to preserve
+     *             the current behavior.
+     */
+    @Deprecated(since = "25.3")
+    public TreeDataProvider(TreeData<T> treeData) {
+        super(treeData);
+    }
+
+    /**
+     * Creates a new TreeDataProvider and configures it to return the
+     * hierarchical data in the specified format: {@link HierarchyFormat#NESTED}
+     * or {@link HierarchyFormat#FLATTENED}.
+     * <p>
+     * The data provider should be refreshed after making changes to the
+     * underlying {@link TreeData} instance.
+     *
+     * @param treeData
+     *            the backing {@link TreeData} for this provider, not
+     *            {@code null}
+     * @param hierarchyFormat
+     *            the hierarchy format to return data in, not {@code null}
+     * @since 25.0
+     */
+    public TreeDataProvider(TreeData<T> treeData,
+            HierarchyFormat hierarchyFormat) {
+        super(treeData, hierarchyFormat);
+    }
+
+    /**
+     * Return the underlying {@link TreeData} of this provider.
+     *
+     * @return the underlying data of this provider
+     * @deprecated use {@link #getHierarchicalData()} instead.
+     */
+    @Deprecated(forRemoval = true, since = "25.2")
+    public TreeData<T> getTreeData() {
+        return getHierarchicalData();
+    }
+
+    @Override
+    public String toString() {
+        return super.toString() + "("
+                + getHierarchicalData().getRootItems().size()
+                + " backend root items"
+                + (getFilter() != null ? ", filtered" : "") + ")";
+    }
+}

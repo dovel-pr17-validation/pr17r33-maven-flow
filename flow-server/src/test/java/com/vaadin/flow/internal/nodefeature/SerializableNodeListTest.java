@@ -1,0 +1,115 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.internal.nodefeature;
+
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+
+import org.apache.commons.lang3.SerializationUtils;
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.internal.change.ListRemoveChange;
+import com.vaadin.flow.internal.change.NodeChange;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+
+class SerializableNodeListTest
+        extends AbstractNodeFeatureTest<ElementClassList> {
+
+    private ElementClassList nodeList = createFeature();
+
+    @Test
+    void testSerializable() {
+        nodeList.add("bar");
+        nodeList.add(null);
+
+        List<Serializable> values = new ArrayList<>();
+        int size = nodeList.size();
+        for (int i = 0; i < size; i++) {
+            values.add(nodeList.get(i));
+        }
+
+        NodeList<Serializable> copy = SerializationUtils
+                .deserialize(SerializationUtils.serialize(nodeList));
+
+        assertNotSame(nodeList, copy);
+
+        assertEquals(values.size(), copy.size());
+        for (int i = 0; i < size; i++) {
+            assertEquals(values.get(i), copy.get(i));
+        }
+        // Also verify that original value wasn't changed by the serialization
+        assertEquals(values.size(), nodeList.size());
+        for (int i = 0; i < size; i++) {
+            assertEquals(values.get(i), nodeList.get(i));
+        }
+
+    }
+
+    @Test
+    void testRemoveUsingIterator() {
+        nodeList.add("1");
+        nodeList.add("2");
+        nodeList.add("3");
+        nodeList.add("4");
+        nodeList.add("5");
+        collectChanges(nodeList);
+
+        Iterator<String> i = nodeList.iterator();
+        i.next();
+        i.remove();
+        List<NodeChange> changes = collectChanges(nodeList);
+        assertEquals(1, changes.size());
+        assertEquals(0, ((ListRemoveChange<?>) changes.get(0)).getIndex());
+
+        i.next();
+        i.next();
+        i.remove();
+        changes = collectChanges(nodeList);
+        assertEquals(1, changes.size());
+        assertEquals(1, ((ListRemoveChange<?>) changes.get(0)).getIndex());
+
+        List<String> actual = new ArrayList<>();
+        for (int j = 0; j < nodeList.size(); j++) {
+            actual.add(nodeList.get(j));
+        }
+        assertArrayEquals(new String[] { "2", "4", "5" }, actual.toArray());
+
+    }
+
+    @Test
+    void clearUsingIterator() {
+        nodeList.add("1");
+        nodeList.add("2");
+        collectChanges(nodeList);
+
+        Iterator<String> i = nodeList.iterator();
+        i.next();
+        i.remove();
+        i.next();
+        i.remove();
+
+        List<NodeChange> changes = collectChanges(nodeList);
+        assertEquals(2, changes.size());
+        assertEquals(0, ((ListRemoveChange<?>) changes.get(0)).getIndex());
+        assertEquals(0, ((ListRemoveChange<?>) changes.get(1)).getIndex());
+        assertEquals(0, nodeList.size());
+    }
+}

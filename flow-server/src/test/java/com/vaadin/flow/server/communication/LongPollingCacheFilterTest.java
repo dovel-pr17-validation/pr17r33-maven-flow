@@ -1,0 +1,235 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.communication;
+
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
+
+import org.atmosphere.cpr.AtmosphereConfig;
+import org.atmosphere.cpr.AtmosphereRequest;
+import org.atmosphere.cpr.AtmosphereResource;
+import org.atmosphere.cpr.AtmosphereResourceSession;
+import org.atmosphere.cpr.AtmosphereResourceSessionFactory;
+import org.atmosphere.cpr.BroadcastFilter.BroadcastAction;
+import org.atmosphere.cpr.BroadcastFilter.BroadcastAction.ACTION;
+import org.atmosphere.cpr.Broadcaster;
+import org.atmosphere.cpr.BroadcasterCache;
+import org.atmosphere.cpr.BroadcasterConfig;
+import org.atmosphere.cpr.DefaultAtmosphereResourceSessionFactory;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+class LongPollingCacheFilterTest {
+
+    static final String RESOURCE_UUID = "resourceUUID";
+    LongPollingCacheFilter filter = new LongPollingCacheFilter();
+
+    AtmospherePushConnection.PushMessage originalMessage = new AtmospherePushConnection.PushMessage(
+            5, "PUSH ME");
+    Object nonPushMessage = new Object();
+    Object message = new Object();
+    private AtmosphereResource resource;
+    private BroadcasterCache cache;
+    private AtmosphereResourceSessionFactory sessionFactory;
+
+    @Test
+    void filter_notPushMessage_continueWithCurrentMessage() {
+        setTransport(AtmosphereResource.TRANSPORT.LONG_POLLING);
+        setSeenServerSyncIdHeader(5);
+        simulatePushConnection();
+        BroadcastAction action = filter.filter("broadcasterId", resource,
+                nonPushMessage, message);
+        assertEquals(ACTION.CONTINUE, action.action());
+        assertSame(message, action.message(),
+                "Message should not be altered by filter");
+        verifyMessageIsNotCached();
+    }
+
+    @Test
+    void filter_notLongPollingTransport_continueWithCurrentMessage() {
+        setSeenServerSyncIdHeader(5);
+        simulatePushConnection();
+        Stream.of(AtmosphereResource.TRANSPORT.values())
+                .filter(t -> t != AtmosphereResource.TRANSPORT.LONG_POLLING)
+                .forEach(transport -> {
+                    setTransport(transport);
+                    BroadcastAction action = filter.filter("broadcasterId",
+                            resource, originalMessage, message);
+                    assertEquals(ACTION.CONTINUE, action.action());
+                    assertSame(message, action.message(),
+                            "Message should not be altered by filter when transport is "
+                                    + transport);
+                });
+        verifyMessageIsNotCached();
+    }
+
+    @Test
+    void filter_syncIdCheckDisabled_continueWithCurrentMessage() {
+        setTransport(AtmosphereResource.TRANSPORT.LONG_POLLING);
+        setSeenServerSyncIdHeader(-1);
+        BroadcastAction action = filter.filter("broadcasterId", resource,
+                originalMessage, message);
+        assertEquals(ACTION.CONTINUE, action.action());
+        assertSame(message, action.message(),
+                "Message should not be altered by filter if syncId check is disabled");
+        verifyMessageIsNotCached();
+    }
+
+    @Test
+    void filter_missingLastSeenServerSyncId_continueWithCurrentMessage() {
+        setTransport(AtmosphereResource.TRANSPORT.LONG_POLLING);
+        simulatePushConnection();
+        BroadcastAction action = filter.filter("broadcasterId", resource,
+                originalMessage, message);
+        assertEquals(ACTION.CONTINUE, action.action());
+        assertSame(message, action.message(),
+                "Message should not be altered by filter if server sync id header is missing");
+        verifyMessageIsNotCached();
+    }
+
+    @Test
+    void filter_messageAlreadySeen_abort() {
+        setTransport(AtmosphereResource.TRANSPORT.LONG_POLLING);
+        setSeenServerSyncIdHeader(5, 6);
+        simulatePushConnection();
+
+        // seen server sync id == push message server sync id
+        BroadcastAction action = filter.filter("broadcasterId", resource,
+                originalMessage, message);
+        assertEquals(ACTION.ABORT, action.action(),
+                "Expecting message seen on client to be skipped");
+        assertSame(message, action.message(),
+                "Message should not be altered by filter when aborting");
+
+        // seen server sync id > push message server sync id
+        simulatePushConnection();
+        action = filter.filter("broadcasterId", resource, originalMessage,
+                message);
+        assertEquals(ACTION.ABORT, action.action(),
+                "Expecting message seen on client to be skipped");
+        assertSame(message, action.message(),
+                "Message should not be altered by filter when aborting");
+        verifyMessageIsNotCached();
+    }
+
+    @Test
+    void filter_messageNotYetSeen_addToCacheAndContinue() {
+        setTransport(AtmosphereResource.TRANSPORT.LONG_POLLING);
+        setSeenServerSyncIdHeader(2);
+        simulatePushConnection();
+        String broadcasterId = "broadcasterId";
+        BroadcastAction action = filter.filter(broadcasterId, resource,
+                originalMessage, message);
+        assertEquals(ACTION.CONTINUE, action.action(),
+                "Expecting message not seen on client to be sent");
+        assertSame(message, action.message(),
+                "Message should not be altered by filter when continuing");
+        verify(cache).addToCache(eq(broadcasterId), eq(RESOURCE_UUID),
+                argThat(m -> m.message() == originalMessage));
+    }
+
+    @Test
+    void onConnect_longPollingAndSeenServerSyncIdHeaderSent_sessionAttributeStored() {
+        int syncId = 5;
+        setTransport(AtmosphereResource.TRANSPORT.LONG_POLLING);
+        setSeenServerSyncIdHeader(syncId);
+        simulatePushConnection();
+
+        AtmosphereResourceSession session = sessionFactory.getSession(resource,
+                false);
+        assertNotNull(session,
+                "Expecting AtmosphereResourceSession to exist, but was not created");
+        assertEquals(session.getAttribute(
+                LongPollingCacheFilter.SEEN_SERVER_SYNC_ID), syncId);
+    }
+
+    @Test
+    void onConnect_seenServerSyncIdHeaderMissing_sessionAttributeNotSet() {
+        simulatePushConnection();
+
+        AtmosphereResourceSession session = sessionFactory.getSession(resource,
+                false);
+        assertNull(session,
+                "AtmosphereResourceSession exist, but was server sync id was not sent");
+    }
+
+    @Test
+    void onConnect_notLongPollingTransport_sessionAttributeNotSet() {
+        setSeenServerSyncIdHeader(5);
+        AtmosphereResourceSession session = sessionFactory.getSession(resource,
+                false);
+
+        Stream.of(AtmosphereResource.TRANSPORT.values())
+                .filter(t -> t != AtmosphereResource.TRANSPORT.LONG_POLLING)
+                .forEach(transport -> {
+                    setTransport(transport);
+                    simulatePushConnection();
+                    assertNull(session,
+                            "AtmosphereResourceSession exist, but transport is not LONG POLLING");
+                });
+
+    }
+
+    @BeforeEach
+    void setUp() {
+        resource = mock(AtmosphereResource.class);
+        AtmosphereRequest request = mock(AtmosphereRequest.class);
+        Broadcaster broadcaster = mock(Broadcaster.class);
+        BroadcasterConfig broadcasterConfig = mock(BroadcasterConfig.class);
+        cache = mock(BroadcasterCache.class);
+        when(broadcaster.getBroadcasterConfig()).thenReturn(broadcasterConfig);
+        when(broadcasterConfig.getBroadcasterCache()).thenReturn(cache);
+
+        sessionFactory = new DefaultAtmosphereResourceSessionFactory();
+        AtmosphereConfig config = mock(AtmosphereConfig.class);
+        when(config.sessionFactory()).thenReturn(sessionFactory);
+
+        when(resource.getBroadcaster()).thenReturn(broadcaster);
+        when(resource.getRequest()).thenReturn(request);
+        when(resource.uuid()).thenReturn(RESOURCE_UUID);
+        when(resource.getAtmosphereConfig()).thenReturn(config);
+    }
+
+    private void setTransport(AtmosphereResource.TRANSPORT transport) {
+        when(resource.transport()).thenReturn(transport);
+    }
+
+    private void setSeenServerSyncIdHeader(int id, int... ids) {
+        when(resource.getRequest()
+                .getHeader(LongPollingCacheFilter.SEEN_SERVER_SYNC_ID))
+                .thenReturn(Integer.toString(id), IntStream.of(ids)
+                        .mapToObj(Integer::toString).toArray(String[]::new));
+    }
+
+    private void simulatePushConnection() {
+        LongPollingCacheFilter.onConnect(resource);
+    }
+
+    private void verifyMessageIsNotCached() {
+        verifyNoInteractions(cache);
+    }
+}

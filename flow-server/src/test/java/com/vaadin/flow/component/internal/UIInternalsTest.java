@@ -1,0 +1,795 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.component.internal;
+
+import java.lang.reflect.Field;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.HasElement;
+import com.vaadin.flow.component.PushConfiguration;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.page.History;
+import com.vaadin.flow.component.page.History.HistoryJs;
+import com.vaadin.flow.component.page.Page;
+import com.vaadin.flow.component.page.PendingJavaScriptResult;
+import com.vaadin.flow.component.page.Push;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.internal.StateNode;
+import com.vaadin.flow.internal.nodefeature.ElementChildrenList;
+import com.vaadin.flow.internal.nodefeature.ElementData;
+import com.vaadin.flow.router.Location;
+import com.vaadin.flow.router.ParentLayout;
+import com.vaadin.flow.router.Route;
+import com.vaadin.flow.router.RouterLayout;
+import com.vaadin.flow.server.MockVaadinServletService;
+import com.vaadin.flow.shared.Registration;
+import com.vaadin.flow.shared.communication.PushMode;
+import com.vaadin.tests.util.AlwaysLockedVaadinSession;
+import com.vaadin.tests.util.MockDeploymentConfiguration;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class UIInternalsTest {
+
+    @Mock
+    UI ui;
+
+    MockVaadinServletService vaadinService;
+
+    UIInternals internals;
+
+    @Route
+    @Push
+    @Tag(Tag.DIV)
+    public static class RouteTarget extends Component implements RouterLayout {
+
+    }
+
+    @Route(value = "foo", layout = RouteTarget.class)
+    @Tag(Tag.DIV)
+    public static class RouteTarget1 extends Component {
+
+    }
+
+    @Tag(Tag.DIV)
+    static class MainLayout extends Component implements RouterLayout {
+        static String ID = "main-layout-id";
+
+        public MainLayout() {
+            setId(ID);
+        }
+    }
+
+    @Tag(Tag.DIV)
+    @ParentLayout(MainLayout.class)
+    static class SubLayout extends Component implements RouterLayout {
+        static String ID = "sub-layout-id";
+
+        public SubLayout() {
+            setId(ID);
+        }
+    }
+
+    @Tag(Tag.DIV)
+    @Route(value = "child", layout = SubLayout.class)
+    static class FirstView extends Component {
+        static String ID = "child-view-id";
+
+        public FirstView() {
+            setId(ID);
+        }
+    }
+
+    @Tag(Tag.DIV)
+    static class AnotherLayout extends Component implements RouterLayout {
+        static String ID = "another-layout-id";
+
+        public AnotherLayout() {
+            setId(ID);
+        }
+    }
+
+    @Tag(Tag.DIV)
+    @Route(value = "another", layout = MainLayout.class)
+    static class AnotherView extends Component {
+        static String ID = "another-view-id";
+
+        public AnotherView() {
+            setId(ID);
+        }
+    }
+
+    @BeforeEach
+    void init() {
+        MockitoAnnotations.initMocks(this);
+
+        when(ui.getUI()).thenReturn(Optional.of(ui));
+        when(ui.getUIOrThrow()).thenCallRealMethod();
+        Element body = new Element("body");
+        when(ui.getElement()).thenReturn(body);
+
+        vaadinService = new MockVaadinServletService();
+        internals = new UIInternals(ui);
+        AlwaysLockedVaadinSession session = new AlwaysLockedVaadinSession(
+                vaadinService);
+        internals.setSession(session);
+        when(ui.getSession()).thenReturn(session);
+        when(ui.getSessionOrThrow()).thenCallRealMethod();
+        when(ui.getInternals()).thenReturn(internals);
+        Page page = new Page(ui);
+        when(ui.getPage()).thenReturn(page);
+    }
+
+    @Test
+    public void setLastProcessedClientToServerId_forgetsTheRecordedResponse() {
+        internals.setLastRequestResponse("{\"syncId\":0}");
+
+        internals.setLastProcessedClientToServerId(1, new byte[0]);
+
+        assertNull(internals.getLastRequestResponse(),
+                "The recorded response answers the previous message, so it must not be sent as this one's");
+    }
+
+    @Test
+    void heartbeatTimestampSet_heartbeatListenersAreCalled() {
+        List<Long> heartbeats = new ArrayList<>();
+        Registration registration = internals.addHeartbeatListener(
+                event -> heartbeats.add(event.getHeartbeatTime()));
+
+        internals.setLastHeartbeatTimestamp(System.currentTimeMillis());
+
+        assertEquals(1, heartbeats.size(),
+                "Heartbeat listener should have fired");
+
+        registration.remove();
+
+        internals.setLastHeartbeatTimestamp(System.currentTimeMillis());
+
+        assertEquals(1, heartbeats.size(),
+                "Heartbeat listener should been removed and no new event recorded");
+    }
+
+    @Test
+    void heartbeatListenerRemovedFromHeartbeatEvent_noExplosion() {
+        AtomicReference<Registration> reference = new AtomicReference<>();
+        AtomicInteger runCount = new AtomicInteger();
+
+        Registration registration = internals.addHeartbeatListener(event -> {
+            runCount.incrementAndGet();
+            reference.get().remove();
+        });
+        reference.set(registration);
+
+        internals.setLastHeartbeatTimestamp(System.currentTimeMillis());
+        assertEquals(1, runCount.get(), "Listener should have been run once");
+
+        internals.setLastHeartbeatTimestamp(System.currentTimeMillis());
+        assertEquals(1, runCount.get(),
+                "Listener should not have been run again since it was removed");
+    }
+
+    @Test
+    void showRouteTarget_clientSideBootstrap() {
+        PushConfiguration pushConfig = setUpInitialPush();
+
+        internals.showRouteTarget(mock(Location.class), new RouteTarget(),
+                Collections.emptyList());
+
+        verify(pushConfig, never()).setPushMode(any());
+    }
+
+    @Test
+    void showRouteTarget_navigateToAnotherViewWithinSameLayoutHierarchy_detachedRouterLayoutChildrenRemoved() {
+        MainLayout mainLayout = new MainLayout();
+        SubLayout subLayout = new SubLayout();
+        FirstView firstView = new FirstView();
+        AnotherView anotherView = new AnotherView();
+
+        List<RouterLayout> oldLayouts = Arrays.asList(subLayout, mainLayout);
+        List<RouterLayout> newLayouts = Collections.singletonList(mainLayout);
+
+        Location location = mock(Location.class);
+        setUpInitialPush();
+
+        internals.showRouteTarget(location, firstView, oldLayouts);
+        List<HasElement> activeRouterTargetsChain = internals
+                .getActiveRouterTargetsChain();
+
+        // Initial router layouts hierarchy is checked here in order to be
+        // sure the sub layout and it's child view is in place BEFORE
+        // navigation and old content cleanup
+        assertArrayEquals(new HasElement[] { firstView, subLayout, mainLayout },
+                activeRouterTargetsChain.toArray(),
+                "Unexpected initial router targets chain");
+
+        assertEquals(1, mainLayout.getElement().getChildren().count(),
+                "Expected one child element for main layout before navigation");
+        @SuppressWarnings("OptionalGetWithoutIsPresent")
+        Element subLayoutElement = mainLayout.getElement().getChildren()
+                .findFirst().get();
+        assertEquals(SubLayout.ID, subLayoutElement.getAttribute("id"),
+                "Unexpected sub layout element");
+        assertEquals(1, subLayoutElement.getChildren().count(),
+                "Expected one child element for sub layout before navigation");
+        @SuppressWarnings("OptionalGetWithoutIsPresent")
+        Element firstViewElement = subLayoutElement.getChildren().findFirst()
+                .get();
+        assertEquals(FirstView.ID, firstViewElement.getAttribute("id"),
+                "Unexpected first view element");
+
+        // Trigger navigation
+        internals.showRouteTarget(location, anotherView, newLayouts);
+        activeRouterTargetsChain = internals.getActiveRouterTargetsChain();
+        assertArrayEquals(new HasElement[] { anotherView, mainLayout },
+                activeRouterTargetsChain.toArray(),
+                "Unexpected router targets chain after navigation");
+
+        // Check that the old content (sub layout) is detached and it's
+        // children are also detached
+        assertEquals(1, mainLayout.getElement().getChildren().count(),
+                "Expected one child element for main layout after navigation");
+        @SuppressWarnings("OptionalGetWithoutIsPresent")
+        Element anotherViewElement = mainLayout.getElement().getChildren()
+                .findFirst().get();
+        assertEquals(AnotherView.ID, anotherViewElement.getAttribute("id"),
+                "Unexpected another view element");
+        assertEquals(0, subLayout.getElement().getChildren().count(),
+                "Expected no child elements for sub layout after navigation");
+    }
+
+    @Test
+    void showRouteTarget_navigateToAnotherLayoutHierarchy_detachedLayoutHierarchyChildrenRemoved() {
+        MainLayout mainLayout = new MainLayout();
+        SubLayout subLayout = new SubLayout();
+        FirstView firstView = new FirstView();
+        AnotherLayout anotherLayout = new AnotherLayout();
+        AnotherView anotherView = new AnotherView();
+
+        List<RouterLayout> oldLayouts = Arrays.asList(subLayout, mainLayout);
+        List<RouterLayout> newLayouts = Collections
+                .singletonList(anotherLayout);
+
+        Location location = mock(Location.class);
+        setUpInitialPush();
+
+        // Initial navigation
+        internals.showRouteTarget(location, firstView, oldLayouts);
+        // Navigate to another view outside of the initial router hierarchy
+        internals.showRouteTarget(location, anotherView, newLayouts);
+        List<HasElement> activeRouterTargetsChain = internals
+                .getActiveRouterTargetsChain();
+        assertArrayEquals(new HasElement[] { anotherView, anotherLayout },
+                activeRouterTargetsChain.toArray(),
+                "Unexpected router targets chain after navigation");
+
+        // Check that both main layout, sub layout and it's child view are
+        // detached
+        assertEquals(0, mainLayout.getElement().getChildren().count(),
+                "Expected no child elements for main layout after navigation");
+        assertEquals(0, subLayout.getElement().getChildren().count(),
+                "Expected no child elements for sub layout after navigation");
+    }
+
+    @Test
+    void dumpPendingJavaScriptInvocations_retainedInvocationBecomesVisible_notSubscribedToReturnValue()
+            throws Exception {
+        StateNode node = new StateNode(ElementData.class);
+        node.getFeature(ElementData.class).setVisible(false);
+        internals.getStateTree().getRootNode()
+                .getFeature(ElementChildrenList.class).add(0, node);
+
+        PendingJavaScriptInvocation invocation = new PendingJavaScriptInvocation(
+                node, new UIInternals.JavaScriptInvocation(""));
+        internals.addJavaScriptInvocation(invocation);
+
+        // The owner is invisible, so the invocation is retained in the queue
+        assertEquals(0, internals.dumpPendingJavaScriptInvocations().size());
+
+        node.getFeature(ElementData.class).setVisible(true);
+
+        List<PendingJavaScriptInvocation> dumped = internals
+                .dumpPendingJavaScriptInvocations();
+        assertEquals(List.of(invocation), dumped);
+        assertFalse(dumped.get(0).isSubscribed(),
+                "Retaining an invocation should not subscribe to its return value, since that makes the client send back a value that the server has no use for");
+        assertEquals(0, invocationOwners(internals).size(),
+                "Sending an invocation should stop tracking its owner");
+    }
+
+    @Test
+    void dumpPendingJavaScriptInvocations_treePreparedForResync_retainedInvocationDiscarded()
+            throws Exception {
+        StateNode node = new StateNode(ElementData.class);
+        node.getFeature(ElementData.class).setVisible(false);
+        internals.getStateTree().getRootNode()
+                .getFeature(ElementChildrenList.class).add(0, node);
+
+        PendingJavaScriptInvocation invocation = new PendingJavaScriptInvocation(
+                node, new UIInternals.JavaScriptInvocation(""));
+        internals.addJavaScriptInvocation(invocation);
+        internals.dumpPendingJavaScriptInvocations();
+
+        internals.getStateTree().prepareForResync();
+        node.getFeature(ElementData.class).setVisible(true);
+
+        assertEquals(0, internals.dumpPendingJavaScriptInvocations().size(),
+                "Resynchronizing should discard what was queued before it, "
+                        + "since components reinitialize the client side from "
+                        + "the initial attach event");
+        assertEquals(0, invocationOwners(internals).size(),
+                "Resynchronizing should stop tracking the discarded owner");
+    }
+
+    @Test
+    void prepareForResync_attachListenerAddsInvocation_invocationKept() {
+        StateNode node = new StateNode(ElementData.class);
+        internals.getStateTree().getRootNode()
+                .getFeature(ElementChildrenList.class).add(0, node);
+
+        PendingJavaScriptInvocation reinitialization = new PendingJavaScriptInvocation(
+                node, new UIInternals.JavaScriptInvocation("reinitialize"));
+        node.addAttachListener(
+                () -> internals.addJavaScriptInvocation(reinitialization));
+
+        internals.getStateTree().prepareForResync();
+
+        assertEquals(List.of(reinitialization),
+                internals.dumpPendingJavaScriptInvocations(),
+                "What a component queues while reinitializing on the resync "
+                        + "attach event has to survive the discard");
+    }
+
+    @Test
+    void dumpPendingJavaScriptInvocations_ownerDetached_onlyItsInvocationsDiscarded()
+            throws Exception {
+        ElementChildrenList children = internals.getStateTree().getRootNode()
+                .getFeature(ElementChildrenList.class);
+
+        StateNode detachedNode = new StateNode(ElementData.class);
+        detachedNode.getFeature(ElementData.class).setVisible(false);
+        children.add(0, detachedNode);
+        internals.addJavaScriptInvocation(new PendingJavaScriptInvocation(
+                detachedNode, new UIInternals.JavaScriptInvocation("1")));
+        internals.addJavaScriptInvocation(new PendingJavaScriptInvocation(
+                detachedNode, new UIInternals.JavaScriptInvocation("2")));
+
+        StateNode otherNode = new StateNode(ElementData.class);
+        otherNode.getFeature(ElementData.class).setVisible(false);
+        children.add(1, otherNode);
+        PendingJavaScriptInvocation otherInvocation = new PendingJavaScriptInvocation(
+                otherNode, new UIInternals.JavaScriptInvocation("3"));
+        internals.addJavaScriptInvocation(otherInvocation);
+
+        internals.dumpPendingJavaScriptInvocations();
+
+        assertEquals(3, internals.getPendingJavaScriptInvocations().count(),
+                "Invocations of invisible components should be retained");
+
+        detachedNode.setParent(null);
+
+        assertEquals(List.of(otherInvocation),
+                internals.getPendingJavaScriptInvocations().toList(),
+                "Only the invocations of the detached owner should be discarded");
+        assertEquals(List.of(otherNode),
+                List.copyOf(invocationOwners(internals)),
+                "Only the detached owner should stop being tracked");
+    }
+
+    @Test
+    void addJavaScriptInvocation_ownerDetachedBeforeDump_invocationDiscarded() {
+        StateNode node = new StateNode(ElementData.class);
+        internals.getStateTree().getRootNode()
+                .getFeature(ElementChildrenList.class).add(0, node);
+
+        internals.addJavaScriptInvocation(new PendingJavaScriptInvocation(node,
+                new UIInternals.JavaScriptInvocation("")));
+
+        node.setParent(null);
+
+        assertEquals(0, internals.dumpPendingJavaScriptInvocations().size(),
+                "An invocation that never reached a dump should be discarded "
+                        + "as well, since the client does not know the node");
+    }
+
+    @Test
+    void dumpPendingJavaScriptInvocations_invocationCanceled_pendingListPurged() {
+        StateNode node = new StateNode(ElementData.class);
+        node.getFeature(ElementData.class).setVisible(false);
+        internals.getStateTree().getRootNode()
+                .getFeature(ElementChildrenList.class).add(0, node);
+
+        PendingJavaScriptInvocation invocation = new PendingJavaScriptInvocation(
+                node, new UIInternals.JavaScriptInvocation(""));
+        internals.addJavaScriptInvocation(invocation);
+        internals.dumpPendingJavaScriptInvocations();
+
+        invocation.cancelExecution();
+
+        assertEquals(0, internals.getPendingJavaScriptInvocations().count());
+    }
+
+    @Test
+    void executeJs_elementMovedBeforeDump_invocationStillSent() {
+        UI realUI = new UI();
+        UIInternals realInternals = realUI.getInternals();
+        realInternals.setSession(new AlwaysLockedVaadinSession(vaadinService));
+
+        Element first = new Element("div");
+        Element second = new Element("div");
+        realUI.getElement().appendChild(first, second);
+
+        Element child = new Element("span");
+        first.appendChild(child);
+        child.executeJs("this.foo = $0", "bar");
+
+        // Moving the child detaches it from one parent before attaching it to
+        // the other, which happens before the invocation reaches the queue
+        second.appendChild(child);
+
+        realInternals.getStateTree().runExecutionsBeforeClientResponse();
+
+        assertEquals(1, realInternals.dumpPendingJavaScriptInvocations().size(),
+                "Moving an element should not drop its pending JavaScript");
+    }
+
+    @Test
+    void closedUI_retainedInvocationCanceled_noNullPointerException() {
+        UI closedUI = new UI();
+        UIInternals closedInternals = closedUI.getInternals();
+        closedInternals
+                .setSession(new AlwaysLockedVaadinSession(vaadinService));
+
+        Element element = new Element("div");
+        element.setVisible(false);
+        closedUI.getElement().appendChild(element);
+        PendingJavaScriptResult pending = element.executeJs("this.foo = $0",
+                "bar");
+
+        // The invocation is owned by an invisible component, so it is retained
+        // in the queue
+        closedInternals.getStateTree().runExecutionsBeforeClientResponse();
+        closedInternals.dumpPendingJavaScriptInvocations();
+
+        closedInternals.setSession(null);
+
+        // The component may be reused in another UI and cancel the invocation
+        // that it still references
+        assertDoesNotThrow(pending::cancelExecution,
+                "Canceling an invocation retained by a closed UI should not fail");
+    }
+
+    @Test
+    void closedUI_detachListenerThrows_pendingInvocationsCleanedUp()
+            throws Exception {
+        UI closedUI = new UI();
+        UIInternals closedInternals = closedUI.getInternals();
+        closedInternals
+                .setSession(new AlwaysLockedVaadinSession(vaadinService));
+
+        Element element = new Element("div");
+        element.setVisible(false);
+        closedUI.getElement().appendChild(element);
+
+        // A listener that throws aborts detaching the UI element tree
+        element.getNode().addDetachListener(() -> {
+            throw new IllegalStateException("detach listener failure");
+        });
+        element.executeJs("this.foo = $0", "bar");
+
+        closedInternals.getStateTree().runExecutionsBeforeClientResponse();
+        closedInternals.dumpPendingJavaScriptInvocations();
+
+        assertEquals(1, pendingInvocations(closedInternals).size(),
+                "Invocation of invisible component should be retained");
+
+        closedInternals.setSession(null);
+
+        assertEquals(0, pendingInvocations(closedInternals).size(),
+                "Detaching the UI should discard the retained invocations");
+    }
+
+    @Test
+    void elementRemovedFromTree_uiClosed_reusedInAnotherUI_invocationReleased()
+            throws Exception {
+        UI firstUI = new UI();
+        UIInternals firstInternals = firstUI.getInternals();
+        firstInternals.setSession(new AlwaysLockedVaadinSession(vaadinService));
+
+        Element element = new Element("div");
+        element.setVisible(false);
+        firstUI.getElement().appendChild(element);
+        PendingJavaScriptResult pending = element.executeJs("this.foo = $0",
+                "bar");
+
+        firstInternals.getStateTree().runExecutionsBeforeClientResponse();
+        firstInternals.dumpPendingJavaScriptInvocations();
+
+        // Detaches the element before resetting its node, which releases the
+        // invocation from the queue of the first UI
+        element.removeFromTree(false);
+
+        assertEquals(0, pendingInvocations(firstInternals).size(),
+                "Detaching the element should release the invocation");
+
+        firstInternals.setSession(null);
+
+        // The element is reused in a new UI and cancels the invocation it still
+        // references while attaching
+        UI secondUI = new UI();
+        secondUI.getInternals()
+                .setSession(new AlwaysLockedVaadinSession(vaadinService));
+        secondUI.getElement().appendChild(element);
+
+        assertDoesNotThrow(pending::cancelExecution,
+                "Canceling an invocation retained by a closed UI should not fail");
+    }
+
+    private static Collection<?> pendingInvocations(UIInternals internals)
+            throws Exception {
+        return (Collection<?>) readField(internals, "pendingJsInvocations");
+    }
+
+    private static Collection<?> invocationOwners(UIInternals internals)
+            throws Exception {
+        return (Collection<?>) readField(internals,
+                "pendingJsInvocationOwners");
+    }
+
+    private static Object readField(UIInternals internals, String name)
+            throws Exception {
+        Field field = UIInternals.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(internals);
+    }
+
+    @Test
+    void isDirty_noPendingJsInvocation_returnsFalse() {
+        StateNode node1 = spy(new StateNode(ElementData.class));
+        StateNode node2 = spy(new StateNode(ElementData.class));
+        node2.getFeature(ElementData.class).setVisible(false);
+        ElementChildrenList childrenList = internals.getStateTree()
+                .getRootNode().getFeature(ElementChildrenList.class);
+        childrenList.add(0, node1);
+        childrenList.add(1, node2);
+
+        assertTrue(internals.isDirty(), "Nodes added, expecting dirty UI");
+        internals.getStateTree().collectChanges(node -> {
+        });
+        internals.dumpPendingJavaScriptInvocations();
+
+        assertFalse(internals.isDirty(),
+                "Changes collected, expecting UI not to be dirty");
+    }
+
+    @Test
+    void isDirty_pendingJsInvocationReadyToSend_returnsTrue() {
+        StateNode node1 = spy(new StateNode(ElementData.class));
+        StateNode node2 = spy(new StateNode(ElementData.class));
+        node2.getFeature(ElementData.class).setVisible(false);
+        ElementChildrenList childrenList = internals.getStateTree()
+                .getRootNode().getFeature(ElementChildrenList.class);
+        childrenList.add(0, node1);
+        childrenList.add(1, node2);
+
+        internals.addJavaScriptInvocation(new PendingJavaScriptInvocation(node1,
+                new UIInternals.JavaScriptInvocation("")));
+
+        assertTrue(internals.isDirty(),
+                "Pending JS invocations, expecting dirty UI");
+        internals.getStateTree().collectChanges(node -> {
+        });
+        internals.dumpPendingJavaScriptInvocations();
+
+        assertFalse(internals.isDirty(),
+                "No pending JS invocations to send to the client, expecting UI not to be dirty");
+    }
+
+    @Test
+    void isDirty_pendingJsInvocationNotReadyToSend_returnsFalse() {
+        StateNode node1 = spy(new StateNode(ElementData.class));
+        StateNode node2 = spy(new StateNode(ElementData.class));
+        node2.getFeature(ElementData.class).setVisible(false);
+        ElementChildrenList childrenList = internals.getStateTree()
+                .getRootNode().getFeature(ElementChildrenList.class);
+        childrenList.add(0, node1);
+        childrenList.add(1, node2);
+
+        internals.addJavaScriptInvocation(new PendingJavaScriptInvocation(node1,
+                new UIInternals.JavaScriptInvocation("")));
+        internals.addJavaScriptInvocation(new PendingJavaScriptInvocation(node2,
+                new UIInternals.JavaScriptInvocation("")));
+
+        assertTrue(internals.isDirty(),
+                "Pending JS invocations, expecting dirty UI");
+        internals.getStateTree().collectChanges(node -> {
+        });
+        internals.dumpPendingJavaScriptInvocations();
+
+        assertFalse(internals.isDirty(),
+                "No pending JS invocations to send to the client, expecting UI not to be dirty");
+    }
+
+    @Test
+    void addUndeliveredJsInvocations_uncountingMoreThanCounted_clampedToZero() {
+        internals.addUndeliveredJsInvocations(1);
+
+        assertEquals(0, internals.addUndeliveredJsInvocations(-2),
+                "the count should never go negative");
+        assertEquals(1, internals.addUndeliveredJsInvocations(1),
+                "counting should continue from zero after being clamped");
+    }
+
+    @Test
+    void markUndeliveredJsInvocationsWarningLogged_onlyTheFirstCallReturnsTrue() {
+        assertTrue(internals.markUndeliveredJsInvocationsWarningLogged(),
+                "the warning should be logged when the threshold is first exceeded");
+        assertFalse(internals.markUndeliveredJsInvocationsWarningLogged(),
+                "the warning should not be logged again for the same UI");
+    }
+
+    @Test
+    void lastUpdateSentTimestamp_initializedOnCreation() {
+        Instant before = Instant.now();
+        UIInternals freshInternals = new UIInternals(ui);
+
+        assertFalse(
+                freshInternals.getLastUpdateSentTimestamp().isBefore(before),
+                "a UI that has not sent anything yet should report its creation time");
+        assertFalse(freshInternals.getLastUpdateSentTimestamp()
+                .isAfter(Instant.now()));
+    }
+
+    @Test
+    void dumpPendingJavaScriptInvocations_updatesLastUpdateSentTimestamp() {
+        Instant initialTimestamp = internals.getLastUpdateSentTimestamp();
+
+        internals.dumpPendingJavaScriptInvocations();
+
+        assertTrue(
+                internals.getLastUpdateSentTimestamp()
+                        .isAfter(initialTimestamp),
+                "purging the pending invocations should update the timestamp");
+        assertFalse(
+                internals.getLastUpdateSentTimestamp().isAfter(Instant.now()));
+    }
+
+    @Test
+    void pendingJsInvocationNotPurged_lastUpdateSentTimestampNotUpdated() {
+        Instant initialTimestamp = internals.getLastUpdateSentTimestamp();
+
+        internals.addJavaScriptInvocation(new PendingJavaScriptInvocation(
+                internals.getStateTree().getRootNode(),
+                new UIInternals.JavaScriptInvocation("")));
+
+        assertEquals(initialTimestamp, internals.getLastUpdateSentTimestamp(),
+                "scheduling an invocation should not update the timestamp");
+    }
+
+    @Test
+    void setTitle_titleAndPendingJsInvocationSetsCorrectTitle() {
+        internals.setTitle("new title");
+        assertEquals("new title", internals.getTitle());
+
+        assertEquals(1, internals.getPendingJavaScriptInvocations().count(),
+                "one pending JavaScript invocation should exist");
+
+        var pendingJavaScriptInvocation = internals
+                .getPendingJavaScriptInvocations().findFirst().orElse(null);
+        assertNotNull(pendingJavaScriptInvocation,
+                "pendingJavaScriptInvocation should not be null");
+        assertEquals("new title", pendingJavaScriptInvocation.getInvocation()
+                .getParameters().get(0));
+        assertTrue(
+                pendingJavaScriptInvocation.getInvocation().getExpression()
+                        .contains("document.title = $0"),
+                "document.title should be set via JavaScript");
+        assertTrue(pendingJavaScriptInvocation.getInvocation().getExpression()
+                .contains("""
+                            if(window?.Vaadin?.documentTitleSignal) {
+                                window.Vaadin.documentTitleSignal.value = $0;
+                            }
+                        """.stripIndent()),
+                "window.Vaadin.documentTitleSignal.value should be set conditionally via JavaScript");
+    }
+
+    private PushConfiguration setUpInitialPush() {
+        DeploymentConfiguration config = mock(DeploymentConfiguration.class);
+        vaadinService.setConfiguration(config);
+
+        PushConfiguration pushConfig = mock(PushConfiguration.class);
+        when(ui.getPushConfiguration()).thenReturn(pushConfig);
+
+        when(config.getPushMode()).thenReturn(PushMode.DISABLED);
+        return pushConfig;
+    }
+
+    @Test
+    void getDeploymentConfiguration() {
+        AlwaysLockedVaadinSession session = mock(
+                AlwaysLockedVaadinSession.class);
+        MockVaadinServletService mockVaadinServletService = mock(
+                MockVaadinServletService.class);
+
+        internals = new UIInternals(ui);
+        internals.setSession(session);
+
+        when(session.getService()).thenReturn(mockVaadinServletService);
+        DeploymentConfiguration config = new MockDeploymentConfiguration();
+        when(mockVaadinServletService.getDeploymentConfiguration())
+                .thenReturn(config);
+
+        DeploymentConfiguration result = internals.getDeploymentConfiguration();
+
+        verify(session).getService();
+        verify(mockVaadinServletService).getDeploymentConfiguration();
+        assertEquals(config, result);
+    }
+
+    @Test
+    void containsPendingJsCall_recognizesTheLocationReplaceOfEitherRouter() {
+        // The router checks this before scheduling a second location replace
+        History history = new History(ui);
+        MockDeploymentConfiguration configuration = (MockDeploymentConfiguration) vaadinService
+                .getDeploymentConfiguration();
+
+        assertFalse(
+                internals.containsPendingJsCall(HistoryJs.class,
+                        "replaceState"),
+                "nothing should be pending before anything is scheduled");
+
+        configuration.setReactEnabled(false);
+        history.replaceState(null, "somewhere");
+        assertTrue(
+                internals.containsPendingJsCall(HistoryJs.class,
+                        "replaceState"),
+                "the replace the router scheduled should be recognized");
+
+        configuration.setReactEnabled(true);
+        history.replaceState(null, "elsewhere");
+        assertTrue(
+                internals.containsPendingJsCall(HistoryJs.class,
+                        "navigateReplacing"),
+                "the replace the React router scheduled should be recognized");
+    }
+}

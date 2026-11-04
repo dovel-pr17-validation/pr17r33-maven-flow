@@ -1,0 +1,128 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.spring.flowsecurity.views;
+
+import jakarta.annotation.security.PermitAll;
+
+import java.math.BigDecimal;
+import java.util.concurrent.Executor;
+
+import org.springframework.security.concurrent.DelegatingSecurityContextExecutor;
+
+import com.vaadin.flow.component.AttachEvent;
+import com.vaadin.flow.component.ClickEvent;
+import com.vaadin.flow.component.DetachEvent;
+import com.vaadin.flow.component.html.Div;
+import com.vaadin.flow.component.html.NativeButton;
+import com.vaadin.flow.component.html.Span;
+import com.vaadin.flow.router.PageTitle;
+import com.vaadin.flow.router.Route;
+import com.vaadin.flow.shared.Registration;
+import com.vaadin.flow.spring.flowsecurity.SecurityUtils;
+import com.vaadin.flow.spring.flowsecurity.service.BankService;
+import com.vaadin.flow.spring.test.LoanApplicationUpload;
+
+@Route(value = "private", layout = MainView.class)
+@PageTitle("Private View")
+@PermitAll
+public class PrivateView extends Div {
+
+    private BankService bankService;
+    private Span balanceSpan = new Span();
+    private SecurityUtils utils;
+    private DelegatingSecurityContextExecutor executor;
+    private Registration registration;
+
+    public PrivateView(BankService bankService, SecurityUtils utils,
+            Executor executor) {
+        this.bankService = bankService;
+        this.utils = utils;
+        this.executor = new DelegatingSecurityContextExecutor(executor);
+
+        getStyle().set("display", "flex").set("flex-direction", "column");
+
+        updateBalanceText();
+        balanceSpan.setId("balanceText");
+        add(balanceSpan);
+
+        NativeButton applyForLoan = new NativeButton("Apply for a loan",
+                this::applyForLoan);
+        applyForLoan.setId("applyForLoan");
+        add(applyForLoan);
+
+        NativeButton applyForHugeLoan = new NativeButton(
+                "Apply for a huge loan", this::applyForHugeLoanUsingExecutor);
+        applyForHugeLoan.setId("applyForHugeLoan");
+        add(applyForHugeLoan);
+
+        NativeButton globalRefresh = new NativeButton(
+                "Send global refresh event", e -> Broadcaster.sendMessage());
+        globalRefresh.setId("sendRefresh");
+        add(globalRefresh);
+
+        LoanApplicationUpload.addTo(this,
+                () -> utils.getAuthenticatedUserInfo().getFullName());
+    }
+
+    @Override
+    protected void onAttach(AttachEvent attachEvent) {
+        super.onAttach(attachEvent);
+        attachEvent.getUI().setPollInterval(1000);
+        registration = Broadcaster.addMessageListener(e -> {
+            getUI().get().access(() -> this.updateBalanceText());
+        });
+    }
+
+    @Override
+    protected void onDetach(DetachEvent detachEvent) {
+        super.onDetach(detachEvent);
+        detachEvent.getUI().setPollInterval(-1);
+        registration.remove();
+    }
+
+    private void updateBalanceText() {
+        String name = utils.getAuthenticatedUserInfo().getFullName();
+        BigDecimal balance = bankService.getBalance();
+        this.balanceSpan.setText(String.format(
+                "Hello %s, your bank account balance is $%s.", name, balance));
+    }
+
+    private void applyForLoan(ClickEvent<NativeButton> e) {
+        try {
+            bankService.applyForLoan();
+            updateBalanceText();
+        } catch (Exception ex) {
+            getUI().get().access(() -> showNotification(
+                    "Application failed: " + ex.getMessage()));
+        }
+    }
+
+    private void applyForHugeLoanUsingExecutor(ClickEvent<NativeButton> e) {
+        try {
+            bankService.applyForHugeLoan();
+            updateBalanceText();
+        } catch (Exception ex) {
+            getUI().get().access(() -> showNotification(
+                    "Application failed: " + ex.getMessage()));
+        }
+    }
+
+    private void showNotification(String text) {
+        Div notification = new Div(text);
+        notification.addClassName("notification");
+        add(notification);
+    }
+}

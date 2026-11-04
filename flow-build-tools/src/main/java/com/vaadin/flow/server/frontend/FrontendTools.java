@@ -1,0 +1,1108 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.frontend;
+
+import java.io.File;
+import java.io.IOException;
+import java.net.URI;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.jspecify.annotations.NonNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import tools.jackson.databind.JsonNode;
+
+import com.vaadin.flow.internal.FileIOUtils;
+import com.vaadin.flow.internal.FrontendUtils;
+import com.vaadin.flow.internal.FrontendUtils.CommandExecutionException;
+import com.vaadin.flow.internal.FrontendUtils.UnknownVersionException;
+import com.vaadin.flow.internal.FrontendVersion;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.internal.Pair;
+import com.vaadin.flow.internal.Platform;
+import com.vaadin.flow.server.InitParameters;
+import com.vaadin.flow.server.frontend.installer.NodeInstaller;
+import com.vaadin.flow.server.frontend.installer.ProxyConfig;
+import com.vaadin.flow.server.startup.ApplicationConfiguration;
+
+import static com.vaadin.flow.server.InitParameters.NODE_DOWNLOAD_ROOT;
+import static com.vaadin.flow.server.InitParameters.NODE_VERSION;
+
+/**
+ * Provides access to frontend tools (Node.js and npm, pnpm, bun) and optionally
+ * installs the tools if needed.
+ * <p>
+ * <b>WARNING:</b> This class is intended for internal usage only. May be
+ * renamed or removed in a future release.
+ *
+ * @author Vaadin Ltd
+ *
+ * @since 3.1
+ */
+public class FrontendTools {
+
+    /**
+     * This is the version that is installed if there is no node installed or
+     * the installed version is older than {@link #SUPPORTED_NODE_VERSION}.
+     * <p>
+     * The downloaded archive is verified against checksums shipped with Flow,
+     * so run {@code scripts/updateNodeChecksums.sh} after changing this.
+     * 
+     * @since 4.0
+     */
+    public static final String DEFAULT_NODE_VERSION = "v26.13.0";
+    /**
+     * This is the version shipped with the default Node version.
+     * 
+     * @since 9.0
+     */
+    public static final String DEFAULT_NPM_VERSION = "11.20.0";
+
+    public static final String DEFAULT_PNPM_VERSION = "11.28.9";
+
+    private static final String MSG_PREFIX = "%n%n======================================================================================================";
+    private static final String MSG_SUFFIX = "%n======================================================================================================%n";
+
+    private static final String PNPM_NOT_FOUND = MSG_PREFIX
+            + "%nVaadin is configured to use a globally installed pnpm ('pnpm.global=true'), but pnpm was not found on your system."
+            + "%nInstall pnpm by following the instruction at https://pnpm.io/installation "
+            + "%nor exclude 'pnpm.global' from the configuration or set it to false."
+            + MSG_SUFFIX;
+    private static final String BUN_NOT_FOUND = MSG_PREFIX
+            + "%nVaadin is configured to use a globally installed bun, but bun was not found on your system."
+            + "%nInstall bun by following the instruction at https://bun.sh "
+            + MSG_SUFFIX;
+
+    private static final String BAD_VERSION = MSG_PREFIX
+            + "%nYour installed '%s' version (%s) is known to have problems." //
+            + "%nPlease update it%s." + "%n" //
+            + FrontendUtils.DISABLE_CHECK //
+            + MSG_SUFFIX;
+
+    private static final List<@NonNull FrontendVersion> BAD_NPM_VERSIONS = Collections
+            .singletonList(new FrontendVersion("9.2.0"));
+
+    /**
+     * Maximum supported Node.js major version. Versions with a higher major
+     * version are not tested and may not be compatible.
+     * 
+     * @since 25.0
+     */
+    public static final int MAX_SUPPORTED_NODE_MAJOR_VERSION = 26;
+    private static final int SUPPORTED_NPM_MAJOR_VERSION = 11;
+    private static final int SUPPORTED_NPM_MINOR_VERSION = 3;
+
+    public static final FrontendVersion SUPPORTED_NODE_VERSION = FrontendUtils.MINIMUM_SUPPORTED_NODE_VERSION;
+
+    /**
+     * Minimum Node.js version for auto-installed versions in ~/.vaadin, which
+     * is the same minimum that a global installation has to meet.
+     *
+     * @since 25.0
+     */
+    public static final FrontendVersion MINIMUM_AUTO_INSTALLED_NODE = SUPPORTED_NODE_VERSION;
+
+    private static final FrontendVersion SUPPORTED_NPM_VERSION = new FrontendVersion(
+            SUPPORTED_NPM_MAJOR_VERSION, SUPPORTED_NPM_MINOR_VERSION);
+
+    // npm 11.10.0 is the first version that supports --min-release-age.
+    // Older versions fall back to --before (a Date.parse-able string) which
+    // achieves the same supply-chain mitigation with day-level precision.
+    static final FrontendVersion MIN_NPM_VERSION_FOR_RELEASE_AGE = new FrontendVersion(
+            11, 10, 0);
+
+    // npm 11.17.0 is the first version that supports
+    // --min-release-age-exclude, which exempts the packages matching a
+    // minimatch pattern from both --min-release-age and --before. Older
+    // versions only warn about an unknown configuration and keep blocking
+    // the packages.
+    static final FrontendVersion MIN_NPM_VERSION_FOR_RELEASE_AGE_EXCLUDE = new FrontendVersion(
+            11, 17, 0);
+
+    // Node.js 26.4.0 is the first release of the supported Node.js line that
+    // ships npm 11.17.0, which is what a global installation has to be
+    // upgraded to. The Node.js version Vaadin installs itself is newer.
+    static final FrontendVersion MIN_NODE_VERSION_FOR_RELEASE_AGE_EXCLUDE = new FrontendVersion(
+            26, 4, 0);
+
+    // pnpm 10.17.0 is the first version that supports the
+    // minimumReleaseAgeExclude setting; pnpm 10.16 ignores it.
+    static final FrontendVersion MIN_PNPM_VERSION_FOR_RELEASE_AGE_EXCLUDE = new FrontendVersion(
+            10, 17, 0);
+
+    // pnpm 10.16.0 is the first version that supports the
+    // minimumReleaseAge setting used to delay installation of newly
+    // published packages as a supply-chain mitigation.
+    private static final int SUPPORTED_PNPM_MAJOR_VERSION = 10;
+    private static final int SUPPORTED_PNPM_MINOR_VERSION = 16;
+
+    private static final FrontendVersion SUPPORTED_PNPM_VERSION = new FrontendVersion(
+            SUPPORTED_PNPM_MAJOR_VERSION, SUPPORTED_PNPM_MINOR_VERSION);
+    // Bun 1.3.0 is the first version that supports --minimum-release-age
+    // for the same supply-chain mitigation.
+    private static final FrontendVersion SUPPORTED_BUN_VERSION = new FrontendVersion(
+            1, 3, 0);
+
+    private enum BuildTool {
+        NPM("npm", "npm-cli.js"),
+        NPX("npx", "npx-cli.js"),
+        PNPM("pnpm", null),
+        BUN("bun", null);
+
+        private final String name;
+        private final String script;
+
+        BuildTool(String tool, String script) {
+            this.name = tool;
+            this.script = script;
+        }
+
+        String getCommand() {
+            if (name.equals("bun")) {
+                return name;
+            }
+            return FrontendUtils.isWindows() ? name + ".cmd" : name;
+        }
+
+        String getScript() {
+            if (script == null) {
+                throw new RuntimeException(String.format(
+                        "'%s' build tool doesn't have a CLI script", name));
+            }
+            return script;
+        }
+    }
+
+    private final String baseDir;
+    private final Supplier<String> alternativeDirGetter;
+
+    private final FrontendToolsLocator frontendToolsLocator = new FrontendToolsLocator();
+
+    // The active node installation - shared across all FrontendTools instances
+    private static volatile NodeResolver.ActiveNodeInstallation activeNodeInstallation;
+
+    // Lock object for synchronizing node resolution
+    private static final Object RESOLUTION_LOCK = new Object();
+
+    private final String nodeVersion;
+    private final URI nodeDownloadRoot;
+
+    private final boolean ignoreVersionChecks;
+    private final boolean forceAlternativeNode;
+    private final boolean useGlobalPnpm;
+    private final String nodeFolder;
+
+    /**
+     * Creates an instance of the class using the {@code baseDir} as a base
+     * directory to locate the tools and the directory returned by the
+     * {@code alternativeDirGetter} as a directory to install tools if they are
+     * not found and use it as an alternative tools location.
+     * <p>
+     * If {@code alternativeDir} is {@code null} tools won't be installed.
+     * <p>
+     * Note: settings for this object can not be changed through the settings
+     * object after creation.
+     *
+     * @param settings
+     *            tooling settings to use
+     * @since 9.0
+     */
+    public FrontendTools(FrontendToolsSettings settings) {
+        this.baseDir = Objects.requireNonNull(settings.getBaseDir());
+        this.alternativeDirGetter = settings.getAlternativeDirGetter();
+        this.nodeVersion = Objects.requireNonNull(settings.getNodeVersion());
+        this.nodeDownloadRoot = Objects
+                .requireNonNull(settings.getNodeDownloadRoot());
+        this.ignoreVersionChecks = settings.isIgnoreVersionChecks();
+        this.forceAlternativeNode = settings.isForceAlternativeNode();
+        this.useGlobalPnpm = settings.isUseGlobalPnpm();
+        this.nodeFolder = settings.getNodeFolder();
+    }
+
+    /**
+     * Creates an instance using the the given project directory and application
+     * configuration.
+     *
+     * @param projectRoot
+     *            the project root directory
+     * @param applicationConfiguration
+     *            the configuration for the application
+     * @since 23.0
+     */
+    public FrontendTools(ApplicationConfiguration applicationConfiguration,
+            File projectRoot) {
+        this(createSettings(applicationConfiguration, projectRoot));
+    }
+
+    /**
+     * Creates an instance of the class using the {@code baseDir} as a base
+     * directory to locate the tools and the directory returned by the
+     * {@code alternativeDirGetter} as a directory to install tools if they are
+     * not found and use it as an alternative tools location.
+     * <p>
+     * If {@code alternativeDir} is {@code null} tools won't be installed.
+     *
+     *
+     * @param baseDir
+     *            the base directory to locate the tools, not {@code null}
+     * @param alternativeDirGetter
+     *            the getter for a directory where tools will be installed if
+     *            they are not found globally or in the {@code baseDir}, may be
+     *            {@code null}
+     * @param nodeVersion
+     *            The Node.js version to be used when Node.js is installed
+     *            automatically by Vaadin, for example <code>"v16.0.0"</code>.
+     *            Use {@value #DEFAULT_NODE_VERSION} by default.
+     * @param nodeDownloadRoot
+     *            Download Node.js from this URL. Handy in heavily firewalled
+     *            corporate environments where the Node.js download can be
+     *            provided from an intranet mirror. Use
+     *            {@link NodeInstaller#DEFAULT_NODEJS_DOWNLOAD_ROOT} by default.
+     * @param forceAlternativeNode
+     *            force usage of node executable from alternative directory
+     * @param useGlobalPnpm
+     *            use globally installed pnpm instead of the default one (see
+     *            {@link #DEFAULT_PNPM_VERSION})
+     * @deprecated use
+     *             {@link FrontendTools#FrontendTools(FrontendToolsSettings)}
+     *             instead, as it simplifies configuring the frontend tools and
+     *             gives the default values to configuration parameters.
+     * @since 9.0
+     */
+    @Deprecated
+    public FrontendTools(String baseDir, Supplier<String> alternativeDirGetter,
+            String nodeVersion, URI nodeDownloadRoot,
+            boolean forceAlternativeNode, boolean useGlobalPnpm) {
+        this(baseDir, alternativeDirGetter, nodeVersion, nodeDownloadRoot,
+                "true".equalsIgnoreCase(System.getProperty(
+                        FrontendUtils.PARAM_IGNORE_VERSION_CHECKS)),
+                forceAlternativeNode, useGlobalPnpm, null);
+    }
+
+    FrontendTools(String baseDir, Supplier<String> alternativeDirGetter,
+            String nodeVersion, URI nodeDownloadRoot,
+            boolean ignoreVersionChecks, boolean forceAlternativeNode,
+            boolean useGlobalPnpm, String nodeFolder) {
+        this.baseDir = Objects.requireNonNull(baseDir);
+        this.alternativeDirGetter = alternativeDirGetter;
+        this.nodeVersion = Objects.requireNonNull(nodeVersion);
+        this.nodeDownloadRoot = Objects.requireNonNull(nodeDownloadRoot);
+        this.ignoreVersionChecks = ignoreVersionChecks;
+        this.forceAlternativeNode = forceAlternativeNode;
+        this.useGlobalPnpm = useGlobalPnpm;
+        this.nodeFolder = nodeFolder;
+    }
+
+    private static FrontendToolsSettings createSettings(
+            ApplicationConfiguration applicationConfiguration,
+            File projectRoot) {
+        boolean useHomeNodeExec = applicationConfiguration.getBooleanProperty(
+                InitParameters.REQUIRE_HOME_NODE_EXECUTABLE, false);
+        boolean useGlobalPnpm = applicationConfiguration.getBooleanProperty(
+                InitParameters.SERVLET_PARAMETER_GLOBAL_PNPM, false);
+        String nodeFolder = applicationConfiguration
+                .getStringProperty(InitParameters.NODE_FOLDER, null);
+        final String nodeVersion = applicationConfiguration.getStringProperty(
+                NODE_VERSION, FrontendTools.DEFAULT_NODE_VERSION);
+        final String nodeDownloadRoot = applicationConfiguration
+                .getStringProperty(NODE_DOWNLOAD_ROOT,
+                        NodeInstaller.getDownloadRoot(Platform.guess()));
+
+        FrontendToolsSettings settings = new FrontendToolsSettings(
+                projectRoot.getAbsolutePath(),
+                () -> FrontendUtils.getVaadinHomeDirectory().getAbsolutePath());
+        settings.setForceAlternativeNode(useHomeNodeExec);
+        settings.setUseGlobalPnpm(useGlobalPnpm);
+        settings.setNodeFolder(nodeFolder);
+        settings.setNodeVersion(nodeVersion);
+        settings.setNodeDownloadRoot(URI.create(nodeDownloadRoot));
+        settings.setIgnoreVersionChecks(false);
+        return settings;
+    }
+
+    /**
+     * Creates a {@link FrontendTools} instance configured from the given
+     * {@link Options}, using the node/pnpm related settings collected there.
+     *
+     * @param options
+     *            the task options to read the frontend tools configuration
+     *            from, not {@code null}
+     * @return a new {@link FrontendTools} instance
+     * @since 25.2.5
+     */
+    public static FrontendTools fromOptions(Options options) {
+        FrontendToolsSettings settings = new FrontendToolsSettings(
+                options.getNpmFolder().getAbsolutePath(),
+                () -> FrontendUtils.getVaadinHomeDirectory().getAbsolutePath());
+        settings.setNodeDownloadRoot(options.getNodeDownloadRoot());
+        settings.setForceAlternativeNode(options.isRequireHomeNodeExec());
+        settings.setNodeFolder(options.getNodeFolder());
+        settings.setUseGlobalPnpm(options.isUseGlobalPnpm());
+        settings.setNodeVersion(options.getNodeVersion());
+        settings.setIgnoreVersionChecks(
+                options.isFrontendIgnoreVersionChecks());
+        return new FrontendTools(settings);
+    }
+
+    /**
+     * Locate <code>node</code> executable.
+     *
+     * @return the full path to the executable
+     */
+    public String getNodeExecutable() {
+        return ensureNodeResolved().nodeExecutable();
+    }
+
+    /**
+     * Returns the path to a Node.js executable that can be used without
+     * downloading or installing one, either a Node.js that has already been
+     * resolved during this build or a globally available Node.js found on the
+     * system {@code PATH}. Unlike {@link #getNodeExecutable()}, this never
+     * triggers a Node.js installation.
+     *
+     * @return the path to an already available node executable, or {@code null}
+     *         if none is available without installation
+     * @since 25.3
+     */
+    public String getExistingNodeExecutable() {
+        NodeResolver.ActiveNodeInstallation active = activeNodeInstallation;
+        if (active != null) {
+            return active.nodeExecutable();
+        }
+        String nodeCommand = FrontendUtils.isWindows() ? "node.exe" : "node";
+        return frontendToolsLocator.tryLocateTool(nodeCommand)
+                .map(File::getAbsolutePath).orElse(null);
+    }
+
+    /**
+     * Ensures that node has been resolved and cached. Uses double-checked
+     * locking to ensure thread-safe lazy initialization.
+     *
+     * @return the active node installation information
+     */
+    private NodeResolver.ActiveNodeInstallation ensureNodeResolved() {
+        NodeResolver.ActiveNodeInstallation active = activeNodeInstallation;
+        if (active != null) {
+            return active;
+        }
+
+        synchronized (RESOLUTION_LOCK) {
+            // Double-check after acquiring lock
+            active = activeNodeInstallation;
+            if (active != null) {
+                return active;
+            }
+
+            // Perform resolution
+            if (alternativeDirGetter == null) {
+                throw new IllegalStateException(
+                        "Node not found and no alternative directory configured for installation");
+            }
+
+            NodeResolver resolver = new NodeResolver(getAlternativeDir(),
+                    nodeVersion, nodeDownloadRoot, forceAlternativeNode,
+                    getProxies(), nodeFolder);
+            activeNodeInstallation = resolver.resolve();
+            return activeNodeInstallation;
+        }
+    }
+
+    /**
+     * Locate <code>npm</code> executable.
+     *
+     * @return the list of all commands in sequence that need to be executed to
+     *         have npm running
+     */
+    public List<String> getNpmExecutable() {
+        return getNpmExecutable(true);
+    }
+
+    /**
+     * Locate <code>pnpm</code> executable.
+     * <p>
+     * In case pnpm is not available it will be installed.
+     *
+     * @return the list of all commands in sequence that need to be executed to
+     *         have pnpm running
+     */
+    public List<String> getPnpmExecutable() {
+        List<String> pnpmCommand = getSuitablePnpm();
+        assert !pnpmCommand.isEmpty();
+        pnpmCommand = new ArrayList<>(pnpmCommand);
+        // Force hoisted (flat npm-style) layout. CLI takes precedence over
+        // .npmrc, so this is unambiguous even if the project lacks the
+        // generated .npmrc. Replaces the previous --shamefully-hoist=true,
+        // which only controls the partial-hoist heuristic on top of the
+        // default isolated layout and did not consistently expose every
+        // transitive at the project root.
+        pnpmCommand.add("--config.node-linker=hoisted");
+        return pnpmCommand;
+    }
+
+    /**
+     * Locate <code>bun</code> executable.
+     *
+     * @return the list of all commands in sequence that need to be executed to
+     *         have bun running
+     * @since 24.3
+     */
+    public List<String> getBunExecutable() {
+        List<String> bunCommand = getSuitableBun();
+        assert !bunCommand.isEmpty();
+        bunCommand = new ArrayList<>(bunCommand);
+        return bunCommand;
+    }
+
+    /**
+     * Validate that the found node and npm versions are new enough. Throws an
+     * exception with a descriptive message if a version is too old.
+     */
+    public void validateNodeAndNpmVersion() {
+        if (ignoreVersionChecks) {
+            return;
+        }
+        // Node version is already validated by NodeResolver, which ensures
+        // we have a suitable version (either from global PATH or auto-installed
+        // to ~/.vaadin). Just log which node we're using.
+        try {
+            Pair<FrontendVersion, String> foundNodeVersionAndExe = getNodeVersionAndExecutable();
+            getLogger().debug("Using node {} located at {}",
+                    foundNodeVersionAndExe.getFirst().getFullVersion(),
+                    foundNodeVersionAndExe.getSecond());
+        } catch (UnknownVersionException e) {
+            getLogger().warn("Error checking node version", e);
+        }
+
+        // Validate npm version (npm comes bundled with node)
+        try {
+            FrontendVersion foundNpmVersion = getNpmVersion();
+            getLogger().debug("Using npm {} located at {}",
+                    foundNpmVersion.getFullVersion(),
+                    getNpmExecutable(false).get(0));
+
+            // If npm is too old, this is an internal configuration error - the
+            // node version we accept/install should always come with a suitable
+            // npm
+            if (foundNpmVersion.isOlderThan(SUPPORTED_NPM_VERSION)) {
+                throw new IllegalStateException(String.format(
+                        "Internal error: npm version %s is older than required %s. "
+                                + "This should not happen as Node %s should bundle a compatible npm version. "
+                                + "Please report this issue.",
+                        foundNpmVersion.getFullVersion(),
+                        SUPPORTED_NPM_VERSION.getFullVersion(),
+                        DEFAULT_NODE_VERSION));
+            }
+
+            checkForFaultyNpmVersion(foundNpmVersion);
+        } catch (UnknownVersionException e) {
+            getLogger().warn("Error checking npm version", e);
+        }
+
+    }
+
+    /**
+     * Gets the version of the node executable.
+     *
+     * @return the version of the node executable
+     * @throws UnknownVersionException
+     *             if the node version cannot be determined
+     * @since 8.0.5
+     */
+    public FrontendVersion getNodeVersion() throws UnknownVersionException {
+        return getNodeVersionAndExecutable().getFirst();
+    }
+
+    private Pair<FrontendVersion, String> getNodeVersionAndExecutable()
+            throws UnknownVersionException {
+        String executable = getNodeBinary();
+        List<String> nodeVersionCommand = new ArrayList<>();
+        nodeVersionCommand.add(executable);
+        nodeVersionCommand.add("--version"); // NOSONAR
+        return new Pair<>(FrontendUtils.getVersion("node", nodeVersionCommand),
+                executable);
+    }
+
+    /**
+     * Read list of configured proxies in order from system properties, .npmrc
+     * file in the project root folder, .npmrc file in user root folder and
+     * system environment variables.
+     *
+     * @return list of configured proxies
+     */
+    // Not private because of test
+    protected List<ProxyConfig.Proxy> getProxies() {
+        return ProxyFactory.getProxies(new File(baseDir));
+    }
+
+    void checkForFaultyNpmVersion(FrontendVersion npmVersion) {
+        if (BAD_NPM_VERSIONS.contains(npmVersion)) {
+            String badNpmVersion = buildBadVersionString("npm",
+                    npmVersion.getFullVersion(),
+                    "by updating your global npm installation with `npm install -g npm@latest`");
+            throw new IllegalStateException(badNpmVersion);
+        }
+    }
+
+    /**
+     * Gives a file object representing path to the cache directory of currently
+     * installed npm.
+     *
+     * @return the file object representing path to npm cache directory.
+     * @throws CommandExecutionException
+     *             if getting the npm cache directory completes exceptionally.
+     * @throws IllegalStateException
+     *             if npm cache command return an empty path.
+     */
+    File getNpmCacheDir()
+            throws CommandExecutionException, IllegalStateException {
+        List<String> npmCacheCommand = new ArrayList<>(getNpmExecutable(false));
+        npmCacheCommand.add("config");
+        npmCacheCommand.add("get");
+        npmCacheCommand.add("cache");
+        npmCacheCommand.add("--global");
+        String output = FrontendUtils.executeCommand(npmCacheCommand);
+        output = removeLineBreaks(output);
+        if (output.isEmpty()) {
+            throw new IllegalStateException(
+                    String.format("Command '%s' returned an empty path",
+                            String.join(" ", npmCacheCommand)));
+        }
+        return new File(output);
+    }
+
+    /**
+     * Returns the URLs of every configured registry that is not the public npm
+     * registry, i.e. the registries packages are expected to be downloaded
+     * from.
+     * <p>
+     * The configuration is read from npm itself, so it accounts for every
+     * configuration source and precedence rule npm applies (command line,
+     * environment variables, project/user/global/builtin {@code .npmrc}) and
+     * covers both the global {@code registry} and any scoped
+     * {@code @scope:registry} entries. If the configuration cannot be read an
+     * empty set is returned. The returned URLs always end with a slash, so they
+     * can be matched as a prefix against package download URLs.
+     *
+     * @param workingDirectory
+     *            the directory the configuration is resolved from, so that a
+     *            project {@code .npmrc} is taken into account
+     * @return the custom registry URLs, or an empty set if only the default
+     *         registry is configured
+     */
+    Set<String> getCustomNpmRegistries(File workingDirectory) {
+        return customRegistries(getConfiguredRegistries(workingDirectory));
+    }
+
+    /**
+     * Reads the registry URLs npm resolves for the given directory by running
+     * {@code npm config list --json}. The returned map contains the global
+     * {@code registry} entry and every scoped {@code @scope:registry} entry, as
+     * resolved by npm across all its configuration sources.
+     *
+     * @param workingDirectory
+     *            the directory to resolve the configuration from
+     * @return the configured registry keys mapped to their URLs, or an empty
+     *         map if the configuration cannot be read
+     */
+    Map<String, String> getConfiguredRegistries(File workingDirectory) {
+        JsonNode config = getResolvedConfiguration(getNpmExecutable(false),
+                workingDirectory);
+        Map<String, String> registries = new HashMap<>();
+        for (String key : config.propertyNames()) {
+            if ((key.equals("registry") || key.endsWith(":registry"))
+                    && config.get(key).isString()) {
+                registries.put(key, config.get(key).asString());
+            }
+        }
+        return registries;
+    }
+
+    /**
+     * Reads the value the given npm or pnpm command resolves for a
+     * configuration key.
+     * <p>
+     * Several keys can be given for a setting that the tool spells differently
+     * depending on its version; the first one that has a value is returned.
+     *
+     * @param toolCommand
+     *            the npm or pnpm command to run
+     * @param workingDirectory
+     *            the directory the configuration is resolved from, so that a
+     *            project {@code .npmrc} is taken into account
+     * @param keys
+     *            the configuration keys to look for, in order of preference
+     * @return the configured value, or an empty optional if none of the keys
+     *         has a scalar value or the configuration cannot be read
+     */
+    Optional<String> getConfiguredSetting(List<String> toolCommand,
+            File workingDirectory, String... keys) {
+        JsonNode config = getResolvedConfiguration(toolCommand,
+                workingDirectory);
+        for (String key : keys) {
+            JsonNode value = config.get(key);
+            // npm lists every key it knows, using null for the ones that are
+            // not configured; pnpm lists only the configured ones. Settings
+            // that npm lists as an array, such as omit or noproxy, are not
+            // values this can return.
+            if (value != null && value.isValueNode() && !value.isNull()) {
+                return Optional.of(value.asString());
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Reads the values the given npm or pnpm command resolves for a
+     * configuration key that holds a list, such as
+     * {@code min-release-age-exclude}.
+     * <p>
+     * Several keys can be given for a setting that the tool spells differently
+     * depending on its version; the first one that has a value is used. Both
+     * tools list such a setting as an array, but a single value written into a
+     * {@code .npmrc} may also arrive as a comma separated string. Only that
+     * string is split, as the values of an array are complete on their own and
+     * may contain a comma themselves, such as the brace expansion
+     * {@code @acme/{ui,core}}.
+     *
+     * @param toolCommand
+     *            the npm or pnpm command to run
+     * @param workingDirectory
+     *            the directory the configuration is resolved from, so that a
+     *            project {@code .npmrc} is taken into account
+     * @param keys
+     *            the configuration keys to look for, in order of preference
+     * @return the configured values, empty if none of the keys has a value or
+     *         the configuration cannot be read
+     */
+    List<String> getConfiguredSettingValues(List<String> toolCommand,
+            File workingDirectory, String... keys) {
+        JsonNode config = getResolvedConfiguration(toolCommand,
+                workingDirectory);
+        for (String key : keys) {
+            JsonNode value = config.get(key);
+            if (value == null || value.isNull()) {
+                continue;
+            }
+            Stream<String> entries = value.isArray()
+                    ? value.valueStream().map(JsonNode::asString)
+                    : Stream.of(value.asString().split(","));
+            List<String> values = entries.map(String::trim)
+                    .filter(entry -> !entry.isEmpty()).toList();
+            if (!values.isEmpty()) {
+                return values;
+            }
+        }
+        return List.of();
+    }
+
+    /**
+     * Reads the configuration the given npm or pnpm command resolves for a
+     * directory by running {@code config list --json}.
+     * <p>
+     * The configuration is read from the tool itself, so it accounts for every
+     * configuration source and precedence rule the tool applies (command line,
+     * environment variables, project/user/global/builtin {@code .npmrc} and,
+     * for pnpm, {@code pnpm-workspace.yaml}). The subcommand has to be spelled
+     * {@code list}, as pnpm does not know the {@code ls} alias npm accepts.
+     *
+     * @param toolCommand
+     *            the npm or pnpm command to run
+     * @param workingDirectory
+     *            the directory the configuration is resolved from, so that a
+     *            project {@code .npmrc} is taken into account
+     * @return the resolved configuration, or an empty object if it cannot be
+     *         read
+     */
+    JsonNode getResolvedConfiguration(List<String> toolCommand,
+            File workingDirectory) {
+        List<String> command = new ArrayList<>(toolCommand);
+        command.add("config");
+        command.add("list");
+        command.add("--json");
+        try {
+            String output = FrontendUtils.executeCommand(command,
+                    builder -> builder.directory(workingDirectory));
+            return JacksonUtils.readTree(output);
+        } catch (CommandExecutionException | RuntimeException e) {
+            getLogger().debug("Could not read the configuration using '{}'",
+                    String.join(" ", command), e);
+            return JacksonUtils.createObjectNode();
+        }
+    }
+
+    /**
+     * Extracts the custom (non-default) registry URLs from the given
+     * configuration, normalized to always end with a slash so they can be
+     * matched as a prefix against package download URLs.
+     */
+    static Set<String> customRegistries(Map<String, String> registries) {
+        return registries.values().stream()
+                .filter(registry -> !isDefaultNpmRegistry(registry))
+                .map(FrontendTools::ensureTrailingSlash)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    private static boolean isDefaultNpmRegistry(String registry) {
+        String normalized = registry.endsWith("/")
+                ? registry.substring(0, registry.length() - 1)
+                : registry;
+        return "https://registry.npmjs.org".equals(normalized);
+    }
+
+    private static String ensureTrailingSlash(String url) {
+        return url.endsWith("/") ? url : url + "/";
+    }
+
+    /**
+     * Executes <code>npm --version</code> to and parses the result.
+     *
+     * @return the version of npm.
+     * @throws UnknownVersionException
+     *             if the npm command fails or returns unexpected output.
+     * @since 9.0
+     */
+    public FrontendVersion getNpmVersion() throws UnknownVersionException {
+        List<String> npmVersionCommand = new ArrayList<>(
+                getNpmExecutable(false));
+        npmVersionCommand.add("--version"); // NOSONAR
+        return FrontendUtils.getVersion("npm", npmVersionCommand);
+    }
+
+    /**
+     * Returns whether the given npm command resolves to a version that supports
+     * the {@code --min-release-age} install flag (see
+     * {@link #MIN_NPM_VERSION_FOR_RELEASE_AGE}). Used when building the
+     * {@code npm install} command for the minimum-package-age check (see
+     * {@link Options#withMinimumFrontendPackageAgeDays(Integer)}) to decide
+     * between {@code --min-release-age} and the {@code --before=<date>}
+     * fallback supported by older npm versions.
+     *
+     * @param npmCommand
+     *            the npm command to invoke for {@code --version}
+     * @return {@code true} if the installed npm is new enough; {@code false} if
+     *         it is older or its version cannot be determined
+     * @since 25.2
+     */
+    public boolean npmSupportsMinReleaseAge(List<String> npmCommand) {
+        return isAtLeast("npm", npmCommand, MIN_NPM_VERSION_FOR_RELEASE_AGE);
+    }
+
+    /**
+     * Checks whether the given npm is new enough to know
+     * {@code --min-release-age-exclude}, which exempts the packages Vaadin
+     * publishes itself from the minimum frontend package age.
+     *
+     * @param npmCommand
+     *            the npm command to invoke for {@code --version}
+     * @return {@code true} if the installed npm is new enough; {@code false} if
+     *         it is older or its version cannot be determined
+     */
+    boolean npmSupportsMinReleaseAgeExclude(List<String> npmCommand) {
+        return isAtLeast("npm", npmCommand,
+                MIN_NPM_VERSION_FOR_RELEASE_AGE_EXCLUDE);
+    }
+
+    /**
+     * Checks whether the given pnpm is new enough to know the
+     * {@code minimumReleaseAgeExclude} setting, which exempts the packages
+     * Vaadin publishes itself from the minimum frontend package age.
+     *
+     * @param pnpmCommand
+     *            the pnpm command to invoke for {@code --version}
+     * @return {@code true} if the installed pnpm is new enough; {@code false}
+     *         if it is older or its version cannot be determined
+     */
+    boolean pnpmSupportsMinimumReleaseAgeExclude(List<String> pnpmCommand) {
+        return isAtLeast("pnpm", pnpmCommand,
+                MIN_PNPM_VERSION_FOR_RELEASE_AGE_EXCLUDE);
+    }
+
+    private boolean isAtLeast(String tool, List<String> toolCommand,
+            FrontendVersion required) {
+        List<String> versionCmd = new ArrayList<>(toolCommand);
+        versionCmd.add("--version"); // NOSONAR
+        try {
+            return FrontendUtils.getVersion(tool, versionCmd)
+                    .isEqualOrNewer(required);
+        } catch (UnknownVersionException e) {
+            getLogger().debug(
+                    "Could not determine the {} version; assuming it is older than {}",
+                    tool, required.getFullVersion(), e);
+            return false;
+        }
+    }
+
+    /**
+     * Gives a path to the executable (bin) JS file of the given package using
+     * the native node resolution mechanism.
+     *
+     * @param packageName
+     *            the name of the package.
+     * @param binName
+     *            the name of the specific executable.
+     * @param cwd
+     *            the current working directory.
+     * @return the path to the executable.
+     * @throws CommandExecutionException
+     *             if the node resolution fails.
+     * @since 24.8
+     */
+    public Path getNpmPackageExecutable(String packageName, String binName,
+            File cwd) throws CommandExecutionException {
+        var script = """
+                var jsonPath = require.resolve('%s/package.json');
+                var json = require(jsonPath);
+                console.log(path.resolve(path.dirname(jsonPath), json.bin['%s']));
+                """
+                .formatted(packageName, binName);
+        return Paths.get(FrontendUtils
+                .executeCommand(List.of(getNodeExecutable(), "--eval", script),
+                        (builder) -> builder.directory(cwd))
+                .trim());
+    }
+
+    /**
+     * Returns flags required to pass to Node for Webpack to function. Determine
+     * whether webpack requires Node.js to be started with the
+     * --openssl-legacy-provider parameter. This is a webpack 4 workaround of
+     * the issue https://github.com/webpack/webpack/issues/14532 See:
+     * https://github.com/vaadin/flow/issues/12649
+     *
+     * @return the flags
+     * @deprecated Webpack is not used anymore, this method is obsolete and have
+     *             no replacements.
+     * @since 9.0.4
+     */
+    @Deprecated(forRemoval = true, since = "24.8")
+    public Map<String, String> getWebpackNodeEnvironment() {
+        Map<String, String> environment = new HashMap<>();
+        ProcessBuilder processBuilder = new ProcessBuilder()
+                .command(getNodeExecutable(), "-p", "crypto.createHash('md4')");
+        try {
+            Process process = processBuilder.start();
+            int errorLevel = process.waitFor();
+            if (errorLevel != 0) {
+                environment.put("NODE_OPTIONS", "--openssl-legacy-provider");
+            }
+        } catch (IOException e) {
+            getLogger().error(
+                    "IO error while determining --openssl-legacy-provider "
+                            + "parameter requirement",
+                    e);
+        } catch (InterruptedException e) {
+            getLogger().error(
+                    "Interrupted while determining --openssl-legacy-provider "
+                            + "parameter requirement",
+                    e);
+            // re-interrupt the thread
+            Thread.currentThread().interrupt();
+        }
+        return environment;
+    }
+
+    private Logger getLogger() {
+        return LoggerFactory.getLogger(FrontendTools.class);
+    }
+
+    private List<String> getNpmExecutable(boolean removePnpmLock) {
+        List<String> returnCommand = new ArrayList<>(
+                getNpmCliToolExecutable(BuildTool.NPM));
+        returnCommand.add("--no-update-notifier");
+        returnCommand.add("--no-audit");
+
+        if (removePnpmLock) {
+            // remove pnpm-lock.yaml which contains pnpm as a dependency.
+            File pnpmLock = new File(baseDir, "pnpm-lock.yaml");
+            if (pnpmLock.exists() && FileIOUtils.deleteQuietly(pnpmLock)) {
+                getLogger().debug(
+                        "pnpm-lock.yaml file is removed from " + baseDir);
+            }
+        }
+
+        return returnCommand;
+    }
+
+    private List<String> getNpmCliToolExecutable(BuildTool cliTool,
+            String... flags) {
+        List<String> returnCommand = new ArrayList<>();
+
+        // For npm/npx, we always use the resolved node installation
+        if (cliTool.equals(BuildTool.NPM) || cliTool.equals(BuildTool.NPX)) {
+            NodeResolver.ActiveNodeInstallation active = ensureNodeResolved();
+            returnCommand.add(active.nodeExecutable());
+
+            if (cliTool.equals(BuildTool.NPM)) {
+                returnCommand.add(active.npmCliScript());
+            } else {
+                // NPX is in the same directory as npm, just different filename
+                File npmCliFile = new File(active.npmCliScript());
+                File npxCliFile = new File(npmCliFile.getParentFile(),
+                        "npx-cli.js");
+                if (!npxCliFile.exists()) {
+                    throw new IllegalStateException(
+                            "npx-cli.js not found at expected location: "
+                                    + npxCliFile.getAbsolutePath());
+                }
+                returnCommand.add(npxCliFile.getAbsolutePath());
+            }
+        }
+
+        if (flags.length > 0) {
+            Collections.addAll(returnCommand, flags);
+        }
+        return returnCommand;
+    }
+
+    List<String> getSuitablePnpm() {
+        List<String> pnpmCommand;
+        if (useGlobalPnpm) {
+            // try to locate already installed global pnpm, throw an exception
+            // if pnpm not found or its version is too old (< 5).
+            pnpmCommand = frontendToolsLocator
+                    .tryLocateTool(BuildTool.PNPM.getCommand())
+                    .map(File::getAbsolutePath).map(Collections::singletonList)
+                    .orElseThrow(() -> new IllegalStateException(
+                            String.format(PNPM_NOT_FOUND)));
+            pnpmCommand = Stream.of(pnpmCommand)
+                    .filter(this::validatePnpmVersion).findFirst()
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Found too old globally installed 'pnpm'. Please upgrade 'pnpm' to at least "
+                                    + SUPPORTED_PNPM_VERSION.getFullVersion()));
+        } else {
+            // install the pinned pnpm version so behavior stays
+            // deterministic across environments instead of whatever npx
+            // happens to resolve as latest
+            pnpmCommand = getNpmCliToolExecutable(BuildTool.NPX, "--yes",
+                    "--quiet", "pnpm@" + DEFAULT_PNPM_VERSION);
+            if (!validatePnpmVersion(pnpmCommand)) {
+                throw new IllegalStateException(
+                        "Found too old globally installed 'pnpm'. Please upgrade 'pnpm' to at least "
+                                + SUPPORTED_PNPM_VERSION.getFullVersion());
+            }
+        }
+        return pnpmCommand;
+    }
+
+    List<String> getSuitableBun() {
+        List<String> bunCommand;
+        bunCommand = frontendToolsLocator
+                .tryLocateTool(BuildTool.BUN.getCommand())
+                .map(File::getAbsolutePath).map(Collections::singletonList)
+                .orElseThrow(() -> new IllegalStateException(
+                        String.format(BUN_NOT_FOUND)));
+        bunCommand = Stream.of(bunCommand).filter(this::validateBunVersion)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException(
+                        "Found too old globally installed 'bun'. Please upgrade 'bun' to at least "
+                                + SUPPORTED_BUN_VERSION.getFullVersion()));
+        return bunCommand;
+    }
+
+    private boolean validatePnpmVersion(List<String> pnpmCommand) {
+        String commandLine = String.join(" ", pnpmCommand);
+        try {
+            List<String> versionCmd = new ArrayList<>(pnpmCommand);
+            versionCmd.add("--version"); // NOSONAR
+            FrontendVersion pnpmVersion = FrontendUtils.getVersion("pnpm",
+                    versionCmd);
+            boolean versionNewEnough = pnpmVersion
+                    .isEqualOrNewer(SUPPORTED_PNPM_VERSION);
+            boolean versionAccepted = ignoreVersionChecks || versionNewEnough;
+            if (!versionAccepted) {
+                getLogger().warn(
+                        "pnpm '{}' is version {} which is not supported (expected >={})",
+                        commandLine, pnpmVersion.getFullVersion(),
+                        SUPPORTED_PNPM_VERSION.getFullVersion());
+            }
+            return versionAccepted;
+        } catch (UnknownVersionException e) {
+            getLogger().warn("version check '{}' failed", commandLine, e);
+            return false;
+        }
+    }
+
+    private boolean validateBunVersion(List<String> bunCommand) {
+        String commandLine = String.join(" ", bunCommand);
+        try {
+            List<String> versionCmd = new ArrayList<>(bunCommand);
+            versionCmd.add("--version"); // NOSONAR
+            FrontendVersion bunVersion = FrontendUtils.getVersion("bun",
+                    versionCmd);
+            boolean versionNewEnough = bunVersion
+                    .isEqualOrNewer(SUPPORTED_BUN_VERSION);
+            boolean versionAccepted = ignoreVersionChecks || versionNewEnough;
+            if (!versionAccepted) {
+                getLogger().warn(
+                        "bun '{}' is version {} which is not supported (expected >={})",
+                        commandLine, bunVersion.getFullVersion(),
+                        SUPPORTED_BUN_VERSION.getFullVersion());
+            }
+            return versionAccepted;
+        } catch (UnknownVersionException e) {
+            getLogger().warn("version check '{}' failed", commandLine, e);
+            return false;
+        }
+    }
+
+    private String buildBadVersionString(String tool, String version,
+            String... extraUpdateInstructions) {
+        StringBuilder extraInstructions = new StringBuilder();
+        for (String instruction : extraUpdateInstructions) {
+            extraInstructions.append(System.lineSeparator()).append("  - or ")
+                    .append(instruction);
+        }
+        return String.format(BAD_VERSION, tool, version,
+                extraInstructions.toString(),
+                FrontendUtils.PARAM_IGNORE_VERSION_CHECKS);
+    }
+
+    private String getAlternativeDir() {
+        return alternativeDirGetter.get();
+    }
+
+    /**
+     * Gets a path to the used node binary.
+     *
+     * The return value can be used when executing node commands, as the first
+     * part of a process builder command.
+     *
+     * @return the path to the node binary
+     * @since 23.0
+     */
+    public String getNodeBinary() {
+        return getNodeExecutable();
+    }
+
+    private String removeLineBreaks(String str) {
+        if (str == null || str.isEmpty()) {
+            return str;
+        }
+        return String.join("", str.split(System.lineSeparator()));
+    }
+}

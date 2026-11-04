@@ -1,0 +1,249 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.i18n;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URL;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.server.HandlerHelper;
+import com.vaadin.flow.server.HttpStatusCode;
+import com.vaadin.flow.server.SessionlessRequestHandler;
+import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.flow.server.VaadinResponse;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.shared.JsonConstants;
+
+import static com.vaadin.flow.i18n.DefaultI18NProvider.BUNDLE_FOLDER;
+
+/**
+ * Handles translation file requests. Translation file requests are internal
+ * requests sent by the client-side to retrieve the translations for the
+ * specified language tag. The response contains the translations in JSON
+ * format. The requested language tag is included as a header with the name
+ * {@code X-Vaadin-Retrieved-Locale}. The language tag parameter {@code langtag}
+ * supports both dash and underscore as separators.
+ * <p>
+ * The translations are those of the {@link I18NProvider}: all of them for the
+ * locale when the request names no keys, otherwise the keys of the requested
+ * {@code chunks}, as listed in {@code vaadin-i18n/i18n.json}, together with the
+ * requested {@code keys}. Which bundle answers for the locale is up to the
+ * provider.
+ * <p>
+ * This is a {@link SessionlessRequestHandler}, so the {@link I18NProvider} is
+ * called without a {@link com.vaadin.flow.server.VaadinSession}: it gets the
+ * requested locale and must not depend on
+ * {@link com.vaadin.flow.server.VaadinSession#getCurrent()}.
+ * <p>
+ * For internal use only. May be renamed or removed in a future release.
+ *
+ * @author Vaadin Ltd
+ * @since 24.4
+ */
+public class TranslationFileRequestHandler
+        implements SessionlessRequestHandler {
+
+    static final String LANGUAGE_TAG_PARAMETER_NAME = "langtag";
+
+    static final String CHUNK_PARAMETER_NAME = "chunks";
+
+    static final String KEYS_PARAMETER_NAME = "keys";
+
+    static final String RETRIEVED_LOCALE_HEADER_NAME = "X-Vaadin-Retrieved-Locale";
+
+    static final String CHUNK_RESOURCE = BUNDLE_FOLDER + "/i18n.json";
+
+    private final I18NProvider i18NProvider;
+
+    private final ClassLoader classLoader;
+
+    private Map<String, String[]> chunkData;
+
+    public TranslationFileRequestHandler(I18NProvider i18NProvider,
+            ClassLoader classLoader) {
+        this.i18NProvider = i18NProvider;
+        this.classLoader = classLoader;
+    }
+
+    /**
+     * Handles translation file requests. Translations only depend on the
+     * {@link I18NProvider} and the requested locale, so they are served without
+     * a session.
+     *
+     * @param request
+     *            the request to handle
+     * @param response
+     *            the response object to which a response can be written
+     * @return {@code true} if the request was handled, {@code false} if this
+     *         handler does not handle the given request type
+     * @throws IOException
+     *             if an IO error occurred
+     * @since 25.4
+     */
+    @Override
+    public boolean handleRequest(VaadinRequest request, VaadinResponse response)
+            throws IOException {
+        if (!HandlerHelper.isRequestType(request,
+                HandlerHelper.RequestType.TRANSLATION_FILE)) {
+            return false;
+        }
+        handleTranslationRequest(request.getService(), request, response);
+        return true;
+    }
+
+    private void handleTranslationRequest(VaadinService service,
+            VaadinRequest request, VaadinResponse response) throws IOException {
+        assert service != null : "VaadinService cannot be null";
+        if (i18NProvider == null) {
+            handleMissingI18NProvider(service, response);
+            return;
+        }
+        var locale = getLocale(request);
+        var chunks = request.getParameterMap().get(CHUNK_PARAMETER_NAME);
+        var keys = request.getParameterMap().get(KEYS_PARAMETER_NAME);
+        var translations = collectTranslations(chunks, keys, locale);
+        if (translations.isEmpty()) {
+            handleNotFound(response);
+        } else {
+            handleFound(locale, response, translations);
+        }
+    }
+
+    private void handleFound(Locale locale, VaadinResponse response,
+            ObjectNode translations) throws IOException {
+        response.setStatus(HttpStatusCode.OK.getCode());
+        response.setHeader(RETRIEVED_LOCALE_HEADER_NAME,
+                locale.toLanguageTag());
+        response.setHeader("Content-Type", JsonConstants.JSON_CONTENT_TYPE);
+        response.getWriter().write(translations.toString());
+    }
+
+    private void handleNotFound(VaadinResponse response) {
+        response.setStatus(HttpStatusCode.NOT_FOUND.getCode());
+    }
+
+    private void handleMissingI18NProvider(VaadinService service,
+            VaadinResponse response) throws IOException {
+        String errorMessage = "Missing I18nProvider implementation, loading translations is not supported.";
+        if (service.getDeploymentConfiguration().isProductionMode()) {
+            response.setStatus(HttpStatusCode.NOT_FOUND.getCode());
+        } else {
+            response.sendError(HttpStatusCode.NOT_IMPLEMENTED.getCode(),
+                    errorMessage);
+        }
+        getLogger().debug(errorMessage);
+    }
+
+    private ObjectNode collectTranslations(String[] chunks, String[] keys,
+            Locale locale) {
+        var json = JacksonUtils.createObjectNode();
+
+        var chunkStream = Optional.ofNullable(chunks).map(chunkNames -> {
+            var chunkData = getChunkData();
+            // for each chunk name, retrieve the keys from the chunk data
+            return Arrays.stream(chunks).map(chunkData::get)
+                    .filter(Objects::nonNull).flatMap(Arrays::stream);
+        });
+
+        // add single keys if requested
+        var keyStream = Optional.ofNullable(keys).map(Arrays::stream);
+
+        var requestedKeys = Stream.of(chunkStream, keyStream)
+                .filter(Optional::isPresent).flatMap(Optional::orElseThrow)
+                .collect(Collectors.toSet());
+        var translations = requestedKeys.isEmpty()
+                ? i18NProvider.getAllTranslations(locale)
+                : i18NProvider.getTranslations(requestedKeys, locale);
+        translations.forEach(json::put);
+        return json;
+    }
+
+    private Locale getLocale(VaadinRequest request) {
+        String languageTag = Objects.requireNonNullElse(
+                request.getParameter(LANGUAGE_TAG_PARAMETER_NAME), "");
+        if (languageTag.contains("_")) {
+            String[] tokens = languageTag.split("_");
+            String language = tokens[0];
+            String country = tokens.length > 1 ? tokens[1] : "";
+            String variant = tokens.length > 2 ? tokens[2] : "";
+            return new Locale(language, country, variant);
+        }
+        return Locale.forLanguageTag(languageTag);
+    }
+
+    /**
+     * Retrieves the chunk data from the JSON file.
+     *
+     * @return a map containing chunk names and their corresponding keys
+     */
+    private Map<String, String[]> getChunkData() {
+        if (chunkData == null) {
+            chunkData = new HashMap<>();
+            URL chunkResource = classLoader.getResource(CHUNK_RESOURCE);
+
+            if (chunkResource != null) {
+                try (InputStream chunkStream = chunkResource.openStream()) {
+                    var json = JacksonUtils.getMapper().readTree(chunkStream);
+                    var chunksNode = json.get("chunks");
+
+                    if (chunksNode != null && chunksNode.isObject()) {
+                        Collection<String> fieldNames = chunksNode
+                                .propertyNames();
+
+                        for (String chunkName : fieldNames) {
+                            JsonNode keysNode = chunksNode.get(chunkName)
+                                    .get("keys");
+
+                            if (keysNode != null && keysNode.isArray()) {
+                                String[] keys = new String[keysNode.size()];
+
+                                for (int i = 0; i < keysNode.size(); i++) {
+                                    keys[i] = keysNode.get(i).asString();
+                                }
+
+                                chunkData.put(chunkName, keys);
+                            }
+                        }
+                    }
+                } catch (IOException e) {
+                    getLogger().error("Error while reading the resource "
+                            + CHUNK_RESOURCE, e);
+                }
+            }
+        }
+
+        return chunkData;
+    }
+
+    private Logger getLogger() {
+        return LoggerFactory.getLogger(TranslationFileRequestHandler.class);
+    }
+}

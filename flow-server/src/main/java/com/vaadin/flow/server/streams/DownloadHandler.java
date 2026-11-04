@@ -1,0 +1,569 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.streams;
+
+import java.io.File;
+import java.io.IOException;
+
+import com.vaadin.flow.dom.DisabledUpdateMode;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.flow.server.VaadinResponse;
+import com.vaadin.flow.server.VaadinSession;
+
+/**
+ * Provides a flexible high-level abstraction for implementing file and
+ * arbitrary content downloads from server to client in Vaadin applications.
+ * <p>
+ * This interface can be implemented in two ways:
+ * <ul>
+ * <li>By creating a lambda expression that implements the
+ * {@link #handleDownloadRequest(DownloadEvent)} method</li>
+ * <li>By creating a child or anonymous class that implements this
+ * interface</li>
+ * </ul>
+ * <p>
+ * The interface provides several factory methods for common download scenarios:
+ * <ul>
+ * <li>{@link #forFile(File)} - for downloading files from the server</li>
+ * <li>{@link #forClassResource(Class, String)} - for downloading class
+ * resources</li>
+ * <li>{@link #forServletResource(String)} - for downloading servlet
+ * resources</li>
+ * <li>{@link #fromInputStream(InputStreamDownloadCallback)} - for downloading
+ * from input streams</li>
+ * </ul>
+ * Example:
+ *
+ * <pre>
+ * DownloadHandler.forFile(new File("/path/to/file.txt"));
+ * </pre>
+ *
+ * All factory methods have overloads that allow adding a download progress
+ * listener and set a custom file name and URL postfix:
+ *
+ * <pre>
+ * DownloadHandler.forClassResource(MyView.class, "attachment-XYZ.txt",
+ *         "attachment.txt", new TransferProgressListener() {
+ *             &#064;Override
+ *             public void onComplete(TransferContext context,
+ *                     long transferredBytes) {
+ *                 // update UI on complete
+ *             }
+ *         });
+ * </pre>
+ * <p>
+ * If you need to write directly to an OutputStream, you can use a lambda
+ * expression with {@code event.getOutputStream()} to access the output stream:
+ *
+ * <pre>
+ * DownloadHandler handler = event -> {
+ *     try (OutputStream out = event.getOutputStream()) {
+ *         // Write your data to the output stream
+ *         out.write(yourData);
+ *     }
+ * };
+ * </pre>
+ * <p>
+ * A download is served independently of the owning component's lifecycle. The
+ * owner's attached, visible, enabled and inert state is checked when the
+ * download request is received, but not while the download is being served.
+ * Once handling has started, detaching the owner component, navigating to
+ * another view or closing the browser tab does not abort the transfer on the
+ * server: it runs to completion as long as the client keeps reading the
+ * response, and browsers typically keep an ongoing download running after the
+ * tab that started it has been closed. This is intentional and supported
+ * behavior, so that a download the user has already started is not lost when
+ * the view that started it goes away.
+ * <p>
+ * A UI that is closed while a download for it is ongoing is kept attached to
+ * its session until the download has completed, so that transfer progress
+ * listeners bound to that UI are still notified even though there is no client
+ * left to receive the UI changes.
+ * <p>
+ * A download does not, however, outlive its session: if the session is
+ * invalidated, either explicitly or by timing out, an ongoing download is
+ * terminated. The output stream of the download stops accepting bytes and
+ * throws an {@link java.io.IOException} instead, which leaves the response
+ * truncated. An application with long-lived downloads that should survive can
+ * keep the session alive while the download is ongoing, or serve the download
+ * through a servlet of its own that is not tied to a UI and a session.
+ *
+ * @since 24.8
+ */
+@FunctionalInterface
+public interface DownloadHandler extends ElementRequestHandler {
+
+    /**
+     * Method that is called when the client wants to download from the url
+     * stored for this specific handler registration.
+     * <p>
+     * Once this method has been called, the download is no longer bound to the
+     * owner component's lifecycle and is not interrupted by detaching the owner
+     * or by closing the browser tab, see the {@link DownloadHandler class-level
+     * documentation}.
+     *
+     * @param event
+     *            download event containing the necessary data for writing the
+     *            response
+     * @throws IOException
+     *             if an IO error occurred during download
+     */
+    void handleDownloadRequest(DownloadEvent event) throws IOException;
+
+    default void handleRequest(VaadinRequest request, VaadinResponse response,
+            VaadinSession session, Element owner) throws IOException {
+        DownloadEvent downloadEvent = new DownloadEvent(request, response,
+                session, owner);
+
+        handleDownloadRequest(downloadEvent);
+    }
+
+    /**
+     * Returns whether this handler answers byte range requests, which media
+     * players use to seek and browsers use to resume a download. Safari does
+     * not play audio or video from a handler that does not answer them.
+     * <p>
+     * A handler that does not answer them sends the whole content for every
+     * request. A handler that does may still send the whole content for a
+     * particular response, for example when the length of its content is not
+     * known. The default implementation returns {@code false}.
+     * <p>
+     * In development mode, a built-in handler logs a warning the first time
+     * that a handler of its class serves the whole content for a byte range
+     * request, for example because ranges are not enabled or the length of the
+     * content is unknown.
+     *
+     * @return {@code true} if the handler is configured to answer byte range
+     *         requests
+     * @since 25.4
+     */
+    default boolean isRangeRequestsEnabled() {
+        return false;
+    }
+
+    /**
+     * Returns a view of this handler that is served even when the owning
+     * component is disabled.
+     * <p>
+     * By default a {@link DownloadHandler} inherits
+     * {@link DisabledUpdateMode#ONLY_WHEN_ENABLED} from
+     * {@link ElementRequestHandler}, which causes the framework to respond with
+     * HTTP 403 when the owning element is disabled. That is appropriate for
+     * action-style downloads such as a "save file" link on an
+     * {@code com.vaadin.flow.component.html.Anchor}, but not for resources that
+     * the browser fetches passively as part of rendering, such as the
+     * {@code src} of an icon or image inside a disabled container.
+     * <p>
+     * This method returns a wrapper that delegates
+     * {@link #handleDownloadRequest}, {@link #getUrlPostfix()},
+     * {@link #isAllowInert()} and {@link #isRangeRequestsEnabled()} to this
+     * handler and overrides {@link #getDisabledUpdateMode()} to return
+     * {@link DisabledUpdateMode#ALWAYS}. If this handler already reports
+     * {@code ALWAYS}, the same instance is returned.
+     *
+     * @return a {@link DownloadHandler} that is served regardless of the
+     *         owner's enabled state, or {@code this} if the disabled mode is
+     *         already {@link DisabledUpdateMode#ALWAYS}
+     * @since 25.1.6
+     */
+    default DownloadHandler allowDisabled() {
+        if (getDisabledUpdateMode() == DisabledUpdateMode.ALWAYS) {
+            return this;
+        }
+        DownloadHandler delegate = this;
+        return new DownloadHandler() {
+            @Override
+            public void handleDownloadRequest(DownloadEvent event)
+                    throws IOException {
+                delegate.handleDownloadRequest(event);
+            }
+
+            @Override
+            public String getUrlPostfix() {
+                return delegate.getUrlPostfix();
+            }
+
+            @Override
+            public boolean isAllowInert() {
+                return delegate.isAllowInert();
+            }
+
+            @Override
+            public boolean isRangeRequestsEnabled() {
+                return delegate.isRangeRequestsEnabled();
+            }
+
+            @Override
+            public DisabledUpdateMode getDisabledUpdateMode() {
+                return DisabledUpdateMode.ALWAYS;
+            }
+        };
+    }
+
+    /**
+     * Get a download handler for serving given {@link File}.
+     * <p>
+     * The downloaded file name is resolved as <code>file.getName()</code>.
+     *
+     * @param file
+     *            file to server for download
+     * @return DownloadHandler implementation for download a file
+     */
+    static FileDownloadHandler forFile(File file) {
+        return new FileDownloadHandler(file);
+    }
+
+    /**
+     * Get a download handler for serving given {@link File} with the given
+     * download file name.
+     *
+     * @param file
+     *            file to server for download
+     * @param fileNameOverride
+     *            download file name that overrides <code>file.getName()</code>
+     *            and also used as a download request URL postfix
+     * @return DownloadHandler implementation for download a file
+     */
+    static FileDownloadHandler forFile(File file, String fileNameOverride) {
+        return new FileDownloadHandler(file, fileNameOverride);
+    }
+
+    /**
+     * Get a download handler for serving given {@link File} with the given
+     * download file name and progress listener.
+     *
+     * @param file
+     *            file to server for download
+     * @param fileNameOverride
+     *            download file name that overrides <code>file.getName()</code>
+     *            and also used as a download request URL postfix
+     * @param listener
+     *            listener for transfer progress events
+     * @return DownloadHandler implementation for download a file
+     */
+    static FileDownloadHandler forFile(File file, String fileNameOverride,
+            TransferProgressListener listener) {
+        FileDownloadHandler handler = new FileDownloadHandler(file,
+                fileNameOverride);
+        handler.addTransferProgressListener(listener);
+        return handler;
+    }
+
+    /**
+     * Get a download handler for serving given {@link File} with the given
+     * progress listener.
+     * <p>
+     * The downloaded file name is resolved as <code>file.getName()</code>.
+     *
+     * @param file
+     *            file to server for download
+     * @param listener
+     *            listener for transfer progress events
+     * @return DownloadHandler implementation for download a file
+     */
+    static FileDownloadHandler forFile(File file,
+            TransferProgressListener listener) {
+        FileDownloadHandler handler = new FileDownloadHandler(file);
+        handler.addTransferProgressListener(listener);
+        return handler;
+    }
+
+    /**
+     * Generate a download handler for class resource.
+     * <p>
+     * For instance for the file {@code resources/com/example/ui/MyData.json}
+     * and class {@code com.example.ui.MyData} the definition would be
+     * {@code forClassResource(MyData.class, "MyData.json")}.
+     * <p>
+     * The downloaded file name is resolved as <code>resourceName</code>.
+     *
+     * @param clazz
+     *            class for resource module
+     * @param resourceName
+     *            name of class resource
+     * @return DownloadHandler implementation for download a class resource
+     */
+    static ClassDownloadHandler forClassResource(Class<?> clazz,
+            String resourceName) {
+        return new ClassDownloadHandler(clazz, resourceName);
+    }
+
+    /**
+     * Generate a download handler for class resource with the given download
+     * name.
+     * <p>
+     * For instance for the file {@code resources/com/example/ui/MyData.json}
+     * and class {@code com.example.ui.MyData} the definition would be
+     * {@code forClassResource(MyData.class, "MyData.json", "Data.json")}
+     *
+     * @param clazz
+     *            class for resource module
+     * @param resourceName
+     *            name of class resource
+     * @param fileNameOverride
+     *            download file name that overrides <code>resourceName</code>
+     *            and also used as a download request URL postfix
+     * @return DownloadHandler implementation for download a class resource
+     */
+    static ClassDownloadHandler forClassResource(Class<?> clazz,
+            String resourceName, String fileNameOverride) {
+        return new ClassDownloadHandler(clazz, resourceName, fileNameOverride);
+    }
+
+    /**
+     * Generate a download handler for class resource with the given download
+     * name and progress listener.
+     * <p>
+     * For instance for the file {@code resources/com/example/ui/MyData.json}
+     * and class {@code com.example.ui.MyData} the definition would be
+     * {@code forClassResource(MyData.class, "MyData.json", "Data.json")}
+     *
+     * @param clazz
+     *            class for resource module
+     * @param resourceName
+     *            name of class resource
+     * @param fileNameOverride
+     *            download file name that overrides <code>resourceName</code>
+     *            and also used as a download request URL postfix
+     * @param listener
+     *            listener for transfer progress events
+     * @return DownloadHandler implementation for download a class resource
+     */
+    static ClassDownloadHandler forClassResource(Class<?> clazz,
+            String resourceName, String fileNameOverride,
+            TransferProgressListener listener) {
+        ClassDownloadHandler handler = new ClassDownloadHandler(clazz,
+                resourceName, fileNameOverride);
+        handler.addTransferProgressListener(listener);
+        return handler;
+    }
+
+    /**
+     * Generate a download handler for class resource with the given progress
+     * listener.
+     * <p>
+     * For instance for the file {@code resources/com/example/ui/MyData.json}
+     * and class {@code com.example.ui.MyData} the definition would be
+     * {@code forClassResource(MyData.class, "MyData.json", "Data.json")}.
+     * <p>
+     * The downloaded file name is resolved as <code>resourceName</code>.
+     *
+     * @param clazz
+     *            class for resource module
+     * @param resourceName
+     *            name of class resource
+     * @param listener
+     *            listener for transfer progress events
+     * @return DownloadHandler implementation for download a class resource
+     */
+    static ClassDownloadHandler forClassResource(Class<?> clazz,
+            String resourceName, TransferProgressListener listener) {
+        ClassDownloadHandler handler = new ClassDownloadHandler(clazz,
+                resourceName);
+        handler.addTransferProgressListener(listener);
+        return handler;
+    }
+
+    /**
+     * Generate a download handler for a servlet resource.
+     * <p>
+     * For instance for the file {@code webapp/WEB-INF/servlet.json} the path
+     * would be {@code /WEB-INF/servlet.json}.
+     * <p>
+     * The downloaded file name is resolved as the last segment in
+     * <code>path</code>.
+     *
+     * @param path
+     *            the servlet path to the file
+     * @return DownloadHandler implementation for downloading a servlet resource
+     */
+    static ServletResourceDownloadHandler forServletResource(String path) {
+        return new ServletResourceDownloadHandler(path);
+    }
+
+    /**
+     * Generate a download handler for a servlet resource with the given
+     * download file name.
+     * <p>
+     * For instance for the file {@code webapp/WEB-INF/servlet.json} the path
+     * would be {@code /WEB-INF/servlet.json}
+     * <p>
+     * File name override is appended to the download url as the logical name of
+     * the target file.
+     *
+     * @param path
+     *            the servlet path to the file
+     * @param fileNameOverride
+     *            download file name that overrides the name taken from
+     *            <code>path</code> and also used as a download request URL
+     *            postfix
+     * @return DownloadHandler implementation for downloading a servlet resource
+     */
+    static ServletResourceDownloadHandler forServletResource(String path,
+            String fileNameOverride) {
+        return new ServletResourceDownloadHandler(path, fileNameOverride);
+    }
+
+    /**
+     * Generate a download handler for a servlet resource with the given
+     * download fileNameOverride and progress listener.
+     * <p>
+     * For instance for the file {@code webapp/WEB-INF/servlet.json} the path
+     * would be {@code /WEB-INF/servlet.json}
+     * <p>
+     * File name override is appended to the download url as the logical name of
+     * the target file.
+     *
+     * @param path
+     *            the servlet path to the file
+     * @param fileNameOverride
+     *            download file name that overrides the name taken from
+     *            <code>path</code> and also used as a download request URL
+     *            postfix
+     * @param listener
+     *            listener for transfer progress events
+     * @return DownloadHandler implementation for downloading a servlet resource
+     */
+    static ServletResourceDownloadHandler forServletResource(String path,
+            String fileNameOverride, TransferProgressListener listener) {
+        ServletResourceDownloadHandler handler = new ServletResourceDownloadHandler(
+                path, fileNameOverride);
+        handler.addTransferProgressListener(listener);
+        return handler;
+    }
+
+    /**
+     * Generate a download handler for a servlet resource with the given
+     * progress listener.
+     * <p>
+     * For instance for the file {@code webapp/WEB-INF/servlet.json} the path
+     * would be {@code /WEB-INF/servlet.json}.
+     *
+     * @param path
+     *            the servlet path to the file
+     * @param listener
+     *            listener for transfer progress events
+     * @return DownloadHandler implementation for downloading a servlet resource
+     */
+    static ServletResourceDownloadHandler forServletResource(String path,
+            TransferProgressListener listener) {
+        ServletResourceDownloadHandler handler = new ServletResourceDownloadHandler(
+                path);
+        handler.addTransferProgressListener(listener);
+        return handler;
+    }
+
+    /**
+     * Generate a function for downloading from a generated InputStream.
+     * <p>
+     * <code>DownloadResponse</code> instances can be created using various
+     * factory methods or with new operator.
+     *
+     * @param callback
+     *            a function that will be called on download
+     * @return DownloadHandler implementation for download from an input stream
+     */
+    static InputStreamDownloadHandler fromInputStream(
+            InputStreamDownloadCallback callback) {
+        return new InputStreamDownloadHandler(callback);
+    }
+
+    /**
+     * Generate a function for downloading from a generated InputStream.
+     * <p>
+     * <code>DownloadResponse</code> instances can be created using various
+     * factory methods or with new operator.
+     * <p>
+     * File name override is appended to the download url as the logical name of
+     * the target file.
+     * <p>
+     * The {@link DownloadEvent#getFileName()} of the
+     * {@link InputStreamDownloadCallback} returns the given
+     * {@code fileNameOverride}.
+     *
+     * @param callback
+     *            a function that will be called on download
+     * @param fileNameOverride
+     *            download file name that overrides the name taken from
+     *            <code>path</code> and also used as a download request URL
+     *            postfix
+     * @return DownloadHandler implementation for download from an input stream
+     *
+     * @since 25.2
+     */
+    static InputStreamDownloadHandler fromInputStream(
+            InputStreamDownloadCallback callback, String fileNameOverride) {
+        return new InputStreamDownloadHandler(callback, fileNameOverride);
+    }
+
+    /**
+     * Generate a function for downloading from a generated InputStream with the
+     * given progress listener.
+     * <p>
+     * <code>DownloadResponse</code> instances can be created using various
+     * factory methods or with new operator.
+     *
+     * @param callback
+     *            a function that will be called on download
+     * @param listener
+     *            listener for transfer progress events
+     * @return DownloadHandler implementation for download from an input stream
+     */
+    static InputStreamDownloadHandler fromInputStream(
+            InputStreamDownloadCallback callback,
+            TransferProgressListener listener) {
+        InputStreamDownloadHandler downloadHandler = new InputStreamDownloadHandler(
+                callback);
+        downloadHandler.addTransferProgressListener(listener);
+        return downloadHandler;
+    }
+
+    /**
+     * Generate a function for downloading from a generated InputStream with the
+     * given progress listener.
+     * <p>
+     * <code>DownloadResponse</code> instances can be created using various
+     * factory methods or with new operator.
+     * <p>
+     * File name override is appended to the download url as the logical name of
+     * the target file.
+     * <p>
+     * The {@link DownloadEvent#getFileName()} of the
+     * {@link InputStreamDownloadCallback} returns the given
+     * {@code fileNameOverride}.
+     *
+     * @param callback
+     *            a function that will be called on download
+     * @param fileNameOverride
+     *            download file name that overrides the name taken from
+     *            <code>path</code> and also used as a download request URL
+     *            postfix
+     * @param listener
+     *            listener for transfer progress events
+     * @return DownloadHandler implementation for download from an input stream
+     *
+     * @since 25.2
+     */
+    static InputStreamDownloadHandler fromInputStream(
+            InputStreamDownloadCallback callback, String fileNameOverride,
+            TransferProgressListener listener) {
+        InputStreamDownloadHandler downloadHandler = new InputStreamDownloadHandler(
+                callback, fileNameOverride);
+        downloadHandler.addTransferProgressListener(listener);
+        return downloadHandler;
+    }
+}

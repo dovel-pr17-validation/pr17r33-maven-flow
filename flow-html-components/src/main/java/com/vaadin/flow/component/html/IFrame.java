@@ -1,0 +1,473 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.component.html;
+
+import java.io.Serializable;
+import java.util.Optional;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import com.vaadin.flow.component.HasAriaLabel;
+import com.vaadin.flow.component.HtmlComponent;
+import com.vaadin.flow.component.PropertyDescriptor;
+import com.vaadin.flow.component.PropertyDescriptors;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.internal.UrlUtil;
+import com.vaadin.flow.js.JsDefinition;
+import com.vaadin.flow.js.JsExpression;
+import com.vaadin.flow.server.AbstractStreamResource;
+import com.vaadin.flow.server.InitParameters;
+import com.vaadin.flow.server.StreamResource;
+import com.vaadin.flow.server.streams.AbstractDownloadHandler;
+import com.vaadin.flow.server.streams.DownloadHandler;
+
+/**
+ * Component representing a <code>&lt;iframe&gt;</code> element.
+ * <p>
+ * A nested browsing context that embeds another HTML page. Prefer this over
+ * HtmlObject for documents.
+ *
+ * @author Vaadin Ltd
+ * @since 1.3
+ *
+ * @see <a href=
+ *      "https://developer.mozilla.org/en-US/docs/Web/HTML/Element/iframe#Attributes">The
+ *      Inline Frame element</a>
+ */
+@Tag(Tag.IFRAME)
+public class IFrame extends HtmlComponent implements HasAriaLabel {
+
+    private static final String SRC = "src";
+
+    private static final PropertyDescriptor<String, String> srcDescriptor = PropertyDescriptors
+            .attributeWithDefault(SRC, "");
+
+    private static final PropertyDescriptor<String, Optional<String>> srcdocDescriptor = PropertyDescriptors
+            .optionalAttributeWithDefault("srcdoc", "");
+
+    private static final PropertyDescriptor<String, Optional<String>> nameDescriptor = PropertyDescriptors
+            .optionalAttributeWithDefault("name", "");
+
+    private static final PropertyDescriptor<String, Optional<String>> sandboxDescriptor = PropertyDescriptors
+            .optionalAttributeWithDefault("sandbox", "allow-all");
+
+    private static final PropertyDescriptor<String, Optional<String>> allowDescriptor = PropertyDescriptors
+            .optionalAttributeWithDefault("allow", "");
+
+    private static final PropertyDescriptor<String, Optional<String>> importanceDescriptor = PropertyDescriptors
+            .optionalAttributeWithDefault("importance", "auto");
+
+    /**
+     * Importance types.
+     */
+    public enum ImportanceType {
+        /** The browser decides the download priority of the frame. */
+        AUTO("auto"),
+
+        /** The frame is downloaded before other, lower priority resources. */
+        HIGH("high"),
+
+        /** The frame is downloaded after other, higher priority resources. */
+        LOW("low");
+
+        private final String value;
+
+        ImportanceType(String value) {
+            this.value = value;
+        }
+
+        /**
+         * Gets the value used for the {@code importance} attribute.
+         *
+         * @return the attribute value
+         */
+        public String getValue() {
+            return value;
+        }
+
+        private static Optional<ImportanceType> fromAttributeValue(
+                String value) {
+            return Stream.of(values()).filter(type -> type.value.equals(value))
+                    .findFirst();
+        }
+    }
+
+    /**
+     * Sandbox types.
+     */
+    public enum SandboxType {
+        /** Applies all restrictions, which is what an empty sandbox does. */
+        RESTRICT_ALL(""),
+
+        /** Allows form submission. */
+        ALLOW_FORMS("allow-forms"),
+
+        /**
+         * Allows opening modal windows, such as {@code window.alert()}.
+         */
+        ALLOW_MODALS("allow-modals"),
+
+        /** Allows locking the screen orientation. */
+        ALLOW_ORIENTATION_LOCK("allow-orientation-lock"),
+
+        /** Allows using the Pointer Lock API. */
+        ALLOW_POINTER_LOCK("allow-pointer-lock"),
+
+        /** Allows opening popups. */
+        ALLOW_POPUPS("allow-popups"),
+
+        /**
+         * Allows popups to open without inheriting the sandbox restrictions.
+         */
+        ALLOW_POPUPS_TO_ESCAPE_SANDBOX("allow-popups-to-escape-sandbox"),
+
+        /** Allows starting a presentation session. */
+        ALLOW_PRESENTATION("allow-presentation"),
+
+        /**
+         * Keeps the content in its own origin instead of a unique one, so that
+         * it can access same-origin data such as cookies and local storage.
+         */
+        ALLOW_SAME_ORIGIN("allow-same-origin"),
+
+        /** Allows running scripts. */
+        ALLOW_SCRIPTS("allow-scripts"),
+
+        /**
+         * Allows requesting access to the parent's storage through the Storage
+         * Access API.
+         */
+        ALLOW_STORAGE_ACCESS_BY_USER_ACTIVATION(
+                "allow-storage-access-by-user-activation"),
+
+        /** Allows navigating the top-level browsing context. */
+        ALLOW_TOP_NAVIGATION("allow-top-navigation"),
+
+        /**
+         * Allows navigating the top-level browsing context, but only as a
+         * result of a user gesture.
+         */
+        ALLOW_TOP_NAVIGATION_BY_USER_ACTIVATION(
+                "allow-top-navigation-by-user-activation");
+
+        private final String value;
+
+        SandboxType(String value) {
+            this.value = value;
+        }
+
+        /**
+         * Gets the value used for the {@code sandbox} attribute.
+         *
+         * @return the attribute value
+         */
+        public String getValue() {
+            return value;
+        }
+
+        private static Optional<SandboxType> fromAttributeValue(String value) {
+            return Stream.of(values()).filter(type -> type.value.equals(value))
+                    .findFirst();
+        }
+
+    }
+
+    /**
+     * Creates a new iframe.
+     */
+    public IFrame() {
+    }
+
+    /**
+     * Creates a new iframe with a source URL.
+     *
+     * @param src
+     *            Source URL
+     */
+    public IFrame(String src) {
+        setSrc(src);
+    }
+
+    /**
+     * Creates a new iframe with download handler callback that provides a
+     * resource from server.
+     *
+     * Sets the <code>Content-Disposition</code> header to <code>inline</code>
+     * for pre-defined download handlers, created by factory methods in
+     * {@link DownloadHandler}, as well as for other
+     * {@link AbstractDownloadHandler} implementations.
+     *
+     * @param downloadHandler
+     *            the download handler callback that provides a resource from
+     *            server, not null
+     * @since 24.8
+     */
+    public IFrame(DownloadHandler downloadHandler) {
+        setSrc(downloadHandler);
+    }
+
+    /**
+     * Sets the source of the iframe. If the contents at the src of the IFrame
+     * has changed and you want to refresh it in the user's browser, the src
+     * does not to be reset. In this case use the #reload() method.
+     *
+     * @param src
+     *            Source URL.
+     * @throws IllegalArgumentException
+     *             if the URL uses a scheme that is not considered safe. The
+     *             {@value InitParameters#URL_SAFE_SCHEMES} configuration is
+     *             read from the application that this iframe is attached to, so
+     *             for an iframe that isn't attached yet the exception is
+     *             instead thrown when it is attached. See
+     *             {@link #setUnsafeSrc(String)} for setting a URL that
+     *             shouldn't be checked at all.
+     */
+    public void setSrc(String src) {
+        if (src != null) {
+            UrlUtil.validateUrl(this, SRC, src, "setUnsafeSrc(String)",
+                    () -> set(srcDescriptor, ""));
+        }
+        set(srcDescriptor, src);
+    }
+
+    /**
+     * Sets the source of the iframe without validating its scheme.
+     * <p>
+     * Unlike {@link #setSrc(String)}, this method does not reject URLs based on
+     * the {@value InitParameters#URL_SAFE_SCHEMES} configuration. Use it only
+     * for URLs that are fully under your control and known to be safe, such as
+     * a hard-coded {@code javascript:} or {@code data:} URL. Passing untrusted
+     * input here can expose the application to cross-site scripting (XSS)
+     * attacks.
+     *
+     * @see #setSrc(String)
+     *
+     * @param src
+     *            Source URL.
+     * @since 25.1.12
+     */
+    public void setUnsafeSrc(String src) {
+        UrlUtil.cancelUrlValidation(this, SRC);
+        set(srcDescriptor, src);
+    }
+
+    /**
+     * Sets the source of the iframe with a source URL with the URL of the given
+     * {@link StreamResource}.
+     *
+     * @see #setSrc(String)
+     *
+     * @param src
+     *            the resource value, not null
+     * @deprecated use {@link #setSrc(DownloadHandler)} instead
+     * @since 24.7
+     */
+    @Deprecated(since = "24.8", forRemoval = true)
+    public void setSrc(AbstractStreamResource src) {
+        UrlUtil.cancelUrlValidation(this, SRC);
+        getElement().setAttribute(SRC, src);
+    }
+
+    /**
+     * Sets the source of the iframe with a source URL with the URL of the given
+     * {@link DownloadHandler} callback.
+     *
+     * Sets the <code>Content-Disposition</code> header to <code>inline</code>
+     * for pre-defined download handlers, created by factory methods in
+     * {@link DownloadHandler}, as well as for other
+     * {@link AbstractDownloadHandler} implementations.
+     *
+     * The handler is wrapped with {@link DownloadHandler#allowDisabled()} so
+     * that the iframe content is still served when the component, or one of its
+     * ancestors, is disabled. The browser fetches the content as part of
+     * rendering rather than as a user action, so blocking the request on the
+     * disabled state would leave the iframe empty.
+     *
+     * @see #setSrc(String)
+     *
+     * @param downloadHandler
+     *            the download handler resource, not null
+     * @since 24.8
+     */
+    public void setSrc(DownloadHandler downloadHandler) {
+        UrlUtil.cancelUrlValidation(this, SRC);
+        if (downloadHandler instanceof AbstractDownloadHandler<?> handler) {
+            // change disposition to inline in pre-defined handlers,
+            // where it is 'attachment' by default
+            handler.inline();
+        }
+        getElement().setAttribute(SRC, downloadHandler.allowDisabled());
+    }
+
+    /**
+     * Gets the source of the iframe.
+     *
+     * @return the source of the iframe.
+     */
+    public String getSrc() {
+        return get(srcDescriptor);
+    }
+
+    /**
+     * Sets the srcdoc of the iframe.
+     *
+     * @param srcdoc
+     *            srcdoc URL.
+     */
+    public void setSrcdoc(String srcdoc) {
+        set(srcdocDescriptor, srcdoc);
+    }
+
+    /**
+     * Gets the srcdoc of the iframe.
+     *
+     * @return the srcdoc of the iframe.
+     */
+    public Optional<String> getSrcdoc() {
+        return get(srcdocDescriptor);
+    }
+
+    /**
+     * Sets the allow property to specify a feature policy.
+     *
+     * @param allow
+     *            the allow attribute value.
+     *
+     * @see <a href=
+     *      "https://developer.mozilla.org/en-US/docs/Web/HTTP/Feature_Policy">Feature
+     *      Policy</a>.
+     */
+    public void setAllow(String allow) {
+        set(allowDescriptor, allow);
+    }
+
+    /**
+     * Gets the value of allow attribute.
+     *
+     * @return the currently applied allow value.
+     */
+    public Optional<String> getAllow() {
+        return get(allowDescriptor);
+    }
+
+    /**
+     * Sets the name attribute.
+     *
+     * @param name
+     *            the value for the name attribute.
+     */
+    public void setName(String name) {
+        set(nameDescriptor, name);
+    }
+
+    /**
+     * Gets the name attribute.
+     *
+     * @return the name attribute.
+     */
+    public Optional<String> getName() {
+        return get(nameDescriptor);
+    }
+
+    /**
+     * Sets the importance attribute to the specified {@link ImportanceType}
+     * value.
+     *
+     * @param importance
+     *            {@link ImportanceType} value.
+     *
+     * @see ImportanceType
+     */
+    public void setImportance(ImportanceType importance) {
+        set(importanceDescriptor, importance != null ? importance.value : "");
+    }
+
+    /**
+     * Gets the importance attribute value.
+     *
+     * @return the importance value.
+     *
+     * @see ImportanceType
+     */
+    public Optional<ImportanceType> getImportance() {
+        return get(importanceDescriptor)
+                .flatMap(ImportanceType::fromAttributeValue);
+    }
+
+    /**
+     * Sets the sandbox attribute to the given {@link SandboxType}s.
+     *
+     * @param types
+     *            {@link SandboxType}s.
+     */
+    public void setSandbox(SandboxType... types) {
+        if (types == null || types.length == 0) {
+
+            // NOTE: "allow-all" is used internally to remove the property in
+            // this case when types argument is null.
+            // It is the default value of the sandboxDescriptor, thus when it is
+            // set the descriptor will remove the property.
+
+            set(sandboxDescriptor, "allow-all");
+
+        } else {
+            set(sandboxDescriptor, Stream.of(types).map(SandboxType::getValue)
+                    .collect(Collectors.joining(" ")));
+        }
+    }
+
+    /**
+     * Gets the list of sandbox attribute values.
+     *
+     * @return the current {@link SandboxType}s.
+     */
+    public Optional<SandboxType[]> getSandbox() {
+        return get(sandboxDescriptor)
+                .map(value -> Stream.of(value.split(" "))
+                        .map(SandboxType::fromAttributeValue)
+                        .filter(Optional::isPresent).map(Optional::get)
+                        .collect(Collectors.toList()))
+                .map(collection -> collection
+                        .toArray(new SandboxType[collection.size()]));
+    }
+
+    /**
+     * Reloads the IFrame.
+     * 
+     * @since 3.0
+     */
+    public void reload() {
+        getElement().executeJs(ReloadJs.class).reload();
+    }
+
+    /**
+     * The client-side operation behind {@link IFrame#reload()}, as a JavaScript
+     * definition for {@link Element#executeJs(Class)}.
+     * 
+     * @since 25.4
+     */
+    @JsDefinition
+    public interface ReloadJs extends Serializable {
+
+        /**
+         * Reloads the frame by assigning its address to itself, which is what
+         * makes a browser fetch it again.
+         */
+        @JsExpression("this.src = this.src")
+        void reload();
+    }
+}

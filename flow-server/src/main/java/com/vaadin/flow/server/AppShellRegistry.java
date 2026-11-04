@@ -1,0 +1,583 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server;
+
+import java.io.Serializable;
+import java.lang.annotation.Annotation;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Consumer;
+
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.PushConfiguration;
+import com.vaadin.flow.component.WebComponentExporter;
+import com.vaadin.flow.component.dependency.JavaScript;
+import com.vaadin.flow.component.dependency.JsModule;
+import com.vaadin.flow.component.dependency.StyleSheet;
+import com.vaadin.flow.component.page.AppShellConfigurator;
+import com.vaadin.flow.component.page.BodySize;
+import com.vaadin.flow.component.page.Inline;
+import com.vaadin.flow.component.page.Inline.Position;
+import com.vaadin.flow.component.page.Meta;
+import com.vaadin.flow.component.page.Push;
+import com.vaadin.flow.component.page.TargetElement;
+import com.vaadin.flow.component.page.Viewport;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.internal.ActiveStyleSheetTracker;
+import com.vaadin.flow.internal.CssBundler;
+import com.vaadin.flow.internal.ResourceContentHash;
+import com.vaadin.flow.internal.UrlUtil;
+import com.vaadin.flow.router.PageTitle;
+import com.vaadin.flow.shared.ApplicationConstants;
+import com.vaadin.flow.shared.ui.LoadMode;
+import com.vaadin.flow.theme.Theme;
+
+import static com.vaadin.flow.server.startup.AbstractAnnotationValidator.getClassAnnotations;
+import static com.vaadin.flow.server.startup.VaadinAppShellInitializer.getValidAnnotations;
+
+/**
+ * The registry class for {@link AppShellConfigurator} annotations.
+ *
+ * @since 3.0
+ *
+ */
+public class AppShellRegistry implements Serializable {
+
+    public static final String ERROR_HEADER_NO_SHELL = "%n%nFound app shell configuration annotations in non "
+            + "`AppShellConfigurator` classes.%n%s%n";
+
+    public static final String ERROR_HINT_NO_SHELL = "Please make %s implement `AppShellConfigurator`.";
+
+    public static final String ERROR_HINT_EXISTING_SHELL = "Please move the annotations to the class %s which already implements "
+            + "`AppShellConfigurator`.";
+
+    public static final String ERROR_HEADER_OFFENDING_PWA = "%n%nWe changed the way you configure PWAs, please see this link for more info:%n"
+            + "https://vaadin.com/docs/latest/flow/advanced/modifying-the-bootstrap-page%n";
+
+    private static final String ERROR_LINE = "Annotation %s which was encountered on class %s is only valid "
+            + "on a class implementing `AppShellConfigurator`.";
+    private static final String ERROR_MULTIPLE_SHELL = "%n%nMultiple classes implementing `AppShellConfigurator` were found. However, only a single class implementing `AppShellConfigurator` is allowed."
+            + "%nRemove \"implements AppShellConfigurator\" from all but one of the following classes:%n  %s%n  %s%n";
+
+    private static final String ERROR_MULTIPLE_ANNOTATION = "%n%s is not a repeatable annotation type.%n";
+
+    private static final String ERROR_EXTENDS_COMPONENT = "%nApp shell class is not allowed to extend Vaadin Component: %s. "
+            + "App shells are only intended for page configuration and are instantiated before the UI is created.%n";
+
+    // There must be no more than one of the following elements per document
+    private static final String[] UNIQUE_ELEMENTS = { "meta[name=viewport]",
+            "meta[name=description]", "title", "base" };
+    private static final String AURA_STYLESHEET = "aura/aura.css";
+    private static final Logger log = LoggerFactory
+            .getLogger(AppShellRegistry.class);
+
+    private Class<? extends AppShellConfigurator> appShellClass;
+    private boolean auraAutoLoadWarningLogged = false;
+
+    /**
+     * A wrapper class for storing the {@link AppShellRegistry} instance in the
+     * servlet context.
+     */
+    public static class AppShellRegistryWrapper implements Serializable {
+        private final AppShellRegistry registry;
+
+        /**
+         * Construct a wraper for an app-shell registry.
+         *
+         * @param registry
+         *            the app shell registry
+         */
+        public AppShellRegistryWrapper(AppShellRegistry registry) {
+            this.registry = registry;
+        }
+    }
+
+    private AppShellRegistry() {
+    }
+
+    /**
+     * Returns the instance of the registry, or create a new one if it does not
+     * exist yet.
+     *
+     * @param context
+     *            servlet context
+     * @return the registry instance
+     */
+    public static AppShellRegistry getInstance(VaadinContext context) {
+        synchronized (context) { // NOSONAR
+            AppShellRegistryWrapper attribute = context
+                    .getAttribute(AppShellRegistryWrapper.class);
+            if (attribute == null) {
+                attribute = new AppShellRegistryWrapper(new AppShellRegistry());
+                context.setAttribute(attribute);
+            }
+            return attribute.registry;
+        }
+    }
+
+    /**
+     * Reset the registry configuration so as it's possible to perform a new
+     * configuration and validation.
+     */
+    public void reset() {
+        this.appShellClass = null;
+    }
+
+    /**
+     * Sets the {@link AppShellConfigurator} class in the application. Pass a
+     * null to reset the previous one when reusing the instance.
+     *
+     * @param shell
+     *            the class implementing AppShellConfigurator.
+     */
+    public void setShell(Class<? extends AppShellConfigurator> shell) {
+        if (this.appShellClass != null && shell != null) {
+            throw new InvalidApplicationConfigurationException(
+                    String.format(AppShellRegistry.ERROR_MULTIPLE_SHELL,
+                            this.appShellClass.getName(), shell.getName()));
+        }
+        if (shell != null && Component.class.isAssignableFrom(shell)) {
+            throw new InvalidApplicationConfigurationException(
+                    String.format(ERROR_EXTENDS_COMPONENT, shell.getName()));
+        }
+        this.appShellClass = shell;
+    }
+
+    /**
+     * Returns the {@link AppShellConfigurator} class in the application.
+     *
+     * @return the app shell class
+     */
+    public Class<? extends AppShellConfigurator> getShell() {
+        return appShellClass;
+    }
+
+    /**
+     * Checks whether a class have annotations that should only be in
+     * {@link AppShellConfigurator} classes.
+     *
+     * @param clz
+     *            the class to check.
+     * @return a string with the error lines if the class has offending
+     *         annotations
+     */
+    public String validateClass(Class<?> clz) {
+        String error = null;
+
+        List<Class<?>> validOnlyForAppShell = (List) getValidAnnotations();
+        // PageTitle can be in AppShell and Views
+        validOnlyForAppShell.remove(PageTitle.class);
+        // StyleSheet is allowed on Components; do not treat it as an
+        // AppShell-only annotation
+        validOnlyForAppShell.remove(StyleSheet.class);
+        validOnlyForAppShell.remove(StyleSheet.Container.class);
+        if (WebComponentExporter.class.isAssignableFrom(clz)) {
+            // Webcomponent exporter should have the theme annotation
+            // and Push annotation as it is not appShell configured.
+            validOnlyForAppShell.remove(Theme.class);
+            validOnlyForAppShell.remove(Push.class);
+        }
+
+        String offending = getClassAnnotations(clz, validOnlyForAppShell);
+        if (!offending.isEmpty()) {
+            error = String.format(AppShellRegistry.ERROR_LINE, offending,
+                    clz.getName());
+        }
+        return error;
+    }
+
+    /**
+     * Gets the raw {@code @StyleSheet} annotation values declared by the app
+     * shell, in declaration order and without duplicates.
+     * <p>
+     * The values are returned as written in the annotation, without any URL
+     * resolution: callers that need a browser-resolvable URL pass them through
+     * {@link FrontendDependencyUrlResolver#resolveToContextRoot(String)}
+     * themselves, which is also what rejects blank values and path traversals.
+     *
+     * @param service
+     *            the service used to probe for an available Aura stylesheet
+     * @return the declared stylesheet values, never {@code null}
+     */
+    List<String> getStyleSheets(VaadinService service) {
+        var styleSheets = new LinkedHashSet<String>();
+        for (StyleSheet sheet : getAnnotations(StyleSheet.class)) {
+            styleSheets.add(sheet.value());
+        }
+
+        // Auto-load Aura if no AppShellConfigurator is defined and Aura is
+        // available. The app shell check comes first so that the resource is
+        // only probed when there is no app shell to take precedence.
+        if (appShellClass == null
+                && service.isResourceAvailable("/" + AURA_STYLESHEET)) {
+            styleSheets.add(AURA_STYLESHEET);
+            if (!auraAutoLoadWarningLogged) {
+                auraAutoLoadWarningLogged = true;
+                log.info(
+                        """
+                                There is no AppShellConfigurator implementation \
+                                available, auto loading the Aura theme. Add an \
+                                AppShellConfigurator to define the theme to use, e.g.
+
+                                import com.vaadin.flow.theme.aura.Aura;
+
+                                @StyleSheet(Aura.STYLESHEET)
+                                public class Application implements AppShellConfigurator {
+                                }
+                                """);
+            }
+        }
+
+        return List.copyOf(styleSheets);
+    }
+
+    /**
+     * Gets the cascade layers of the {@code @StyleSheet} annotations declared
+     * by the app shell, keyed by the raw annotation value. Style sheets without
+     * a layer are not included.
+     *
+     * @return the layer names by annotation value, never {@code null}
+     * @throws InvalidApplicationConfigurationException
+     *             if a layer name is not valid
+     */
+    private Map<String, String> getStyleSheetLayers() {
+        Map<String, String> layers = new HashMap<>();
+        for (StyleSheet sheet : getAnnotations(StyleSheet.class)) {
+            if (sheet.layer().isEmpty()) {
+                continue;
+            }
+            if (!CssBundler.isValidLayerName(sheet.layer())) {
+                throw new InvalidApplicationConfigurationException(
+                        "Invalid layer in @StyleSheet(\"" + sheet.value()
+                                + "\") on " + appShellClass.getName() + ": "
+                                + CssBundler.createInvalidLayerNameMessage(
+                                        sheet.layer()));
+            }
+            layers.putIfAbsent(sheet.value(), sheet.layer());
+        }
+        return layers;
+    }
+
+    private AppShellSettings createSettings(VaadinRequest request) {
+        AppShellSettings settings = new AppShellSettings();
+
+        getAnnotations(Meta.class).forEach(
+                meta -> settings.addMetaTag(meta.name(), meta.content()));
+
+        List<Viewport> viewPorts = getAnnotations(Viewport.class);
+        if (viewPorts.size() > 1) {
+            throw new InvalidApplicationConfigurationException(
+                    String.format(AppShellRegistry.ERROR_MULTIPLE_ANNOTATION,
+                            Viewport.class.getSimpleName()));
+        } else if (!viewPorts.isEmpty()) {
+            settings.setViewport(viewPorts.get(0).value());
+        }
+        List<BodySize> bodySizes = getAnnotations(BodySize.class);
+        if (bodySizes.size() > 1) {
+            throw new InvalidApplicationConfigurationException(
+                    String.format(AppShellRegistry.ERROR_MULTIPLE_ANNOTATION,
+                            BodySize.class.getSimpleName()));
+        } else if (!bodySizes.isEmpty()) {
+            settings.setBodySize(bodySizes.get(0).width(),
+                    bodySizes.get(0).height());
+        }
+        List<PageTitle> pageTitles = getAnnotations(PageTitle.class);
+        if (pageTitles.size() > 1) {
+            throw new InvalidApplicationConfigurationException(
+                    String.format(AppShellRegistry.ERROR_MULTIPLE_ANNOTATION,
+                            PageTitle.class.getSimpleName()));
+        } else if (!pageTitles.isEmpty()) {
+            settings.setPageTitle(pageTitles.get(0).value());
+        }
+        getAnnotations(Inline.class).forEach(settings::addInline);
+
+        addStyleSheets(request, getStyleSheets(request.getService()),
+                getStyleSheetLayers(), settings);
+        addJavaScripts(request, settings);
+        return settings;
+    }
+
+    /**
+     * Expands an already normalized stylesheet value into the href to emit in
+     * the app shell, appending the content hash in production mode.
+     *
+     * @param normalized
+     *            a value already passed through
+     *            {@link FrontendDependencyUrlResolver#resolveToContextRoot(String)},
+     *            not {@code null}
+     * @param request
+     *            the request being served
+     * @return the href to emit, or {@code null} if it cannot be resolved
+     */
+    private static String resolveStyleSheetHref(String normalized,
+            VaadinRequest request) {
+        String resolved = resolveVaadinUri(normalized, request);
+        if (resolved == null) {
+            return null;
+        }
+
+        VaadinService service = request.getService();
+        DeploymentConfiguration config = service.getDeploymentConfiguration();
+        if (config.isProductionMode()) {
+            String hash = ResourceContentHash.getContentHash(service,
+                    normalized);
+            resolved = UrlUtil.appendQueryParameter(resolved,
+                    ApplicationConstants.CONTENT_HASH_PARAMETER, hash);
+        }
+        return resolved;
+    }
+
+    private static String resolveVaadinUri(String normalized,
+            VaadinRequest request) {
+        // Use the servlet-relative path (e.g. "./", "../") rather than the
+        // absolute context path. The emitted URL is then resolved by the
+        // browser against <base>, which Vaadin sets from the actual request
+        // URL (honoring X-Forwarded-* headers). This matches how the
+        // bootstrap CONTEXT_ROOT_URL is computed for the UIDL path and works
+        // correctly behind reverse proxies that rewrite the public path.
+        String servletPathToContextRoot = request.getService()
+                .getContextRootRelativePath(request);
+        BootstrapHandler.BootstrapUriResolver resolver = new BootstrapHandler.BootstrapUriResolver(
+                servletPathToContextRoot, null);
+        return resolver.resolveVaadinUri(normalized);
+    }
+
+    /**
+     * Modifies the `index.html` document based on the
+     * {@link AppShellConfigurator} annotations or
+     * {@link AppShellConfigurator#configurePage(AppShellSettings)} method.
+     *
+     * @param document
+     *            a JSoup document for the index.html page
+     * @param request
+     *            The request to handle
+     */
+    public void modifyIndexHtml(Document document, VaadinRequest request) {
+        AppShellSettings settings = createSettings(request);
+        if (appShellClass != null) {
+            VaadinService.getCurrentOrThrow().getInstantiator()
+                    .getOrCreate(appShellClass).configurePage(settings);
+        }
+
+        settings.getHeadElements(Position.PREPEND).forEach(
+                elm -> insertElement(elm, document.head()::prependChild));
+        settings.getHeadElements(Position.APPEND).forEach(
+                elm -> insertElement(elm, document.head()::appendChild));
+
+        settings.getInlineElements(request.getService(), TargetElement.HEAD,
+                Position.PREPEND)
+                .forEach(elm -> insertInlineElement(elm,
+                        document.head()::prependChild));
+        settings.getInlineElements(request.getService(), TargetElement.HEAD,
+                Position.APPEND)
+                .forEach(elm -> insertInlineElement(elm,
+                        document.head()::appendChild));
+        settings.getInlineElements(request.getService(), TargetElement.BODY,
+                Position.PREPEND)
+                .forEach(elm -> insertInlineElement(elm,
+                        document.body()::prependChild));
+        settings.getInlineElements(request.getService(), TargetElement.BODY,
+                Position.APPEND)
+                .forEach(elm -> insertInlineElement(elm,
+                        document.body()::appendChild));
+    }
+
+    /**
+     * Modifies PushConfiguration instance based on the {@link Push} annotation
+     * on {@link AppShellConfigurator}.
+     *
+     * @param pushConfiguration
+     *            the PushConfigration instance to modify
+     */
+    public void modifyPushConfiguration(PushConfiguration pushConfiguration) {
+        List<Push> pushAnnotations = getAnnotations(Push.class);
+        if (pushAnnotations.size() > 1) {
+            throw new InvalidApplicationConfigurationException(
+                    String.format(AppShellRegistry.ERROR_MULTIPLE_ANNOTATION,
+                            Push.class.getSimpleName()));
+        } else if (!pushAnnotations.isEmpty()) {
+            Push push = pushAnnotations.get(0);
+            pushConfiguration.setPushMode(push.value());
+            pushConfiguration.setTransport(push.transport());
+        }
+    }
+
+    private void insertElement(Element elm, Consumer<Element> action) {
+        action.accept(elm);
+        for (String cssQuery : UNIQUE_ELEMENTS) {
+            if (elm.is(cssQuery)) {
+                Element first = elm.parent().selectFirst(cssQuery);
+                if (first != elm && first != null) {
+                    first.replaceWith(elm);
+                }
+                break;
+            }
+        }
+    }
+
+    private void insertInlineElement(Element elm, Consumer<Element> action) {
+        if (elm instanceof Document) {
+            elm.getAllElements().stream()
+                    .filter(item -> !(item instanceof Document)
+                            && elm.equals(item.parent()))
+                    .forEach(action::accept);
+        } else if (elm != null) {
+            action.accept(elm);
+        }
+    }
+
+    @Override
+    public String toString() {
+        return "Shell: " + appShellClass + " metas: "
+                + getAnnotations(Meta.class);
+    }
+
+    private <T extends Annotation> List<T> getAnnotations(Class<T> annotation) {
+        assert getValidAnnotations().contains(annotation);
+        return appShellClass == null ? Collections.emptyList()
+                : Arrays.asList(appShellClass.getAnnotationsByType(annotation));
+    }
+
+    private static void addStyleSheets(VaadinRequest request,
+            List<String> styleSheets, Map<String, String> layers,
+            AppShellSettings settings) {
+        final DeploymentConfiguration config = request.getService()
+                .getDeploymentConfiguration();
+        // Different annotation values can denote the same stylesheet, e.g.
+        // "a.css", "./a.css" and "context://a.css" all normalize to
+        // "context://a.css". Normalize first and keep the first spelling of
+        // each so that only one link is emitted per stylesheet, in declaration
+        // order.
+        Map<String, String> sourcePathsByUrl = new LinkedHashMap<>();
+        for (String sourcePath : styleSheets) {
+            String normalized = FrontendDependencyUrlResolver
+                    .resolveToContextRoot(sourcePath);
+            if (normalized != null) {
+                sourcePathsByUrl.putIfAbsent(normalized, sourcePath);
+            }
+        }
+
+        // Collected while emitting so that the tracker sees exactly the sheets
+        // that ended up on the page, in the canonical resolveToContextRoot
+        // form that ActiveStyleSheetTracker expects.
+        List<String> trackedUrls = new ArrayList<>();
+        sourcePathsByUrl.forEach((normalized, sourcePath) -> {
+            String href = resolveStyleSheetHref(normalized, request);
+            if (href == null) {
+                return;
+            }
+            // In development the raw annotation value is exposed so that
+            // StyleSheetHotswapper and the dev tools can match a link by the
+            // same string the annotation declares.
+            String layer = layers.getOrDefault(sourcePath, "");
+            if (layer.isEmpty()) {
+                Map<String, String> attributes = config.isProductionMode()
+                        ? Map.of("rel", "stylesheet")
+                        : Map.of("rel", "stylesheet", "data-file-path",
+                                sourcePath, "data-id",
+                                "appShell-" + sourcePath);
+                settings.addLink(Position.APPEND, href, attributes);
+            } else {
+                // A link element cannot put a style sheet into a cascade
+                // layer, so it is loaded with an @import rule instead. The
+                // layer is exposed so that the dev tools keep it when they
+                // replace the element with hotswapped content.
+                Map<String, String> attributes = config.isProductionMode()
+                        ? Map.of()
+                        : Map.of("data-file-path", sourcePath, "data-id",
+                                "appShell-" + sourcePath, "data-layer", layer);
+                settings.addLayeredStyleSheet(Position.APPEND, href, layer,
+                        attributes);
+            }
+            trackedUrls.add(normalized);
+        });
+        if (!config.isProductionMode()) {
+            ActiveStyleSheetTracker.get(request.getService())
+                    .trackForAppShell(trackedUrls);
+        }
+    }
+
+    /**
+     * Adds the {@link JavaScript} and {@link JsModule} values of the app shell
+     * that are loaded at runtime as script elements. Bundled values are loaded
+     * through the bundle, but runtime values are never bundled and the app
+     * shell is not a component, so nothing else adds them to the page.
+     */
+    private void addJavaScripts(VaadinRequest request,
+            AppShellSettings settings) {
+        if (appShellClass == null) {
+            return;
+        }
+        boolean productionMode = request.getService()
+                .getDeploymentConfiguration().isProductionMode();
+        Set<String> added = new HashSet<>();
+        for (JavaScript js : appShellClass
+                .getAnnotationsByType(JavaScript.class)) {
+            // Bundled developmentOnly values are left out of the production
+            // bundle by the build, the same rule is applied to runtime values
+            if (FrontendDependencyUrlResolver.isRuntimeJavaScript(js)
+                    && !(productionMode && js.developmentOnly())) {
+                if (js.loadMode() == LoadMode.INLINE) {
+                    throw new InvalidApplicationConfigurationException(
+                            "The @JavaScript('" + js.value()
+                                    + "') annotation on "
+                                    + appShellClass.getName()
+                                    + " uses LoadMode.INLINE, which is not supported on the app shell. Use @Inline to inline the contents of a file into the page.");
+                }
+                addScript(request, settings, js.value(), js.type(),
+                        js.loadMode() == LoadMode.LAZY, added);
+            }
+        }
+        // Deprecated runtime URL @JsModule values are kept out of the bundle
+        // by the scanners, the same as on components
+        for (JsModule module : appShellClass
+                .getAnnotationsByType(JsModule.class)) {
+            if (FrontendDependencyUrlResolver
+                    .isRuntimeDependencyUrl(module.value())
+                    && !(productionMode && module.developmentOnly())) {
+                addScript(request, settings, module.value(),
+                        JavaScript.Type.MODULE, false, added);
+            }
+        }
+    }
+
+    private void addScript(VaadinRequest request, AppShellSettings settings,
+            String value, JavaScript.Type type, boolean defer,
+            Set<String> added) {
+        String normalized = FrontendDependencyUrlResolver
+                .resolveRuntimeJavaScript(value);
+        if (normalized == null || !added.add(normalized)) {
+            return;
+        }
+        String src = resolveVaadinUri(normalized, request);
+        if (src != null) {
+            settings.addScript(Position.APPEND, src, type, defer);
+        }
+    }
+}

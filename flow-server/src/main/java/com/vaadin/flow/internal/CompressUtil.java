@@ -1,0 +1,264 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.internal;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.zip.Deflater;
+import java.util.zip.Inflater;
+import java.util.zip.InflaterInputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipException;
+import java.util.zip.ZipFile;
+import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
+
+/**
+ * Utility class for compression and decompression of folders, files and
+ * strings.
+ * <p>
+ * For internal use only. May be renamed or removed in a future release.
+ *
+ * @author Vaadin Ltd
+ * @since 25.0
+ */
+public class CompressUtil {
+
+    private CompressUtil() {
+        // Utility class only
+    }
+
+    /**
+     * Compress target directory and children into given target outfile. All
+     * files will be zipped and the targetDirectory will not be in the package.
+     *
+     * @param targetDirectory
+     *            directory content to compress
+     * @param outfile
+     *            file to compress directory content to
+     */
+    public static void compressDirectory(File targetDirectory, File outfile) {
+        try (ZipOutputStream zipOut = new ZipOutputStream(
+                new FileOutputStream(outfile))) {
+
+            for (File child : targetDirectory.listFiles()) {
+                zip(child, child.getName(), zipOut);
+            }
+        } catch (IOException e) {
+            throw new CompressionException(
+                    "Failed to compress bundle files to '" + outfile.getPath()
+                            + "'",
+                    e);
+        }
+    }
+
+    private static void zip(File fileToZip, String fileName,
+            ZipOutputStream zipOut) throws IOException {
+        if (fileToZip.isHidden()) {
+            return;
+        }
+        fileName = fileName.replaceAll("\\\\", "/");
+        if (fileToZip.isDirectory()) {
+            if (!fileName.endsWith("/")) {
+                fileName = fileName + "/";
+            }
+            zipOut.putNextEntry(new ZipEntry(fileName));
+            zipOut.closeEntry();
+
+            for (File child : fileToZip.listFiles()) {
+                zip(child, fileName + child.getName(), zipOut);
+            }
+            return;
+        }
+        try (FileInputStream fis = new FileInputStream(fileToZip)) {
+            ZipEntry zipEntry = new ZipEntry(fileName);
+            zipOut.putNextEntry(zipEntry);
+            byte[] bytes = new byte[1024];
+            int length;
+            while ((length = fis.read(bytes)) >= 0) {
+                zipOut.write(bytes, 0, length);
+            }
+        }
+        zipOut.closeEntry();
+    }
+
+    /**
+     * Uncompress given zip file content to the target directory.
+     *
+     * @param zip
+     *            file to uncompress
+     * @param targetDirectory
+     *            target directory to uncompress files to
+     */
+    public static void uncompressFile(File zip, File targetDirectory) {
+        if (!zip.exists()) {
+            return;
+        }
+        byte[] buffer = new byte[1024];
+        try (ZipInputStream zis = new ZipInputStream(
+                new FileInputStream(zip))) {
+            ZipEntry zipEntry = zis.getNextEntry();
+            while (zipEntry != null) {
+                File newFile = newFile(targetDirectory, zipEntry);
+                if (zipEntry.isDirectory()) {
+                    if (!newFile.isDirectory() && !newFile.mkdirs()) {
+                        throw new IOException(
+                                "Failed to create directory " + newFile);
+                    }
+                } else {
+                    // fix for Windows-created archives
+                    File parent = newFile.getParentFile();
+                    if (!parent.isDirectory() && !parent.mkdirs()) {
+                        throw new IOException(
+                                "Failed to create directory " + parent);
+                    }
+
+                    try (FileOutputStream fos = new FileOutputStream(newFile)) {
+                        int len;
+                        while ((len = zis.read(buffer)) > 0) {
+                            fos.write(buffer, 0, len);
+                        }
+                    }
+                }
+                zipEntry = zis.getNextEntry();
+            }
+            zis.closeEntry();
+        } catch (IOException e) {
+            throw new CompressionException(
+                    "Failed to unpack '" + zip.getPath() + "'", e);
+        }
+    }
+
+    private static File newFile(File destinationDir, ZipEntry zipEntry)
+            throws IOException {
+        // Canonicalize the destination directory once. Resolving each entry
+        // lexically against this base (instead of canonicalizing the
+        // not-yet-created target file) avoids inconsistent path forms, e.g. on
+        // Windows mapped network drives where getCanonicalPath() returns the
+        // UNC form for an existing directory but the drive-letter form for a
+        // non-existent child, which made a legitimate entry look "outside".
+        Path destDir = destinationDir.getCanonicalFile().toPath();
+        Path destFile = destDir.resolve(zipEntry.getName()).normalize();
+
+        if (!destFile.startsWith(destDir)) {
+            throw new IOException("Entry is outside of the target dir: "
+                    + zipEntry.getName());
+        }
+
+        return destFile.toFile();
+    }
+
+    /**
+     * Checks if the given zip file contains a file with the given name.
+     *
+     * @param zip
+     *            Target zip file
+     * @param filename
+     *            Target file name
+     * @return {@code true} if the file is found in the zip
+     * @throws IOException
+     *             if an I/O error occurs
+     * @since 25.3
+     */
+    public static boolean hasFileInZip(File zip, String filename)
+            throws IOException {
+        try (ZipFile zipFile = new ZipFile(zip)) {
+            return zipFile.getEntry(filename) != null;
+        }
+    }
+
+    /**
+     * Read a file content from the given zip file.
+     *
+     * @param zip
+     *            Target zip file
+     * @param filename
+     *            Target file name
+     * @return File content or {@code null} if not found
+     * @throws IOException
+     *             if an I/O error occurs
+     */
+    public static String readFileContentFromZip(File zip, String filename)
+            throws IOException {
+        try (ZipFile zipFile = new ZipFile(zip)) {
+            ZipEntry entry = zipFile.getEntry(filename);
+            if (entry == null) {
+                return null;
+            }
+            try (InputStream inputStream = zipFile.getInputStream(entry)) {
+                return StringUtil.toUTF8String(inputStream);
+            }
+        } catch (ZipException e) {
+            throw new IOException(e);
+        }
+    }
+
+    /**
+     * Compresses a string with the deflate algorithm, favoring speed over size.
+     * Use {@link #inflateString(byte[])} to get the string back.
+     *
+     * @param text
+     *            the string to compress, not {@code null}
+     * @return the compressed UTF-8 bytes of the string
+     * @since 25.4
+     */
+    public static byte[] deflateString(String text) {
+        byte[] input = text.getBytes(StandardCharsets.UTF_8);
+        Deflater deflater = new Deflater(Deflater.BEST_SPEED, true);
+        // Deflater is AutoCloseable only from Java 25
+        try { // NOSONAR
+            deflater.setInput(input);
+            deflater.finish();
+            ByteArrayOutputStream output = new ByteArrayOutputStream(
+                    input.length / 4 + 16);
+            byte[] buffer = new byte[4096];
+            while (!deflater.finished()) {
+                output.write(buffer, 0, deflater.deflate(buffer));
+            }
+            return output.toByteArray();
+        } finally {
+            deflater.end();
+        }
+    }
+
+    /**
+     * Decompresses a string compressed with {@link #deflateString(String)}.
+     *
+     * @param data
+     *            the compressed bytes, not {@code null}
+     * @return the original string
+     * @since 25.4
+     */
+    public static String inflateString(byte[] data) {
+        Inflater inflater = new Inflater(true);
+        try (InputStream input = new InflaterInputStream(
+                new ByteArrayInputStream(data), inflater)) {
+            return new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        } finally {
+            inflater.end();
+        }
+    }
+}

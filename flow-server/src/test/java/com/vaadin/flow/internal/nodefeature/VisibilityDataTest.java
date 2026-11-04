@@ -1,0 +1,60 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.internal.nodefeature;
+
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.internal.StateNode;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class VisibilityDataTest {
+
+    @Test
+    void setVisible() {
+        StateNode node = new StateNode(ElementData.class);
+        ElementData data = node.getFeature(ElementData.class);
+
+        assertNull(data.get(NodeProperties.VISIBLE));
+        assertTrue(data.isVisible());
+
+        data.put(NodeProperties.VISIBLE, true);
+        assertTrue(data.isVisible());
+
+        data.put(NodeProperties.VISIBLE, false);
+        assertFalse(data.isVisible());
+    }
+
+    @Test
+    void allowsChanges_delegateToIsVisible() {
+        ElementData data = mock(ElementData.class);
+
+        doCallRealMethod().when(data).allowsChanges();
+
+        when(data.isVisible()).thenReturn(true);
+
+        assertTrue(data.allowsChanges());
+
+        when(data.isVisible()).thenReturn(false);
+
+        assertFalse(data.allowsChanges());
+    }
+}

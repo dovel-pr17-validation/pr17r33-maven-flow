@@ -1,0 +1,83 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.internal;
+
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+class ReflectToolsGetFieldValueByTypeTest {
+    @Test
+    void getFieldValue() {
+        class MyClass {
+            @SuppressWarnings("unused")
+            public Integer getField() {
+                return 1;
+            }
+
+            @SuppressWarnings("unused")
+            public void setField(Integer i) {
+            }
+
+        }
+        class MySubClass extends MyClass {
+            @SuppressWarnings("unused")
+            public String field = "Hello";
+        }
+
+        MySubClass myInstance = new MySubClass();
+
+        java.lang.reflect.Field memberField;
+        Object fieldValue = Boolean.FALSE;
+        try {
+            memberField = myInstance.getClass().getField("field");
+            // Should get a String value. Without the third parameter (calling
+            // ReflectTools.getJavaFieldValue(Object object, Field field)) would
+            // get an Integer value
+            fieldValue = ReflectTools.getJavaFieldValue(myInstance, memberField,
+                    String.class);
+        } catch (Exception e) {
+        }
+        assertTrue(fieldValue instanceof String);
+
+    }
+
+    @Test
+    void getFieldValueViaGetter() {
+        class MyClass {
+            @SuppressWarnings("unused")
+            public Integer field = 1;
+        }
+        class MySubClass extends MyClass {
+            @SuppressWarnings("unused")
+            public String field = "Hello";
+        }
+
+        MySubClass myInstance = new MySubClass();
+
+        java.lang.reflect.Field memberField;
+        try {
+            memberField = myInstance.getClass().getField("field");
+            // Should throw an IllegalArgument exception as the mySubClass class
+            // doesn't have an Integer field.
+            ReflectTools.getJavaFieldValue(myInstance, memberField,
+                    Integer.class);
+            fail("Previous method call should have thrown an exception");
+        } catch (Exception e) {
+        }
+    }
+}

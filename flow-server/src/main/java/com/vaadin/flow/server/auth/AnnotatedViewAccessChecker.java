@@ -1,0 +1,231 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.auth;
+
+import jakarta.annotation.security.DenyAll;
+import jakarta.annotation.security.PermitAll;
+import jakarta.annotation.security.RolesAllowed;
+
+import java.lang.reflect.AnnotatedElement;
+import java.util.List;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.router.BeforeEnterListener;
+import com.vaadin.flow.router.Layout;
+import com.vaadin.flow.router.RouterLayout;
+import com.vaadin.flow.router.internal.RouteUtil;
+import com.vaadin.flow.server.VaadinContext;
+import com.vaadin.flow.server.auth.NavigationContext.Phase;
+import com.vaadin.flow.server.startup.ApplicationConfiguration;
+
+/**
+ * Checks access to views using an {@link AccessAnnotationChecker}.
+ * <p>
+ * An instance of this class should be provided to a
+ * {@link NavigationAccessControl} added as a {@link BeforeEnterListener} to the
+ * {@link com.vaadin.flow.component.UI} of interest.
+ * 
+ * @since 24.3
+ */
+public class AnnotatedViewAccessChecker implements NavigationAccessChecker {
+
+    private static final Logger LOGGER = LoggerFactory
+            .getLogger(AnnotatedViewAccessChecker.class);
+
+    private final AccessAnnotationChecker accessAnnotationChecker;
+
+    /**
+     * Creates an instance using the given checker.
+     */
+    public AnnotatedViewAccessChecker() {
+        this(new AccessAnnotationChecker());
+    }
+
+    /**
+     * Creates an instance using the given checker.
+     *
+     * @param accessAnnotationChecker
+     *            the checker to use
+     */
+    public AnnotatedViewAccessChecker(
+            AccessAnnotationChecker accessAnnotationChecker) {
+        this.accessAnnotationChecker = accessAnnotationChecker;
+    }
+
+    @Override
+    public AccessCheckResult check(NavigationContext context) {
+        Class<?> targetView = context.getNavigationTarget();
+        for (Class<? extends RouterLayout> layout : getLayoutsToCheck(
+                context)) {
+            boolean hasAccess = accessAnnotationChecker.hasAccess(layout,
+                    context.getPrincipal(), context::hasRole);
+            if (hasAccess) {
+                continue;
+            }
+            if (layout.isAnnotationPresent(Layout.class)) {
+                logDeniedByLayoutAccessRules(context, layout);
+                return context
+                        .deny(deniedByLayoutReason(context, "layout", layout));
+            }
+            logDeniedByLayoutAccessRules(context, layout,
+                    "Denied access to view '{}' due to parent layout '{}' access rules");
+            return context.deny(
+                    deniedByLayoutReason(context, "parent layout", layout));
+        }
+
+        boolean hasAccess = accessAnnotationChecker.hasAccess(targetView,
+                context.getPrincipal(), context::hasRole);
+        if (context.getPhase() == Phase.PUBLIC_ROUTE_CHECK) {
+            LOGGER.debug("Public route check: view '{}' with path '{}' is {}",
+                    context.getNavigationTarget().getName(),
+                    context.getLocation().getPath(),
+                    ((hasAccess) ? "public" : "not public"));
+        } else {
+            LOGGER.debug("Access to view '{}' with path '{}' is {}",
+                    context.getNavigationTarget().getName(),
+                    context.getLocation().getPath(),
+                    ((hasAccess) ? "allowed" : "denied"));
+        }
+        if (hasAccess) {
+            return context.allow();
+        }
+        String denyReason;
+        if (isImplicitlyDenyAllAnnotated(targetView)) {
+            if (context.getPhase() == Phase.PUBLIC_ROUTE_CHECK) {
+                denyReason = "The view has no access annotation, so it is not public.";
+            } else {
+                denyReason = "Consider adding one of the following annotations "
+                        + "to make the view accessible: @AnonymousAllowed, "
+                        + "@PermitAll, @RolesAllowed.";
+            }
+            if (targetView.isAnnotationPresent(Layout.class)
+                    && context.getRouter().getRegistry()
+                            .getTargetUrl(
+                                    (Class<? extends Component>) targetView)
+                            .isEmpty()) {
+                logDeniedByLayoutAccessRules(context, targetView);
+                denyReason = deniedByLayoutReason(context, "layout",
+                        targetView);
+            }
+        } else {
+            denyReason = "Access is denied by annotations on the view.";
+        }
+        return context.deny(denyReason);
+    }
+
+    private String deniedByLayoutReason(NavigationContext context,
+            String layoutKind, Class<?> layoutClass) {
+        String reason = "Denied access to view '"
+                + context.getNavigationTarget().getSimpleName() + "' due to "
+                + layoutKind + " '" + layoutClass.getSimpleName()
+                + "' access rules.";
+        if (context.getPhase() == Phase.PUBLIC_ROUTE_CHECK) {
+            // The layout may restrict access on purpose, so there is nothing
+            // to fix
+            return reason;
+        }
+        return reason + " Consider adding one of the following annotations "
+                + "to make the " + layoutKind
+                + " accessible: @AnonymousAllowed, "
+                + "@PermitAll, or @RolesAllowed.";
+    }
+
+    private List<Class<? extends RouterLayout>> getLayoutsToCheck(
+            NavigationContext context) {
+        if (context.isErrorHandling()) {
+            // An error view is shown in place of the requested view. Check
+            // only the layouts of its own route, if it has one, so that an
+            // error page can still be shown in an application layout that the
+            // user is not allowed to access.
+            return RouteUtil.resolveTargetParentLayouts(
+                    context.getRouter().getRegistry(),
+                    context.getNavigationTarget(),
+                    context.getLocation().getPath());
+        }
+        // The layouts the router creates for the matched route or route
+        // alias, which can differ from the layouts of the primary route
+        return context.getLayouts();
+    }
+
+    private void logDeniedByLayoutAccessRules(NavigationContext context,
+            Class<?> layoutClass) {
+        String msg = "Denied access to view '{}' due to layout '{}' access rules. "
+                + "Consider adding @AnonymousAllowed, @PermitAll, or @RolesAllowed to the layout class.";
+        logDeniedByLayoutAccessRules(context, layoutClass, msg);
+    }
+
+    private void logDeniedByLayoutAccessRules(NavigationContext context,
+            Class<?> layoutClass, String msg) {
+        if (context.getPhase() == Phase.PUBLIC_ROUTE_CHECK) {
+            // The layout restricts anonymous access on purpose, so this is
+            // neither an access problem nor a configuration error
+            LOGGER.debug(
+                    "Public route check: view '{}' is not public due to layout '{}' access rules",
+                    context.getNavigationTarget().getName(),
+                    layoutClass.getName());
+            return;
+        }
+        if (isViewBroaderThanLayout(context.getNavigationTarget(),
+                layoutClass)) {
+            LOGGER.warn(
+                    msg + " The view allows broader access than the layout,"
+                            + " which is likely a configuration error.",
+                    context.getNavigationTarget().getName(),
+                    layoutClass.getName());
+        } else if (context.isNavigating() && isDevelopmentMode(context)) {
+            LOGGER.info(msg, context.getNavigationTarget().getName(),
+                    layoutClass.getName());
+        } else {
+            LOGGER.debug(msg, context.getNavigationTarget().getName(),
+                    layoutClass.getName());
+        }
+    }
+
+    private boolean isViewBroaderThanLayout(Class<?> view, Class<?> layout) {
+        return getAccessLevel(view) > getAccessLevel(layout);
+    }
+
+    private int getAccessLevel(Class<?> cls) {
+        AnnotatedElement target = AccessAnnotationChecker.securityTarget(cls);
+        if (target.isAnnotationPresent(AnonymousAllowed.class)) {
+            return 3;
+        }
+        if (target.isAnnotationPresent(PermitAll.class)) {
+            return 2;
+        }
+        if (target.isAnnotationPresent(RolesAllowed.class)) {
+            return 1;
+        }
+        return 0;
+    }
+
+    private boolean isImplicitlyDenyAllAnnotated(Class<?> targetView) {
+        return !(targetView.isAnnotationPresent(DenyAll.class)
+                || targetView.isAnnotationPresent(PermitAll.class)
+                || targetView.isAnnotationPresent(RolesAllowed.class));
+    }
+
+    private boolean isDevelopmentMode(NavigationContext context) {
+        VaadinContext vaadinContext = context.getRouter().getRegistry()
+                .getContext();
+        ApplicationConfiguration appConfig = ApplicationConfiguration
+                .get(vaadinContext);
+        return !appConfig.isProductionMode();
+    }
+}

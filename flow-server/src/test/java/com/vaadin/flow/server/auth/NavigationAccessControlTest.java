@@ -1,0 +1,663 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.auth;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpSession;
+
+import java.security.Principal;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.internal.UIInternals;
+import com.vaadin.flow.component.page.Page;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.internal.CurrentInstance;
+import com.vaadin.flow.router.AccessDeniedException;
+import com.vaadin.flow.router.BeforeEnterEvent;
+import com.vaadin.flow.router.ErrorNavigationEvent;
+import com.vaadin.flow.router.ErrorParameter;
+import com.vaadin.flow.router.HasErrorParameter;
+import com.vaadin.flow.router.Location;
+import com.vaadin.flow.router.NavigationEvent;
+import com.vaadin.flow.router.NavigationTrigger;
+import com.vaadin.flow.router.NotFoundException;
+import com.vaadin.flow.router.RouteAccessDeniedError;
+import com.vaadin.flow.router.RouteNotFoundError;
+import com.vaadin.flow.router.Router;
+import com.vaadin.flow.router.internal.ErrorTargetEntry;
+import com.vaadin.flow.router.internal.RouteUtil;
+import com.vaadin.flow.server.MockVaadinContext;
+import com.vaadin.flow.server.RouteRegistry;
+import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.server.VaadinServletRequest;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.AnonymousAllowedView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.CustomAccessDeniedErrorView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.CustomAccessDeniedException;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.CustomAccessDeniedWithMessageView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.PermitAllView;
+import com.vaadin.flow.server.auth.AccessControlTestClasses.TestLoginView;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+class NavigationAccessControlTest {
+
+    enum User {
+        USER_NO_ROLES, NORMAL_USER, ADMIN
+    }
+
+    NavigationAccessControl accessControl;
+
+    NavigationAccessChecker checker1;
+    NavigationAccessChecker checker2;
+    NavigationAccessChecker checker3;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        checker1 = mock(NavigationAccessChecker.class);
+        checker2 = mock(NavigationAccessChecker.class);
+        checker3 = mock(NavigationAccessChecker.class);
+        accessControl = new NavigationAccessControl(
+                List.of(checker1, checker2, checker3));
+    }
+
+    @Test
+    void beforeEnter_principalAndRoleCheckerProvidedToCheckers() {
+        mockCheckerResult(checker2, AccessCheckDecision.ALLOW);
+        mockCheckerResult(checker3, AccessCheckDecision.ALLOW);
+
+        ArgumentCaptor<NavigationContext> captor = ArgumentCaptor
+                .forClass(NavigationContext.class);
+        when(checker1.check(captor.capture()))
+                .then(i -> i.getArgument(0, NavigationContext.class).allow());
+
+        checkAccess(true, false);
+
+        NavigationContext navigationContext = captor.getValue();
+        assertNotNull(navigationContext.getPrincipal(),
+                "Expected Principal to be provided to checkers, but was null");
+        assertTrue(navigationContext.hasRole("user"),
+                "Wrong role checker provided to checkers");
+        assertEquals(NavigationContext.Phase.NAVIGATION,
+                navigationContext.getPhase());
+    }
+
+    @Test
+    void createNavigationContext_evaluationPhase() {
+        VaadinService service = mock(VaadinService.class);
+        when(service.getRouter()).thenReturn(mock(Router.class));
+
+        NavigationContext context = accessControl.createNavigationContext(
+                AnonymousAllowedView.class, "anon", service, null);
+
+        assertEquals(NavigationContext.Phase.EVALUATION, context.getPhase());
+        assertFalse(context.isNavigating());
+    }
+
+    @Test
+    void beforeEnter_anonymous_allCheckersAllowAccess_allowNavigation() {
+        mockCheckerResult(checker1, AccessCheckDecision.ALLOW);
+        mockCheckerResult(checker2, AccessCheckDecision.ALLOW);
+        mockCheckerResult(checker3, AccessCheckDecision.ALLOW);
+        TestNavigationResult result = checkAccess(false, false);
+        assertTrue(result.wasTargetViewRendered());
+    }
+
+    @Test
+    void beforeEnter_anonymous_allowAndNeutralCheckers_allowNavigation() {
+        mockCheckerResult(checker1, AccessCheckDecision.ALLOW);
+        mockCheckerResult(checker2, AccessCheckDecision.NEUTRAL);
+        mockCheckerResult(checker3, AccessCheckDecision.NEUTRAL);
+        TestNavigationResult result = checkAccess(false, false);
+        assertTrue(result.wasTargetViewRendered());
+    }
+
+    @Test
+    void beforeEnter_anonymous_allCheckersDenyAccess_rerouteToNotFound() {
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.DENY);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+        TestNavigationResult result = checkAccess(false, false);
+        assertFalse(result.wasTargetViewRendered());
+        assertEquals(NotFoundException.class, result.getRerouteError());
+        assertEquals(String.join(System.lineSeparator(),
+                accessDeniedReason(checker1), accessDeniedReason(checker2),
+                accessDeniedReason(checker3)), result.getRerouteErrorMessage());
+    }
+
+    @Test
+    void beforeEnter_anonymous_denyAndNeutralCheckers_allowNavigation() {
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.NEUTRAL);
+        mockCheckerResult(checker3, AccessCheckDecision.NEUTRAL);
+        TestNavigationResult result = checkAccess(false, false);
+        assertFalse(result.wasTargetViewRendered());
+        assertEquals(NotFoundException.class, result.getRerouteError());
+        assertEquals(
+                String.join(System.lineSeparator(),
+                        accessDeniedReason(checker1)),
+                result.getRerouteErrorMessage());
+    }
+
+    @Test
+    void beforeEnter_anonymous_allCheckersNeutral_rerouteToNotFound() {
+        mockCheckerResult(checker1, AccessCheckDecision.NEUTRAL);
+        mockCheckerResult(checker2, AccessCheckDecision.NEUTRAL);
+        mockCheckerResult(checker3, AccessCheckDecision.NEUTRAL);
+        TestNavigationResult result = checkAccess(false, false);
+        assertFalse(result.wasTargetViewRendered());
+        assertEquals(NotFoundException.class, result.getRerouteError());
+        assertEquals(
+                "Access denied because navigation checkers did not take any decision.",
+                result.getRerouteErrorMessage());
+    }
+
+    @Test
+    void beforeEnter_developmentMode_anonymous_mixedCheckersConsensus_exceptionThrown() {
+        mockCheckerResult(checker1, AccessCheckDecision.ALLOW);
+        mockCheckerResult(checker2, AccessCheckDecision.NEUTRAL);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+
+        IllegalStateException failure = assertThrows(
+                IllegalStateException.class, () -> checkAccess(false, false));
+        assertTrue(
+                failure.getMessage()
+                        .startsWith("Mixed consensus from navigation checkers"),
+                "Expected exception because of mixed consensus, but reason was "
+                        + failure.getMessage());
+        assertTrue(failure.getMessage().contains(accessDeniedReason(checker3)),
+                "Expected exception message to contain deny reasons"
+                        + failure.getMessage());
+
+        // Result order does not matter
+        reset(checker1, checker2, checker3);
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.ALLOW);
+        mockCheckerResult(checker3, AccessCheckDecision.NEUTRAL);
+        failure = assertThrows(IllegalStateException.class,
+                () -> checkAccess(false, false));
+        assertTrue(
+                failure.getMessage()
+                        .startsWith("Mixed consensus from navigation checkers"),
+                "Expected exception because of mixed consensus, but reason was "
+                        + failure.getMessage());
+        assertTrue(failure.getMessage().contains(accessDeniedReason(checker1)),
+                "Expected exception message to contain deny reasons"
+                        + failure.getMessage());
+    }
+
+    @Test
+    void beforeEnter_productionMode_mixedCheckersConsensus_routeNotFoundWithNoReasonsExposed() {
+        mockCheckerResult(checker1, AccessCheckDecision.ALLOW);
+        mockCheckerResult(checker2, AccessCheckDecision.NEUTRAL);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+        TestNavigationResult result = checkAccess(false, true);
+        assertFalse(result.wasTargetViewRendered());
+        assertEquals(NotFoundException.class, result.getRerouteError());
+        assertEquals("", result.getRerouteErrorMessage());
+
+        // Result order does not matter
+        reset(checker1, checker2, checker3);
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.ALLOW);
+        mockCheckerResult(checker3, AccessCheckDecision.NEUTRAL);
+        result = checkAccess(false, true);
+        assertFalse(result.wasTargetViewRendered());
+        assertEquals(NotFoundException.class, result.getRerouteError());
+        assertEquals("", result.getRerouteErrorMessage());
+    }
+
+    @Test
+    void beforeEnter_productionMode_allCheckersDenyAccess_routeNotFoundWithNoReasonsExposed() {
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.DENY);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+        TestNavigationResult result = checkAccess(false, true);
+        assertFalse(result.wasTargetViewRendered());
+        assertEquals(NotFoundException.class, result.getRerouteError());
+        assertEquals("", result.getRerouteErrorMessage());
+    }
+
+    @Test
+    void beforeEnter_productionMode_allCheckersNeutral_routeNotFoundWithNoReasonsExposed() {
+        mockCheckerResult(checker1, AccessCheckDecision.NEUTRAL);
+        mockCheckerResult(checker2, AccessCheckDecision.NEUTRAL);
+        mockCheckerResult(checker3, AccessCheckDecision.NEUTRAL);
+        TestNavigationResult result = checkAccess(false, true);
+        assertFalse(result.wasTargetViewRendered());
+        assertEquals(NotFoundException.class, result.getRerouteError());
+        assertEquals("", result.getRerouteErrorMessage());
+    }
+
+    @Test
+    void beforeEnter_errorHandlingViewReroute_allCheckersNeutral_allowNavigation() {
+        mockCheckerResult(checker1, AccessCheckDecision.NEUTRAL);
+        mockCheckerResult(checker2, AccessCheckDecision.NEUTRAL);
+        mockCheckerResult(checker3, AccessCheckDecision.NEUTRAL);
+        TestNavigationResult result = checkAccess(RouteAccessDeniedError.class,
+                false, false, true);
+        assertTrue(result.wasTargetViewRendered());
+        assertNull(result.getRerouteError());
+        assertNull(result.getRerouteErrorMessage(), "");
+    }
+
+    @Test
+    void setLoginViewStringCannotBeCalledAfterSettingClass() {
+        assertThrows(IllegalStateException.class, () -> {
+            accessControl.setLoginView(TestLoginView.class);
+            accessControl.setLoginView("/foo");
+        });
+    }
+
+    @Test
+    void setLoginViewClassCannotBeCalledAfterSettingClass() {
+        assertThrows(IllegalStateException.class, () -> {
+            accessControl.setLoginView(TestLoginView.class);
+            accessControl.setLoginView(
+                    AccessControlTestClasses.NoAnnotationView.class);
+        });
+    }
+
+    @Test
+    void setLoginViewStringCannotBeCalledAfterSettingString() {
+        assertThrows(IllegalStateException.class, () -> {
+            accessControl.setLoginView("/foo");
+            accessControl.setLoginView("/bar");
+        });
+    }
+
+    @Test
+    void setLoginViewClassCannotBeCalledAfterSettingString() {
+        assertThrows(IllegalStateException.class, () -> {
+            accessControl.setLoginView("/foo");
+            accessControl.setLoginView(TestLoginView.class);
+        });
+    }
+
+    @Test
+    void setLoginViewStringShouldNotThrowWithSameString() {
+        accessControl.setLoginView("/foo");
+        accessControl.setLoginView("/foo");
+        accessControl.setLoginView(new String("/foo"));
+        assertEquals("/foo", accessControl.getLoginUrl());
+    }
+
+    @Test
+    void beforeEnter_loginView_accessToLoginViewAlwaysAllowed() {
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.DENY);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+        accessControl.setLoginView(TestLoginView.class);
+        TestNavigationResult result = checkAccess(TestLoginView.class, false,
+                true, false);
+        assertTrue(result.wasTargetViewRendered(),
+                "Expecting navigation to login view to be allowed, but was not");
+
+        result = checkAccess(TestLoginView.class, true, true, false);
+        assertTrue(result.wasTargetViewRendered(),
+                "Expecting navigation to login view to be allowed, but was not");
+    }
+
+    @Test
+    void beforeEnter_loginUrl_accessToLoginUrlAlwaysAllowed() {
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.DENY);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+        accessControl.setLoginView("/login");
+        TestNavigationResult result = checkAccess(TestLoginView.class, false,
+                true, false);
+        assertTrue(result.wasTargetViewRendered(),
+                "Expecting navigation to login view to be allowed, but was not");
+
+        result = checkAccess(TestLoginView.class, true, true, false);
+        assertTrue(result.wasTargetViewRendered(),
+                "Expecting navigation to login view to be allowed, but was not");
+    }
+
+    @Test
+    void beforeEnter_loginView_anonymousUser_accessDenied_forwardToLoginView() {
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.DENY);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+        accessControl.setLoginView(TestLoginView.class);
+        TestNavigationResult result = checkAccess(false, false);
+        assertFalse(result.wasTargetViewRendered());
+        assertEquals(TestLoginView.class, result.getForwardedTo());
+    }
+
+    @Test
+    void beforeEnter_loginUrl_anonymousUser_accessDenied_forwardToLoginUrl() {
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.DENY);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+        accessControl.setLoginView("/log-in");
+        TestNavigationResult result = checkAccess(false, false);
+        assertFalse(result.wasTargetViewRendered());
+        assertEquals("/log-in", result.getExternalForwardUrl());
+    }
+
+    @Test
+    void beforeEnter_loginView_authenticatedUser_accessDenied() {
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.DENY);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+        accessControl.setLoginView(TestLoginView.class);
+        TestNavigationResult result = checkAccess(true, false);
+        assertFalse(result.wasTargetViewRendered());
+        assertEquals(AccessDeniedException.class, result.getRerouteError());
+    }
+
+    @Test
+    void beforeEnter_loginUrl_authenticatedUser_accessDenied() {
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.DENY);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+        accessControl.setLoginView("/log-in");
+        TestNavigationResult result = checkAccess(true, false);
+        assertFalse(result.wasTargetViewRendered());
+        assertEquals(AccessDeniedException.class, result.getRerouteError());
+    }
+
+    @Test
+    void beforeEnter_accessDeniedErrorRouter_customException_reroutedToCustomErrorWithReason() {
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.DENY);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+
+        TestNavigationResult result = checkAccess(
+                CustomAccessDeniedWithMessageView.class, true, false, true);
+
+        assertFalse(result.wasTargetViewRendered());
+        assertEquals(CustomAccessDeniedException.class,
+                result.getRerouteError());
+        assertEquals(String.join(System.lineSeparator(),
+                accessDeniedReason(checker1), accessDeniedReason(checker2),
+                accessDeniedReason(checker3)), result.getRerouteErrorMessage());
+    }
+
+    @Test
+    void beforeEnter_redirectUrlStoredForAnonymousUsers() {
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.DENY);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+        accessControl.setLoginView(TestLoginView.class);
+
+        TestNavigationResult result = checkAccess(PermitAllView.class, false,
+                false, true);
+
+        String routePath = RouteUtil.getRoutePath(new MockVaadinContext(),
+                PermitAllView.class);
+        assertFalse(result.wasTargetViewRendered());
+        assertEquals(AccessAnnotationCheckerTest.REQUEST_URL + routePath,
+                result.sessionAttributes.get(
+                        NavigationAccessControl.SESSION_STORED_REDIRECT_ABSOLUTE));
+        assertEquals(routePath, result.sessionAttributes
+                .get(NavigationAccessControl.SESSION_STORED_REDIRECT));
+
+    }
+
+    @Test
+    void beforeEnter_redirectUrlNotStoredForLoggedInUsers() {
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.DENY);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+        accessControl.setLoginView(TestLoginView.class);
+
+        TestNavigationResult result = checkAccess(PermitAllView.class, true,
+                false, true);
+
+        assertFalse(result.wasTargetViewRendered());
+        assertNull(result.sessionAttributes
+                .get(NavigationAccessControl.SESSION_STORED_REDIRECT));
+        assertNull(result.sessionAttributes
+                .get(NavigationAccessControl.SESSION_STORED_REDIRECT_ABSOLUTE));
+
+    }
+
+    @Test
+    void beforeEnter_disabledNavigationControl_alwaysPasses_rejectsWhenEnabled() {
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.DENY);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+        accessControl.setLoginView(TestLoginView.class);
+        accessControl.setEnabled(false);
+
+        TestNavigationResult result = checkAccess(PermitAllView.class, false,
+                false, false);
+        assertTrue(result.wasTargetViewRendered(),
+                "Expected navigation to target view to be allowed when access control is disabled");
+
+        reset(checker1, checker2, checker3);
+        mockCheckerResult(checker1, AccessCheckDecision.DENY);
+        mockCheckerResult(checker2, AccessCheckDecision.DENY);
+        mockCheckerResult(checker3, AccessCheckDecision.DENY);
+        accessControl.setEnabled(true);
+        result = checkAccess(PermitAllView.class, false, false, true);
+        assertFalse(result.wasTargetViewRendered(),
+                "Expected navigation to target view to be denied when access control is enabled");
+
+    }
+
+    @Test
+    void beforeEnter_noCheckersConfigured_alwaysPasses() {
+        accessControl = new NavigationAccessControl(List.of());
+        TestNavigationResult result = checkAccess(AnonymousAllowedView.class,
+                false, false, false);
+        assertTrue(result.wasTargetViewRendered());
+    }
+
+    private TestNavigationResult checkAccess(boolean authenticated,
+            boolean productionMode) {
+        return checkAccess(AnonymousAllowedView.class, authenticated,
+                productionMode, true);
+    }
+
+    private TestNavigationResult checkAccess(Class<?> navigationTarget,
+            boolean authenticated, boolean productionMode,
+            boolean expectCheckersUsed) {
+        TestNavigationResult result = setupRequest(navigationTarget,
+                authenticated ? User.NORMAL_USER : null, productionMode);
+        accessControl.beforeEnter(result.event);
+        verifyAllCheckersUsed(expectCheckersUsed);
+        return result;
+    }
+
+    private void verifyAllCheckersUsed(boolean used) {
+        if (used) {
+            verify(checker1).check(any());
+            verify(checker2).check(any());
+            verify(checker3).check(any());
+        } else {
+            verifyNoInteractions(checker1, checker2, checker3);
+        }
+    }
+
+    private void mockCheckerResult(NavigationAccessChecker checker,
+            AccessCheckDecision decision) {
+        String denyReason = accessDeniedReason(checker);
+        when(checker.check(any())).then(i -> {
+            NavigationContext ctx = i.getArgument(0, NavigationContext.class);
+            return switch (decision) {
+            case ALLOW -> ctx.allow();
+            case NEUTRAL -> ctx.neutral();
+            case DENY -> ctx.deny(denyReason);
+            case REJECT -> ctx.reject(denyReason);
+            };
+        });
+    }
+
+    private static String accessDeniedReason(NavigationAccessChecker checker) {
+        return "Access denied by " + checker;
+    }
+
+    static TestNavigationResult setupRequest(Class navigationTarget, User user,
+            boolean productionMode) {
+        CurrentInstance.clearAll();
+
+        Principal principal;
+        String[] roles;
+
+        if (user == User.USER_NO_ROLES) {
+            principal = AccessAnnotationCheckerTest.USER_PRINCIPAL;
+            roles = new String[0];
+        } else if (user == User.NORMAL_USER) {
+            principal = AccessAnnotationCheckerTest.USER_PRINCIPAL;
+            roles = new String[] { "user" };
+        } else if (user == User.ADMIN) {
+            principal = AccessAnnotationCheckerTest.USER_PRINCIPAL;
+            roles = new String[] { "admin" };
+        } else {
+            principal = null;
+            roles = new String[0];
+        }
+
+        VaadinServletRequest vaadinServletRequest = mock(
+                VaadinServletRequest.class);
+        HttpServletRequest httpServletRequest = AccessAnnotationCheckerTest
+                .createRequest(principal, roles);
+        when(vaadinServletRequest.getHttpServletRequest())
+                .thenReturn(httpServletRequest);
+        when(vaadinServletRequest.getUserPrincipal())
+                .thenAnswer(answer -> httpServletRequest.getUserPrincipal());
+        when(vaadinServletRequest.getSession())
+                .thenAnswer(answer -> httpServletRequest.getSession());
+        when(vaadinServletRequest.getSession(anyBoolean())).thenAnswer(
+                answer -> httpServletRequest.getSession(answer.getArgument(0)));
+        when(vaadinServletRequest.isUserInRole(any()))
+                .thenAnswer(answer -> httpServletRequest
+                        .isUserInRole(answer.getArgument(0)));
+        when(vaadinServletRequest.getRequestURL()).thenReturn(
+                new StringBuffer(AccessAnnotationCheckerTest.REQUEST_URL));
+
+        when(vaadinServletRequest.getWrappedSession()).thenCallRealMethod();
+        when(vaadinServletRequest.getWrappedSession(anyBoolean()))
+                .thenCallRealMethod();
+
+        CurrentInstance.set(VaadinRequest.class, vaadinServletRequest);
+
+        Router router = mock(Router.class);
+        UI ui = mock(UI.class);
+        Page page = mock(Page.class);
+        when(ui.getPage()).thenReturn(page);
+        VaadinSession vaadinSession = mock(VaadinSession.class);
+        when(ui.getSession()).thenReturn(vaadinSession);
+        when(ui.getSessionOrThrow()).thenCallRealMethod();
+        DeploymentConfiguration configuration = mock(
+                DeploymentConfiguration.class);
+        when(vaadinSession.getConfiguration()).thenReturn(configuration);
+        when(configuration.isProductionMode()).thenReturn(productionMode);
+
+        UIInternals uiInternals = mock(UIInternals.class);
+        when(ui.getInternals()).thenReturn(uiInternals);
+        when(uiInternals.getRouter()).thenReturn(router);
+
+        when(router.getErrorNavigationTarget(any())).thenAnswer(invocation -> {
+            Class<?> exceptionClass = invocation.getArguments()[0].getClass();
+            if (exceptionClass == NotFoundException.class) {
+                return Optional.of(new ErrorTargetEntry(
+                        RouteNotFoundError.class, NotFoundException.class));
+            } else if (exceptionClass == AccessDeniedException.class) {
+                return Optional
+                        .of(new ErrorTargetEntry(RouteAccessDeniedError.class,
+                                AccessDeniedException.class));
+            } else if (exceptionClass == CustomAccessDeniedException.class) {
+                return Optional.of(
+                        new ErrorTargetEntry(CustomAccessDeniedErrorView.class,
+                                CustomAccessDeniedException.class));
+            } else {
+                return Optional.empty();
+            }
+
+        });
+        Location location = new Location(getRoute(navigationTarget));
+        NavigationEvent navigationEvent;
+        if (HasErrorParameter.class.isAssignableFrom(navigationTarget)) {
+            navigationEvent = new ErrorNavigationEvent(router, location, ui,
+                    NavigationTrigger.ROUTER_LINK,
+                    new ErrorParameter<>(Exception.class, new Exception()));
+        } else {
+            navigationEvent = new NavigationEvent(router, location, ui,
+                    NavigationTrigger.ROUTER_LINK);
+        }
+
+        BeforeEnterEvent event = new BeforeEnterEvent(navigationEvent,
+                navigationTarget, new ArrayList<>());
+
+        RouteRegistry routeRegistry = mock(RouteRegistry.class);
+        when(router.getRegistry()).thenReturn(routeRegistry);
+        when(routeRegistry.getNavigationTarget(anyString()))
+                .thenAnswer(invocation -> {
+                    String url = (String) invocation.getArguments()[0];
+                    if (location.getPath().equals(url)) {
+                        return Optional.of(navigationTarget);
+                    } else {
+                        return Optional.empty();
+                    }
+                });
+
+        HttpSession session = mock(HttpSession.class);
+        Map<String, Object> sessionAttributes = new HashMap<>();
+        when(httpServletRequest.getSession()).thenReturn(session);
+        when(httpServletRequest.getSession(anyBoolean())).thenReturn(session);
+        doAnswer(invocation -> {
+            String key = (String) invocation.getArguments()[0];
+            Object value = invocation.getArguments()[1];
+
+            sessionAttributes.put(key, value);
+
+            return null;
+        }).when(session).setAttribute(anyString(), any());
+
+        TestNavigationResult info = new TestNavigationResult();
+        info.event = event;
+        info.sessionAttributes = sessionAttributes;
+
+        return info;
+    }
+
+    static String getRoute(Class<?> navigationTarget) {
+        if (HasErrorParameter.class.isAssignableFrom(navigationTarget)) {
+            return "some-path";
+        }
+        return RouteUtil.getRoutePath(new MockVaadinContext(),
+                navigationTarget);
+    }
+
+}

@@ -1,0 +1,393 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.base.devserver.stats;
+
+import java.io.File;
+import java.io.InputStream;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.internal.StringUtil;
+import com.vaadin.flow.server.Version;
+import com.vaadin.flow.testutil.TestUtils;
+import com.vaadin.pro.licensechecker.MachineId;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+@Isolated
+class DevModeUsageStatisticsTest extends AbstractStatisticsTest {
+
+    @Test
+    void clientData() throws Exception {
+        // Init using test project
+        File mavenProjectFolder = TestUtils
+                .getTestFolder("stats-data/maven-project-folder1");
+        DevModeUsageStatistics.init(mavenProjectFolder, storage, sender);
+
+        try (InputStream testResource = TestUtils
+                .getTestResource("stats-data/client-data-1.txt").openStream()) {
+            String data = StringUtil.toUTF8String(testResource);
+            DevModeUsageStatistics.handleBrowserData(wrapStats(data));
+        }
+    }
+
+    @Test
+    void projectId() throws Exception {
+        File mavenProjectFolder = TestUtils
+                .getTestFolder("stats-data/maven-project-folder1");
+        DevModeUsageStatistics.init(mavenProjectFolder, storage, sender);
+
+        assertEquals("pom" + ProjectHelpers.createHash("com.exampledemo"),
+                storage.getProjectId());
+    }
+
+    @Test
+    void sourceIdMaven1() throws Exception {
+        File mavenProjectFolder = TestUtils
+                .getTestFolder("stats-data/maven-project-folder1");
+        DevModeUsageStatistics.init(mavenProjectFolder, storage, sender);
+
+        ObjectNode json = storage.readProject();
+        assertEquals("https://start.vaadin.com/test/1",
+                json.get(StatisticsConstants.FIELD_SOURCE_ID).asString());
+    }
+
+    @Test
+    void sourceIdMaven2() throws Exception {
+        File mavenProjectFolder = TestUtils
+                .getTestFolder("stats-data/maven-project-folder2");
+        DevModeUsageStatistics.init(mavenProjectFolder, storage, sender);
+
+        ObjectNode json = storage.readProject();
+        assertEquals("https://start.vaadin.com/test/2",
+                json.get(StatisticsConstants.FIELD_SOURCE_ID).asString());
+    }
+
+    @Test
+    void sourceIdGradle1() throws Exception {
+        File mavenProjectFolder = TestUtils
+                .getTestFolder("stats-data/gradle-project-folder1");
+        DevModeUsageStatistics.init(mavenProjectFolder, storage, sender);
+
+        ObjectNode json = storage.readProject();
+        assertEquals("https://start.vaadin.com/test/3",
+                json.get(StatisticsConstants.FIELD_SOURCE_ID).asString());
+    }
+
+    @Test
+    void sourceIdGradle2() throws Exception {
+        File mavenProjectFolder = TestUtils
+                .getTestFolder("stats-data/gradle-project-folder2");
+        DevModeUsageStatistics.init(mavenProjectFolder, storage, sender);
+
+        ObjectNode json = storage.readProject();
+        assertEquals("https://start.vaadin.com/test/4",
+                json.get(StatisticsConstants.FIELD_SOURCE_ID).asString());
+    }
+
+    @Test
+    void aggregates() throws Exception {
+        // Init using test project
+        File mavenProjectFolder = TestUtils
+                .getTestFolder("stats-data/maven-project-folder1");
+        DevModeUsageStatistics.init(mavenProjectFolder, storage, sender);
+
+        // Averate events
+        DevModeUsageStatistics.collectEvent("aggregate", 1);
+
+        StatisticsContainer projectData = new StatisticsContainer(
+                storage.readProject());
+
+        assertEquals(1, projectData.getValueAsDouble("aggregate_min"), 0,
+                "Min does not match");
+        assertEquals(1, projectData.getValueAsDouble("aggregate_max"), 0,
+                "Max does not match");
+        assertEquals(1, projectData.getValueAsDouble("aggregate_avg"), 0,
+                "Average does not match");
+        assertEquals(1, projectData.getValueAsInt("aggregate_count"),
+                "Count does not match");
+
+        DevModeUsageStatistics.collectEvent("aggregate", 2);
+        projectData = new StatisticsContainer(storage.readProject());
+        assertEquals(1, projectData.getValueAsDouble("aggregate_min"), 0,
+                "Min does not match");
+        assertEquals(2, projectData.getValueAsDouble("aggregate_max"), 0,
+                "Max does not match");
+        assertEquals(1.5, projectData.getValueAsDouble("aggregate_avg"), 0,
+                "Average does not match");
+        assertEquals(2, projectData.getValueAsInt("aggregate_count"),
+                "Count does not match");
+
+        DevModeUsageStatistics.collectEvent("aggregate", 3);
+        projectData = new StatisticsContainer(storage.readProject());
+
+        assertEquals(1, projectData.getValueAsDouble("aggregate_min"), 0,
+                "Min does not match");
+        assertEquals(3, projectData.getValueAsDouble("aggregate_max"), 0,
+                "Max does not match");
+        assertEquals(2, projectData.getValueAsDouble("aggregate_avg"), 0,
+                "Average does not match");
+        assertEquals(3, projectData.getValueAsInt("aggregate_count"),
+                "Count does not match");
+
+        // Test count events
+        DevModeUsageStatistics.collectEvent("count");
+        projectData = new StatisticsContainer(storage.readProject());
+
+        assertEquals(1, projectData.getValueAsInt("count"),
+                "Increment does not match");
+        DevModeUsageStatistics.collectEvent("count");
+        projectData = new StatisticsContainer(storage.readProject());
+        assertEquals(2, projectData.getValueAsInt("count"),
+                "Increment does not match");
+        DevModeUsageStatistics.collectEvent("count");
+        projectData = new StatisticsContainer(storage.readProject());
+        assertEquals(3, projectData.getValueAsInt("count"),
+                "Increment does not match");
+
+    }
+
+    @Test
+    void multipleProjects() throws Exception {
+        // Init using test project
+        File mavenProjectFolder = TestUtils
+                .getTestFolder("stats-data/maven-project-folder1");
+        DevModeUsageStatistics.init(mavenProjectFolder, storage, sender);
+        StatisticsContainer projectData = new StatisticsContainer(
+                storage.readProject());
+        // Data contains 5 previous starts for this project
+        assertEquals(6, projectData.getValueAsInt("devModeStarts"),
+                "Expected to have 6 restarts");
+
+        // Switch project to track
+        File mavenProjectFolder2 = TestUtils
+                .getTestFolder("stats-data/maven-project-folder2");
+        DevModeUsageStatistics.init(mavenProjectFolder2, storage, sender);
+        projectData = new StatisticsContainer(storage.readProject());
+        assertEquals(1, projectData.getValueAsInt("devModeStarts"),
+                "Expected to have one restarts");
+
+        // Switch project to track
+        File gradleProjectFolder1 = TestUtils
+                .getTestFolder("stats-data/gradle-project-folder1");
+        DevModeUsageStatistics.init(gradleProjectFolder1, storage, sender);
+        projectData = new StatisticsContainer(storage.readProject());
+        assertEquals(1, projectData.getValueAsInt("devModeStarts"),
+                "Expected to have one restarts");
+
+        // Switch project to track
+        File gradleProjectFolder2 = TestUtils
+                .getTestFolder("stats-data/gradle-project-folder2");
+
+        // Double init to check restart count
+        DevModeUsageStatistics.init(gradleProjectFolder2, storage, sender);
+        DevModeUsageStatistics.init(gradleProjectFolder2, storage, sender);
+        projectData = new StatisticsContainer(storage.readProject());
+        assertEquals(2, projectData.getValueAsInt("devModeStarts"),
+                "Expected to have 2 restarts");
+
+        // Check that all project are stored correctly
+        ObjectNode allData = storage.read();
+        assertEquals(4, getNumberOfProjects(allData),
+                "Expected to have 4 projects");
+
+    }
+
+    @Test
+    void eventAfterClearRestoresProjectVersionData() {
+        // A running dev session for this project
+        File mavenProjectFolder = TestUtils
+                .getTestFolder("stats-data/maven-project-folder1");
+        DevModeUsageStatistics.init(mavenProjectFolder, storage, sender);
+
+        // A successful upload (possibly triggered by another project sharing
+        // the machine-wide statistics file) clears all project data
+        storage.clearAllProjectData();
+        assertEquals(0, getNumberOfProjects(storage.read()),
+                "Expected the projects array to be cleared");
+
+        // The still-running session keeps reporting events without a restart
+        DevModeUsageStatistics
+                .collectEvent(StatisticsConstants.EVENT_LIVE_RELOAD);
+
+        // The recreated entry must still carry the project identity data so
+        // that the next report does not contain an empty-version row
+        StatisticsContainer projectData = new StatisticsContainer(
+                storage.readProject());
+        assertEquals(Version.getFullVersion(),
+                projectData.getValue(StatisticsConstants.FIELD_FLOW_VERSION),
+                "flowVersion must be restored after a clear");
+        assertEquals("https://start.vaadin.com/test/1",
+                projectData.getValue(StatisticsConstants.FIELD_SOURCE_ID),
+                "sourceId must be restored after a clear");
+        // No restart happened, so devModeStarts stays 0 for this interval
+        assertEquals(0,
+                projectData.getValueAsInt(
+                        StatisticsConstants.FIELD_PROJECT_DEVMODE_STARTS),
+                "devModeStarts must not be incremented by a plain event");
+        assertEquals(1,
+                projectData
+                        .getValueAsInt(StatisticsConstants.EVENT_LIVE_RELOAD),
+                "The live reload event must be recorded");
+    }
+
+    @Test
+    void aiAgentIsKeptOverStartWithoutAgent() {
+        assumeTrue(ProjectHelpers.getAiAgent(System.getenv()).isEmpty(),
+                "Requires a test run that is not started by an AI agent");
+        File mavenProjectFolder = TestUtils
+                .getTestFolder("stats-data/maven-project-folder1");
+        DevModeUsageStatistics.init(mavenProjectFolder, storage, sender);
+        assertFalse(new StatisticsContainer(storage.readProject())
+                .containsField(StatisticsConstants.FIELD_AI_AGENT));
+
+        // An earlier start in the same report interval was made by an agent
+        storage.update((global, project) -> project.setValue(
+                StatisticsConstants.FIELD_AI_AGENT,
+                StatisticsConstants.AI_AGENT_CODEX));
+        DevModeUsageStatistics.init(mavenProjectFolder, storage, sender);
+
+        assertEquals(StatisticsConstants.AI_AGENT_CODEX, storage.readProject()
+                .get(StatisticsConstants.FIELD_AI_AGENT).asString());
+    }
+
+    @Test
+    void mavenProjectProjectId() {
+        File mavenProjectFolder1 = TestUtils
+                .getTestFolder("stats-data/maven-project-folder1");
+        File mavenProjectFolder2 = TestUtils
+                .getTestFolder("stats-data/maven-project-folder2");
+        String id1 = ProjectHelpers.generateProjectId(mavenProjectFolder1);
+        String id2 = ProjectHelpers.generateProjectId(mavenProjectFolder2);
+        assertNotNull(id1);
+        assertNotNull(id2);
+        assertNotEquals(id1, id2); // Should differ
+    }
+
+    @Test
+    void mavenProjectSource() {
+        File mavenProjectFolder1 = TestUtils
+                .getTestFolder("stats-data/maven-project-folder1");
+        File mavenProjectFolder2 = TestUtils
+                .getTestFolder("stats-data/maven-project-folder2");
+        String source1 = ProjectHelpers.getProjectSource(mavenProjectFolder1);
+        String source2 = ProjectHelpers.getProjectSource(mavenProjectFolder2);
+        assertEquals("https://start.vaadin.com/test/1", source1);
+        assertEquals("https://start.vaadin.com/test/2", source2);
+    }
+
+    @Test
+    void gradleProjectProjectId() {
+        File gradleProjectFolder1 = TestUtils
+                .getTestFolder("stats-data/gradle-project-folder1");
+        File gradleProjectFolder2 = TestUtils
+                .getTestFolder("stats-data/gradle-project-folder2");
+        String id1 = ProjectHelpers.generateProjectId(gradleProjectFolder1);
+        String id2 = ProjectHelpers.generateProjectId(gradleProjectFolder2);
+        assertNotNull(id1);
+        assertNotNull(id2);
+        assertNotEquals(id1, id2); // Should differ
+    }
+
+    @Test
+    void gradleProjectSource() {
+        File gradleProjectFolder1 = TestUtils
+                .getTestFolder("stats-data/gradle-project-folder1");
+        File gradleProjectFolder2 = TestUtils
+                .getTestFolder("stats-data/gradle-project-folder2");
+        String source1 = ProjectHelpers.getProjectSource(gradleProjectFolder1);
+        String source2 = ProjectHelpers.getProjectSource(gradleProjectFolder2);
+        assertEquals("https://start.vaadin.com/test/3", source1);
+        assertEquals("https://start.vaadin.com/test/4", source2);
+    }
+
+    @Test
+    void gradleKotlinProject() {
+        File gradleKotlinProjectFolder = TestUtils
+                .getTestFolder("stats-data/gradle-kotlin-project-folder");
+        assertEquals("gradle" + ProjectHelpers.createHash("KotlinProjectName"),
+                ProjectHelpers.generateProjectId(gradleKotlinProjectFolder));
+        assertEquals("https://start.vaadin.com/test/5",
+                ProjectHelpers.getProjectSource(gradleKotlinProjectFolder));
+    }
+
+    @Test
+    void buildTool() throws Exception {
+        File mavenProjectFolder = TestUtils
+                .getTestFolder("stats-data/maven-project-folder1");
+        DevModeUsageStatistics.init(mavenProjectFolder, storage, sender);
+
+        assertEquals(StatisticsConstants.BUILD_TOOL_MAVEN, storage.readProject()
+                .get(StatisticsConstants.FIELD_BUILD_TOOL).asString());
+        assertEquals(StatisticsConstants.BUILD_TOOL_GRADLE,
+                ProjectHelpers.getBuildTool(TestUtils
+                        .getTestFolder("stats-data/gradle-project-folder1")));
+        assertEquals(StatisticsConstants.BUILD_TOOL_GRADLE,
+                ProjectHelpers.getBuildTool(TestUtils.getTestFolder(
+                        "stats-data/gradle-kotlin-project-folder")));
+        assertEquals(StatisticsConstants.BUILD_TOOL_GRADLE,
+                ProjectHelpers.getBuildTool(TestUtils.getTestFolder(
+                        "stats-data/gradle-build-script-only-folder")));
+        assertEquals(StatisticsConstants.MISSING_DATA, ProjectHelpers
+                .getBuildTool(TestUtils.getTestFolder("stats-data/empty")));
+    }
+
+    @Test
+    void missingProject() {
+        File mavenProjectFolder1 = TestUtils.getTestFolder("java");
+        File mavenProjectFolder2 = TestUtils.getTestFolder("stats-data/empty");
+        String id1 = ProjectHelpers.generateProjectId(mavenProjectFolder1);
+        String id2 = ProjectHelpers.generateProjectId(mavenProjectFolder2);
+        assertEquals(DEFAULT_PROJECT_ID, id1);
+        assertEquals(DEFAULT_PROJECT_ID, id2); // Should be the
+                                               // default
+                                               // id in both
+                                               // cases
+    }
+
+    @Test
+    void machineId() throws Exception {
+        File mavenProjectFolder = TestUtils
+                .getTestFolder("stats-data/maven-project-folder1");
+        DevModeUsageStatistics.init(mavenProjectFolder, storage, sender);
+
+        final ObjectNode project = storage.read();
+        assertEquals(MachineId.get(),
+                project.get(StatisticsConstants.FIELD_MACHINE_ID).asString());
+    }
+
+    private static JsonNode wrapStats(String data) {
+        ObjectNode wrapped = JacksonUtils.createObjectNode();
+        wrapped.put("browserData", data);
+        return wrapped;
+    }
+
+    private static int getNumberOfProjects(ObjectNode allData) {
+        if (allData.has(StatisticsConstants.FIELD_PROJECTS)) {
+            return allData.get(StatisticsConstants.FIELD_PROJECTS).size();
+        }
+        return 0;
+    }
+
+}

@@ -1,0 +1,97 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.plugin.maven;
+
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+import org.apache.maven.project.MavenProject;
+import org.codehaus.plexus.util.ReflectionUtils;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import static com.vaadin.flow.server.Constants.VAADIN_SERVLET_RESOURCES;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class GenerateMavenBOMMojoTest {
+
+    private String bomFilename;
+
+    private File resourceOutputDirectory;
+
+    @TempDir
+    Path tempDir;
+
+    private GenerateMavenBOMMojo mojo;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        this.mojo = new GenerateMavenBOMMojo();
+
+        MavenProject project = mock(MavenProject.class);
+        File projectBase = tempDir.toFile();
+        when(project.getBasedir()).thenReturn(projectBase);
+        resourceOutputDirectory = new File(projectBase,
+                VAADIN_SERVLET_RESOURCES);
+        bomFilename = new File(resourceOutputDirectory, "bom.json")
+                .getAbsolutePath();
+
+        // set Mojo properties
+        ReflectionUtils.setVariableValueInObject(mojo, "projectType",
+                "application");
+        ReflectionUtils.setVariableValueInObject(mojo, "schemaVersion", "1.4");
+        ReflectionUtils.setVariableValueInObject(mojo, "includeBomSerialNumber",
+                true);
+        ReflectionUtils.setVariableValueInObject(mojo, "includeCompileScope",
+                true);
+        ReflectionUtils.setVariableValueInObject(mojo, "includeProvidedScope",
+                true);
+        ReflectionUtils.setVariableValueInObject(mojo, "includeRuntimeScope",
+                true);
+        ReflectionUtils.setVariableValueInObject(mojo, "includeTestScope",
+                false);
+        ReflectionUtils.setVariableValueInObject(mojo, "includeSystemScope",
+                true);
+        ReflectionUtils.setVariableValueInObject(mojo, "includeLicenseText",
+                false);
+        ReflectionUtils.setVariableValueInObject(mojo, "outputReactorProjects",
+                true);
+        ReflectionUtils.setVariableValueInObject(mojo, "excludeTypes",
+                new String[0]);
+        ReflectionUtils.setVariableValueInObject(mojo, "excludeArtifactId",
+                new String[0]);
+        ReflectionUtils.setVariableValueInObject(mojo, "excludeGroupId",
+                new String[0]);
+        ReflectionUtils.setVariableValueInObject(mojo, "outputFormat", "json");
+        ReflectionUtils.setVariableValueInObject(mojo, "outputName", "bom");
+        ReflectionUtils.setVariableValueInObject(mojo, "outputDirectory",
+                resourceOutputDirectory.getAbsolutePath());
+    }
+
+    @Test
+    void shouldGenerateSBOM() throws Exception {
+        assertFalse(Files.exists(Paths.get(bomFilename)));
+        mojo.execute();
+        assertTrue(Files.exists(Paths.get(bomFilename)));
+    }
+
+}

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.vaadin</groupId>
+    <artifactId>flow-project</artifactId>
+    <version>25.4-SNAPSHOT</version>
+  </parent>
+  <artifactId>flow-plugins</artifactId>
+  <packaging>pom</packaging>
+  <name>Flow Plugins</name>
+  <description>Container for flow plugins</description>
+  <modules>
+    <module>flow-plugin-base</module>
+    <module>flow-maven-plugin</module>
+    <module>flow-dev-bundle-plugin</module>
+    <module>flow-gradle-plugin</module>
+  </modules>
+  <properties>
+    <jandex.skip>true</jandex.skip>
+    <bnd.skip>true</bnd.skip>
+    <flow.apicmp.skip>true</flow.apicmp.skip>
+  </properties>
+</project>

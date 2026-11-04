@@ -1,0 +1,539 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
+import java.util.Properties;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.vaadin.experimental.Feature;
+import com.vaadin.experimental.FeatureFlags;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.internal.FrontendUtils;
+import com.vaadin.flow.server.startup.ApplicationConfiguration;
+import com.vaadin.flow.shared.communication.PushMode;
+
+/**
+ * The default implementation of {@link DeploymentConfiguration} based on a base
+ * class for resolving system properties and a set of init parameters.
+ *
+ * @author Vaadin Ltd
+ * @since 1.0
+ */
+public class DefaultDeploymentConfiguration
+        extends PropertyDeploymentConfiguration {
+
+    public static final String NOT_PRODUCTION_MODE_INFO = "\nVaadin is running in DEVELOPMENT mode - do not use for production deployments.";
+
+    private static final String DEPLOYMENT_WARNINGS = "Following issues were discovered with deployment configuration:";
+
+    public static final String WARNING_XSRF_PROTECTION_DISABLED = "WARNING: Cross-site request forgery protection is disabled!";
+
+    public static final String WARNING_HEARTBEAT_INTERVAL_NOT_NUMERIC = "WARNING: heartbeatInterval has been set to a non integer value."
+            + "\n The default of 5min will be used.";
+
+    public static final String WARNING_PUSH_MODE_NOT_RECOGNIZED = "WARNING: pushMode has been set to an unrecognized value.\n"
+            + "The permitted values are \"disabled\", \"manual\",\n"
+            + "and \"automatic\". The default of \"disabled\" will be used.";
+
+    public static final String WARNING_SESSION_LOCK_CHECK_STRATEGY_NOT_RECOGNIZED = "WARNING: "
+            + InitParameters.SERVLET_PARAMETER_SESSION_LOCK_CHECK_STRATEGY
+            + " has been set to an unrecognized value.\n"
+            + "The permitted values are "
+            + Arrays.stream(SessionLockCheckStrategy.values())
+                    .map(it -> "\"" + it.name().toLowerCase() + "\"")
+                    .collect(Collectors.joining(", "))
+            + ".\nThe default of \""
+            + SessionLockCheckStrategy.ASSERT.name().toLowerCase()
+            + "\" will be used.";
+
+    /**
+     * Default value for {@link #getHeartbeatInterval()} = {@value} .
+     */
+    public static final int DEFAULT_HEARTBEAT_INTERVAL = 300;
+
+    /**
+     * Default value for {@link #getMaxMessageSuspendTimeout()} ()} = {@value} .
+     * 
+     * @since 3.0.1
+     */
+    public static final int DEFAULT_MAX_MESSAGE_SUSPEND_TIMEOUT = 5000;
+
+    /**
+     * Default value for {@link #getMaxRequestBodySize()} = {@value} characters
+     * (10&nbsp;MB).
+     * 
+     * @since 25.2.2
+     */
+    public static final long DEFAULT_MAX_REQUEST_BODY_SIZE = 10L * 1024 * 1024;
+
+    /**
+     * Default value for {@link #getWebComponentDisconnect()} = {@value}.
+     * 
+     * @since 2.0
+     */
+    public static final int DEFAULT_WEB_COMPONENT_DISCONNECT = 300;
+
+    /**
+     * Default value for {@link #isCloseIdleSessions()} = {@value} .
+     */
+    public static final boolean DEFAULT_CLOSE_IDLE_SESSIONS = false;
+
+    /**
+     * Default value for {@link #isSyncIdCheckEnabled()} = {@value} .
+     */
+    public static final boolean DEFAULT_SYNC_ID_CHECK = true;
+
+    public static final boolean DEFAULT_SEND_URLS_AS_PARAMETERS = true;
+
+    private boolean productionMode;
+    private boolean xsrfProtectionEnabled;
+    private int heartbeatInterval;
+    private long maxRequestBodySize;
+    private int maxMessageSuspendTimeout;
+    private int webComponentDisconnect;
+    private boolean closeIdleSessions;
+    private PushMode pushMode;
+    private String pushServletMapping;
+    private boolean syncIdCheck;
+    private boolean sendUrlsAsParameters;
+    private boolean requestTiming;
+    private boolean frontendHotdeploy;
+    private SessionLockCheckStrategy sessionLockCheckStrategy;
+    private CspMode cspMode;
+
+    private static AtomicBoolean logging = new AtomicBoolean(true);
+    private final List<String> warnings = new ArrayList<>();
+    private final List<String> info = new ArrayList<>();
+
+    /**
+     * Create a new deployment configuration instance.
+     *
+     * @param parentConfig
+     *            a parent application configuration
+     * @param systemPropertyBaseClass
+     *            the class that should be used as a basis when reading system
+     *            properties
+     * @param initParameters
+     *            the init parameters that should make up the foundation for
+     *            this configuration
+     * @since 6.0
+     */
+    public DefaultDeploymentConfiguration(ApplicationConfiguration parentConfig,
+            Class<?> systemPropertyBaseClass, Properties initParameters) {
+        super(parentConfig, systemPropertyBaseClass, initParameters);
+
+        boolean log = logging.getAndSet(false);
+
+        checkProductionMode(log);
+        checkFeatureFlags();
+        checkRequestTiming();
+        checkXsrfProtection(log);
+        checkHeartbeatInterval();
+        checkMaxRequestBodySize();
+        checkMaxMessageSuspendTimeout();
+        checkWebComponentDisconnectTimeout();
+        checkCloseIdleSessions();
+        checkPushMode();
+        checkPushServletMapping();
+        checkSyncIdCheck();
+        checkSendUrlsAsParameters();
+        checkFrontendHotdeploy();
+        checkSessionLockCheckStrategy();
+        checkCspMode();
+
+        if (log) {
+            logMessages();
+        }
+    }
+
+    private void logMessages() {
+        Logger logger = LoggerFactory.getLogger(getClass().getName());
+
+        if (!warnings.isEmpty()) {
+            warnings.add(0, DEPLOYMENT_WARNINGS);
+            // merging info messages to warnings for now
+            warnings.addAll(info);
+            if (logger.isWarnEnabled()) {
+                logger.warn(String.join("\n", warnings));
+            }
+        } else if (!info.isEmpty() && logger.isInfoEnabled()) {
+            logger.info(String.join("\n", info));
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The default is false.
+     */
+    @Override
+    public boolean isProductionMode() {
+        return productionMode;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The default is <code>true</code> when not in production and
+     * <code>false</code> when in production mode.
+     */
+    @Override
+    public boolean isRequestTiming() {
+        return requestTiming;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The default is true.
+     */
+    @Override
+    public boolean isXsrfProtectionEnabled() {
+        return xsrfProtectionEnabled;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The default interval is 300 seconds (5 minutes).
+     */
+    @Override
+    public int getHeartbeatInterval() {
+        return heartbeatInterval;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The default is 10&nbsp;MB.
+     * 
+     * @since 25.2.2
+     */
+    @Override
+    public long getMaxRequestBodySize() {
+        return maxRequestBodySize;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The default max message suspension time is 5000 milliseconds.
+     * 
+     * @since 3.0.1
+     */
+    @Override
+    public int getMaxMessageSuspendTimeout() {
+        return maxMessageSuspendTimeout;
+    }
+
+    @Override
+    public int getWebComponentDisconnect() {
+        return webComponentDisconnect;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The default value is false.
+     */
+    @Override
+    public boolean isCloseIdleSessions() {
+        return closeIdleSessions;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The default value is <code>true</code>.
+     */
+    @Override
+    public boolean isSyncIdCheckEnabled() {
+        return syncIdCheck;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The default value is <code>true</code>.
+     */
+    @Override
+    public boolean isSendUrlsAsParameters() {
+        return sendUrlsAsParameters;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The default mode is {@link PushMode#DISABLED}.
+     */
+    @Override
+    public PushMode getPushMode() {
+        return pushMode;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The default mode is <code>""</code> which uses the service mapping.
+     * 
+     * @since 23.3.5
+     */
+    @Override
+    public String getPushServletMapping() {
+        return pushServletMapping;
+    }
+
+    @Override
+    public SessionLockCheckStrategy getSessionLockCheckStrategy() {
+        return sessionLockCheckStrategy;
+    }
+
+    @Override
+    public CspMode getCspMode() {
+        return cspMode;
+    }
+
+    @Override
+    public Mode getMode() {
+        return frontendHotdeploy ? Mode.DEVELOPMENT_FRONTEND_LIVERELOAD
+                : super.getMode();
+    }
+
+    /**
+     * Log a warning if Vaadin is not running in production mode.
+     */
+    private void checkProductionMode(boolean log) {
+        if (isOwnProperty(InitParameters.SERVLET_PARAMETER_PRODUCTION_MODE)) {
+            productionMode = getBooleanProperty(
+                    InitParameters.SERVLET_PARAMETER_PRODUCTION_MODE, false);
+        } else {
+            productionMode = getParentConfiguration().isProductionMode();
+        }
+        if (log) {
+            if (productionMode) {
+                info.add("Vaadin is running in production mode.");
+            } else {
+                info.add(NOT_PRODUCTION_MODE_INFO);
+            }
+        }
+    }
+
+    /**
+     * Log information about enabled feature flags.
+     */
+    private void checkFeatureFlags() {
+        List<Feature> enabledFeatures = FeatureFlags
+                .get(getParentConfiguration().getContext()).getFeatures()
+                .stream().filter(f -> f.isEnabled())
+                .collect(Collectors.toList());
+        if (!enabledFeatures.isEmpty()) {
+            info.add("\nThe following feature previews are enabled:");
+            enabledFeatures.forEach(feature -> {
+                info.add("- " + feature.getTitle());
+            });
+
+            info.add("\n");
+        }
+    }
+
+    /**
+     * Checks if request timing data should be provided to the client.
+     */
+    private void checkRequestTiming() {
+        requestTiming = getBooleanProperty(
+                InitParameters.SERVLET_PARAMETER_REQUEST_TIMING,
+                !productionMode);
+    }
+
+    /**
+     * Log a warning if cross-site request forgery protection is disabled.
+     */
+    private void checkXsrfProtection(boolean loggWarning) {
+        if (isOwnProperty(
+                InitParameters.SERVLET_PARAMETER_DISABLE_XSRF_PROTECTION)) {
+            xsrfProtectionEnabled = !getBooleanProperty(
+                    InitParameters.SERVLET_PARAMETER_DISABLE_XSRF_PROTECTION,
+                    false);
+        } else {
+            xsrfProtectionEnabled = getParentConfiguration()
+                    .isXsrfProtectionEnabled();
+        }
+        if (!xsrfProtectionEnabled && loggWarning) {
+            warnings.add(WARNING_XSRF_PROTECTION_DISABLED);
+        }
+    }
+
+    private void checkHeartbeatInterval() {
+        try {
+            heartbeatInterval = getApplicationOrSystemProperty(
+                    InitParameters.SERVLET_PARAMETER_HEARTBEAT_INTERVAL,
+                    DEFAULT_HEARTBEAT_INTERVAL, Integer::parseInt);
+        } catch (NumberFormatException e) {
+            warnings.add(WARNING_HEARTBEAT_INTERVAL_NOT_NUMERIC);
+            heartbeatInterval = DEFAULT_HEARTBEAT_INTERVAL;
+        }
+    }
+
+    private void checkMaxRequestBodySize() {
+        try {
+            maxRequestBodySize = getApplicationOrSystemProperty(
+                    InitParameters.SERVLET_PARAMETER_MAX_REQUEST_BODY_SIZE,
+                    DEFAULT_MAX_REQUEST_BODY_SIZE, Long::parseLong);
+        } catch (NumberFormatException e) {
+            String warning = "WARNING: maxRequestBodySize has been set to an illegal value."
+                    + " The default of " + DEFAULT_MAX_REQUEST_BODY_SIZE
+                    + " characters will be used.";
+            warnings.add(warning);
+            maxRequestBodySize = DEFAULT_MAX_REQUEST_BODY_SIZE;
+        }
+    }
+
+    private void checkMaxMessageSuspendTimeout() {
+        try {
+            maxMessageSuspendTimeout = getApplicationOrSystemProperty(
+                    InitParameters.SERVLET_PARAMETER_MAX_MESSAGE_SUSPEND_TIMEOUT,
+                    DEFAULT_MAX_MESSAGE_SUSPEND_TIMEOUT, Integer::parseInt);
+        } catch (NumberFormatException e) {
+            String warning = "WARNING: maxMessageSuspendInterval has been set to an illegal value."
+                    + "The default of " + DEFAULT_MAX_MESSAGE_SUSPEND_TIMEOUT
+                    + " ms will be used.";
+            warnings.add(warning);
+            maxMessageSuspendTimeout = DEFAULT_MAX_MESSAGE_SUSPEND_TIMEOUT;
+        }
+    }
+
+    private void checkWebComponentDisconnectTimeout() {
+        try {
+            webComponentDisconnect = getApplicationOrSystemProperty(
+                    InitParameters.SERVLET_PARAMETER_WEB_COMPONENT_DISCONNECT,
+                    DEFAULT_WEB_COMPONENT_DISCONNECT, Integer::parseInt);
+
+        } catch (NumberFormatException e) {
+            warnings.add(WARNING_HEARTBEAT_INTERVAL_NOT_NUMERIC);
+            webComponentDisconnect = DEFAULT_WEB_COMPONENT_DISCONNECT;
+        }
+    }
+
+    private void checkCloseIdleSessions() {
+        closeIdleSessions = getBooleanProperty(
+                InitParameters.SERVLET_PARAMETER_CLOSE_IDLE_SESSIONS,
+                DEFAULT_CLOSE_IDLE_SESSIONS);
+    }
+
+    private void checkPushMode() {
+        try {
+            pushMode = getApplicationOrSystemProperty(
+                    InitParameters.SERVLET_PARAMETER_PUSH_MODE,
+                    PushMode.DISABLED, value -> parseEnum(PushMode.class,
+                            InitParameters.SERVLET_PARAMETER_PUSH_MODE, value));
+        } catch (IllegalArgumentException e) {
+            warnings.add(WARNING_PUSH_MODE_NOT_RECOGNIZED);
+            pushMode = PushMode.DISABLED;
+        }
+    }
+
+    private void checkSessionLockCheckStrategy() {
+        try {
+            sessionLockCheckStrategy = getApplicationOrSystemProperty(
+                    InitParameters.SERVLET_PARAMETER_SESSION_LOCK_CHECK_STRATEGY,
+                    SessionLockCheckStrategy.ASSERT,
+                    value -> parseEnum(SessionLockCheckStrategy.class,
+                            InitParameters.SERVLET_PARAMETER_SESSION_LOCK_CHECK_STRATEGY,
+                            value));
+        } catch (IllegalArgumentException e) {
+            warnings.add(WARNING_SESSION_LOCK_CHECK_STRATEGY_NOT_RECOGNIZED);
+            sessionLockCheckStrategy = SessionLockCheckStrategy.ASSERT;
+        }
+    }
+
+    private void checkCspMode() {
+        cspMode = getApplicationOrSystemProperty(InitParameters.CSP,
+                CspMode.OFF,
+                value -> parseEnum(CspMode.class, InitParameters.CSP, value));
+    }
+
+    /**
+     * Parses a property value into a constant of the given enum, ignoring case.
+     *
+     * @param enumType
+     *            the enum type to parse the value into
+     * @param propertyName
+     *            the name of the property, used in the error message
+     * @param value
+     *            the property value to parse
+     * @param <E>
+     *            the enum type
+     * @return the enum constant whose name matches the value
+     * @throws IllegalArgumentException
+     *             if no constant of the enum matches the value
+     */
+    private static <E extends Enum<E>> E parseEnum(Class<E> enumType,
+            String propertyName, String value) {
+        E[] constants = enumType.getEnumConstants();
+        return Arrays.stream(constants)
+                .filter(constant -> constant.name().equalsIgnoreCase(value))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException(String.format(
+                        "Property named '%s' contains unrecognized value '%s'. The permitted values are %s (case-insensitive).",
+                        propertyName, value,
+                        Arrays.stream(constants)
+                                .map(constant -> "'" + constant.name()
+                                        .toLowerCase(Locale.ENGLISH) + "'")
+                                .collect(Collectors.joining(", ")))));
+    }
+
+    private void checkPushServletMapping() {
+        pushServletMapping = getStringProperty(
+                InitParameters.SERVLET_PARAMETER_PUSH_SERVLET_MAPPING, "");
+    }
+
+    private void checkSyncIdCheck() {
+        syncIdCheck = getBooleanProperty(
+                InitParameters.SERVLET_PARAMETER_SYNC_ID_CHECK,
+                DEFAULT_SYNC_ID_CHECK);
+    }
+
+    private void checkSendUrlsAsParameters() {
+        sendUrlsAsParameters = getBooleanProperty(
+                InitParameters.SERVLET_PARAMETER_SEND_URLS_AS_PARAMETERS,
+                DEFAULT_SEND_URLS_AS_PARAMETERS);
+    }
+
+    private void checkFrontendHotdeploy() {
+        if (isProductionMode()) {
+            frontendHotdeploy = false;
+        } else {
+            frontendHotdeploy = getBooleanProperty(
+                    InitParameters.FRONTEND_HOTDEPLOY,
+                    automaticHotdeployDefault());
+        }
+    }
+
+    private boolean automaticHotdeployDefault() {
+        return Mode.DEVELOPMENT_FRONTEND_LIVERELOAD
+                .equals(getParentConfiguration().getMode())
+                || FrontendUtils.isHillaUsed(getFrontendFolder());
+    }
+
+}

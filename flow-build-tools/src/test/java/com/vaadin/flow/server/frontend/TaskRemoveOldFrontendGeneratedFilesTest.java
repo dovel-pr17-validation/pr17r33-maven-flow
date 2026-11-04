@@ -1,0 +1,288 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.frontend;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.apache.commons.io.file.AccumulatorPathVisitor;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import com.vaadin.flow.internal.FrontendUtils;
+import com.vaadin.tests.util.MockOptions;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+
+class TaskRemoveOldFrontendGeneratedFilesTest {
+
+    @TempDir
+    File temporaryFolder;
+    private File generatedFolder;
+    private Options options;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        options = new MockOptions(temporaryFolder);
+        generatedFolder = options.getFrontendGeneratedFolder();
+    }
+
+    @Test
+    void execute_shouldDeleteNotGenerateFrontedFiles() throws Exception {
+        TaskRemoveOldFrontendGeneratedFiles task = new TaskRemoveOldFrontendGeneratedFiles(
+                options);
+
+        GeneratedFilesSupport support = new GeneratedFilesSupport();
+        File file1 = new File(generatedFolder, "test.txt");
+        File file2 = generatedFolder.toPath()
+                .resolve(Path.of("a", "b", "c.txt")).toFile();
+        File file3 = generatedFolder.toPath()
+                .resolve(Path.of("a", "z", "n.txt")).toFile();
+        File file4 = generatedFolder.toPath()
+                .resolve(Path.of("a", "z", "y.txt")).toFile();
+
+        support.writeIfChanged(file1, "TEST");
+        support.writeIfChanged(file2, "TEST");
+        support.writeIfChanged(file3, "TEST");
+        support.writeIfChanged(file4, "TEST");
+
+        task.setGeneratedFileSupport(support);
+        task.execute();
+        assertOnlyExpectedGeneratedFilesExists(file1, file2, file3, file4);
+
+        task = new TaskRemoveOldFrontendGeneratedFiles(options);
+        support = new GeneratedFilesSupport();
+        support.writeIfChanged(file2, "TEST");
+        support.writeIfChanged(file4, "TEST");
+        task.setGeneratedFileSupport(support);
+        task.execute();
+        assertOnlyExpectedGeneratedFilesExists(file2, file4);
+    }
+
+    @Test
+    void execute_existingFiles_nothingTracked_deleteAll() throws Exception {
+        for (File file : Set.of(new File(generatedFolder, "test.txt"),
+                generatedFolder.toPath().resolve(Path.of("a", "b", "c.txt"))
+                        .toFile(),
+                generatedFolder.toPath().resolve(Path.of("a", "z", "n.txt"))
+                        .toFile(),
+                generatedFolder.toPath().resolve(Path.of("a", "z", "y.txt"))
+                        .toFile())) {
+            file.getParentFile().mkdirs();
+            Files.writeString(file.toPath(), "TEST");
+        }
+
+        TaskRemoveOldFrontendGeneratedFiles task = new TaskRemoveOldFrontendGeneratedFiles(
+                options);
+        task.setGeneratedFileSupport(new GeneratedFilesSupport());
+        task.execute();
+        assertFalse(generatedFolder.exists(),
+                "Generated folder has not been deleted");
+    }
+
+    @Test
+    void execute_frontendGeneratedFolderNotExistsAtTaskCreation_nothingIsDeleted()
+            throws Exception {
+        Files.deleteIfExists(generatedFolder.toPath());
+        TaskRemoveOldFrontendGeneratedFiles task = new TaskRemoveOldFrontendGeneratedFiles(
+                options);
+
+        generatedFolder.mkdirs();
+        Set<File> files = Set.of(new File(generatedFolder, "test.txt"),
+                generatedFolder.toPath().resolve(Path.of("a", "b", "c.txt"))
+                        .toFile(),
+                generatedFolder.toPath().resolve(Path.of("a", "z", "n.txt"))
+                        .toFile(),
+                generatedFolder.toPath().resolve(Path.of("a", "z", "y.txt"))
+                        .toFile());
+        for (File file : files) {
+            file.getParentFile().mkdirs();
+            Files.writeString(file.toPath(), "TEST");
+        }
+
+        task.setGeneratedFileSupport(new GeneratedFilesSupport());
+        task.execute();
+        assertOnlyExpectedGeneratedFilesExists(files.toArray(File[]::new));
+    }
+
+    @Test
+    void execute_missingGeneratedFileSupport_nothingIsDeleted()
+            throws Exception {
+
+        Set<File> files = Set.of(new File(generatedFolder, "test.txt"),
+                generatedFolder.toPath().resolve(Path.of("a", "b", "c.txt"))
+                        .toFile(),
+                generatedFolder.toPath().resolve(Path.of("a", "z", "n.txt"))
+                        .toFile(),
+                generatedFolder.toPath().resolve(Path.of("a", "z", "y.txt"))
+                        .toFile());
+        for (File file : files) {
+            file.getParentFile().mkdirs();
+            Files.writeString(file.toPath(), "TEST");
+        }
+        TaskRemoveOldFrontendGeneratedFiles task = new TaskRemoveOldFrontendGeneratedFiles(
+                options);
+        task.setGeneratedFileSupport(null);
+        task.execute();
+        assertOnlyExpectedGeneratedFilesExists(files.toArray(File[]::new));
+
+    }
+
+    @Test
+    void execute_knownFiles_notDeleted() throws Exception {
+        Path hillaGeneratedFilesIndex = generatedFolder.toPath()
+                .resolve("generated-file-list.txt");
+
+        Set<File> knownFiles = Set.of(generatedFolder.toPath()
+                .resolve(Path.of("flow", FrontendUtils.IMPORTS_NAME)).toFile(),
+                generatedFolder.toPath()
+                        .resolve(Path.of("flow",
+                                FrontendUtils.IMPORTS_D_TS_NAME))
+                        .toFile(),
+                generatedFolder.toPath()
+                        .resolve(Path.of("flow",
+                                FrontendUtils.IMPORTS_WEB_COMPONENT_NAME))
+                        .toFile(),
+                new File(generatedFolder, FrontendUtils.ROUTES_TSX),
+                new File(generatedFolder, FrontendUtils.ROUTES_TS),
+                generatedFolder.toPath().resolve(Path.of("flow", "Flow.tsx"))
+                        .toFile(),
+                new File(generatedFolder,
+                        TaskGenerateReactFiles.JSX_TRANSFORM_DEV_RUNTIME),
+                new File(generatedFolder,
+                        TaskGenerateReactFiles.JSX_TRANSFORM_RUNTIME),
+                new File(generatedFolder,
+                        TaskGenerateReactFiles.JSX_TRANSFORM_INDEX),
+                new File(generatedFolder,
+                        FrontendUtils.APP_SHELL_IMPORTS_D_TS_NAME),
+                new File(generatedFolder, FrontendUtils.APP_SHELL_IMPORTS_NAME),
+                new File(generatedFolder, "file-routes.ts"),
+                new File(generatedFolder, "file-routes.json"),
+                new File(generatedFolder, "css.generated.js"),
+                new File(generatedFolder, "css.generated.d.ts"),
+                hillaGeneratedFilesIndex.toFile(),
+                new File(generatedFolder, "hilla-1.js"),
+                new File(generatedFolder, "hilla-2.js"),
+                generatedFolder.toPath().resolve(Path.of("sub", "hilla-3.js"))
+                        .toFile());
+
+        for (File file : knownFiles) {
+            file.getParentFile().mkdirs();
+            Files.writeString(file.toPath(), "TEST");
+        }
+        Files.writeString(hillaGeneratedFilesIndex, """
+                hilla-1.js
+                hilla-2.js
+                sub/hilla-3.js
+                """);
+
+        TaskRemoveOldFrontendGeneratedFiles task = new TaskRemoveOldFrontendGeneratedFiles(
+                options);
+        task.setGeneratedFileSupport(new GeneratedFilesSupport());
+        task.execute();
+
+        assertOnlyExpectedGeneratedFilesExists(knownFiles.toArray(File[]::new));
+    }
+
+    @Test
+    void execute_entriesInGeneratedFileList_notDeleted() throws Exception {
+        Set<File> generatedFiles = new HashSet<>(
+                Set.of(new File(generatedFolder, "test.txt"),
+                        generatedFolder.toPath()
+                                .resolve(Path.of("a", "b", "c.txt")).toFile(),
+                        generatedFolder.toPath()
+                                .resolve(Path.of("a", "z", "n.txt")).toFile(),
+                        generatedFolder.toPath()
+                                .resolve(Path.of("a", "z", "y.txt")).toFile()));
+        for (File file : generatedFiles) {
+            file.getParentFile().mkdirs();
+            Files.writeString(file.toPath(), "TEST");
+        }
+        File generatedFilesList = new File(generatedFolder,
+                "generated-file-list.txt");
+        Files.writeString(generatedFilesList.toPath(), generatedFiles.stream()
+                .map(file -> generatedFolder.toPath().relativize(file.toPath()))
+                .map(Path::toString)
+                .collect(Collectors.joining(System.lineSeparator())));
+        generatedFiles.add(generatedFilesList);
+
+        TaskRemoveOldFrontendGeneratedFiles task = new TaskRemoveOldFrontendGeneratedFiles(
+                options);
+        task.setGeneratedFileSupport(new GeneratedFilesSupport());
+        task.execute();
+
+        assertOnlyExpectedGeneratedFilesExists(
+                generatedFiles.toArray(File[]::new));
+    }
+
+    @Test
+    void execute_entriesInFlowGeneratedFilesList_notDeleted() throws Exception {
+        // Files generated only by a previous full generation run (e.g. dev
+        // server hot deploy) and recorded in the Flow manifest.
+        Set<File> devServerFiles = Set
+                .of(new File(generatedFolder, FrontendUtils.VITE_DEVMODE_TS),
+                        new File(generatedFolder, FrontendUtils.INDEX_TSX),
+                        new File(generatedFolder, "vaadin-react.tsx"),
+                        new File(generatedFolder, "layouts.json"),
+                        generatedFolder.toPath()
+                                .resolve(Path.of("flow", "ReactAdapter.tsx"))
+                                .toFile());
+        File staleFile = new File(generatedFolder, "stale.tsx");
+        for (File file : devServerFiles) {
+            file.getParentFile().mkdirs();
+            Files.writeString(file.toPath(), "TEST");
+        }
+        Files.writeString(staleFile.toPath(), "TEST");
+
+        File manifest = new File(generatedFolder,
+                FrontendUtils.GENERATED_FILES_LIST_NAME);
+        Files.writeString(manifest.toPath(), devServerFiles.stream()
+                .map(file -> generatedFolder.toPath().relativize(file.toPath()))
+                .map(Path::toString)
+                .collect(Collectors.joining(System.lineSeparator())));
+
+        TaskRemoveOldFrontendGeneratedFiles task = new TaskRemoveOldFrontendGeneratedFiles(
+                options);
+        task.setGeneratedFileSupport(new GeneratedFilesSupport());
+        task.execute();
+
+        Set<File> expected = new HashSet<>(devServerFiles);
+        expected.add(manifest);
+        assertOnlyExpectedGeneratedFilesExists(expected.toArray(File[]::new));
+    }
+
+    private void assertOnlyExpectedGeneratedFilesExists(File... expectedFiles)
+            throws IOException {
+        AccumulatorPathVisitor visitor = new AccumulatorPathVisitor();
+        Files.walkFileTree(generatedFolder.toPath(), visitor);
+        assertEquals(
+                Stream.of(expectedFiles).map(
+                        f -> generatedFolder.toPath().relativize(f.toPath()))
+                        .collect(Collectors.toSet()),
+                Set.copyOf(visitor.relativizeFiles(generatedFolder.toPath(),
+                        false, null)),
+                "Expect exactly currently generated files to exists");
+    }
+
+}

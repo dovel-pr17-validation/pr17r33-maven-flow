@@ -1,0 +1,130 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.data.binder;
+
+import java.util.Optional;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.component.HasElement;
+import com.vaadin.flow.component.HasValue;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.dom.ElementFactory;
+import com.vaadin.flow.server.VaadinContext;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.flow.server.startup.ApplicationConfiguration;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class DefaultBindingExceptionHandlerTest {
+
+    private DefaultBindingExceptionHandler handler = new DefaultBindingExceptionHandler();
+
+    abstract class TestComponent implements HasElement, HasValue {
+
+    }
+
+    private TestComponent component = mock(TestComponent.class);
+
+    private Element element = ElementFactory.createAnchor();
+
+    @BeforeEach
+    void setUp() {
+        when(component.getElement()).thenReturn(element);
+    }
+
+    @Test
+    void handleException_elementHasId_messageContainsIdReference() {
+        element.setProperty("id", "foo");
+        Optional<BindingException> result = handler.handleException(component,
+                new Exception());
+
+        String message = result.get().getMessage();
+        assertEquals(
+                "An exception has been thrown inside binding logic for the field element [id='foo']",
+                message);
+    }
+
+    @Test
+    void handleException_elementHasLabel_messageContainsLabelReference() {
+        element.setProperty("label", "foo");
+        Optional<BindingException> result = handler.handleException(component,
+                new Exception());
+
+        String message = result.get().getMessage();
+        assertEquals(
+                "An exception has been thrown inside binding logic for the field element [label='foo']",
+                message);
+    }
+
+    @Test
+    void handleException_elementHasNoLabelAndId_devMode_messageContainsPropertiesReference() {
+        UI ui = mockUI(false);
+        ui.getElement().appendChild(element);
+
+        element.setProperty("foo", "bar");
+        element.setAttribute("baz", "foo-bar");
+        Optional<BindingException> result = handler.handleException(component,
+                new Exception());
+
+        String message = result.get().getMessage();
+        assertEquals(
+                "An exception has been thrown inside binding logic for the field element [baz='foo-bar', foo='bar']",
+                message);
+    }
+
+    @Test
+    void handleException_elementHasNoLabelAndId_prodcutionMode_returnsEmpty() {
+        UI ui = mockUI(true);
+        ui.getElement().appendChild(element);
+
+        element.setProperty("foo", "bar");
+        element.setAttribute("baz", "foo-bar");
+        Optional<BindingException> result = handler.handleException(component,
+                new Exception());
+
+        assertFalse(result.isPresent());
+    }
+
+    private UI mockUI(boolean productionMode) {
+        UI ui = new UI();
+        VaadinService service = mock(VaadinService.class);
+        VaadinSession session = mock(VaadinSession.class);
+        ui.getInternals().setSession(session);
+
+        when(session.getService()).thenReturn(service);
+
+        VaadinContext context = mock(VaadinContext.class);
+        when(service.getContext()).thenReturn(context);
+
+        ApplicationConfiguration configuration = mock(
+                ApplicationConfiguration.class);
+        when(context.getAttribute(eq(ApplicationConfiguration.class), any()))
+                .thenReturn(configuration);
+        when(configuration.isProductionMode()).thenReturn(productionMode);
+
+        return ui;
+    }
+
+}

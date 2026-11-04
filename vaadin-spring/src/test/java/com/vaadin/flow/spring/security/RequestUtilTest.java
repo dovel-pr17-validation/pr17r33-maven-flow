@@ -1,0 +1,762 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.spring.security;
+
+import jakarta.annotation.security.PermitAll;
+import jakarta.annotation.security.RolesAllowed;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.web.servlet.ServletRegistrationBean;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.security.authentication.TestingAuthenticationToken;
+import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
+import org.springframework.test.context.ContextConfiguration;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.internal.AnnotationReader;
+import com.vaadin.flow.internal.hilla.FileRouterRequestUtil;
+import com.vaadin.flow.router.Route;
+import com.vaadin.flow.router.RouteData;
+import com.vaadin.flow.router.RouteParameters;
+import com.vaadin.flow.router.Router;
+import com.vaadin.flow.router.internal.NavigationRouteTarget;
+import com.vaadin.flow.router.internal.RouteTarget;
+import com.vaadin.flow.router.internal.RouteUtil;
+import com.vaadin.flow.server.HandlerHelper.RequestType;
+import com.vaadin.flow.server.MockVaadinContext;
+import com.vaadin.flow.server.RouteRegistry;
+import com.vaadin.flow.server.auth.AnonymousAllowed;
+import com.vaadin.flow.server.auth.NavigationAccessControl;
+import com.vaadin.flow.server.auth.NavigationContext;
+import com.vaadin.flow.server.auth.RoutePathAccessChecker;
+import com.vaadin.flow.shared.ApplicationConstants;
+import com.vaadin.flow.spring.SpringBootAutoConfiguration;
+import com.vaadin.flow.spring.SpringSecurityAutoConfiguration;
+import com.vaadin.flow.spring.SpringServlet;
+import com.vaadin.flow.spring.SpringVaadinServletService;
+import com.vaadin.flow.spring.VaadinConfigurationProperties;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(SpringExtension.class)
+@SpringBootTest()
+@ContextConfiguration(classes = { SpringBootAutoConfiguration.class,
+        SpringSecurityAutoConfiguration.class })
+class RequestUtilTest {
+
+    @Autowired
+    RequestUtil requestUtil;
+
+    @MockitoSpyBean
+    NavigationAccessControl accessControl;
+
+    @MockitoBean
+    VaadinConfigurationProperties vaadinConfigurationProperties;
+
+    @MockitoBean
+    private RoutePathAccessChecker accessPathChecker;
+
+    @MockitoBean
+    private ServletRegistrationBean<SpringServlet> springServletRegistration;
+
+    @MockitoBean
+    private FileRouterRequestUtil fileRouterRequestUtil;
+
+    @BeforeEach
+    void setUp() {
+        accessControl.setEnabled(true);
+        // Disable path checker
+        when(accessPathChecker.check(any()))
+                .then(i -> i.getArgument(0, NavigationContext.class).neutral());
+    }
+
+    @Test
+    void testRootRequest_init_standardMapping() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+
+        assertTrue(requestUtil.isFrameworkInternalRequest(
+                createRequest("", RequestType.INIT)));
+    }
+
+    @Test
+    void testRootRequest_other_standardMapping() {
+        // given(this.vaadinConfigurationProperties.getUrlMapping()).willReturn("Hello");
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        assertFalse(requestUtil
+                .isFrameworkInternalRequest(createRequest("", null)));
+    }
+
+    @Test
+    void testSubRequest_init_standardMapping() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        assertFalse(requestUtil.isFrameworkInternalRequest(
+                createRequest("/foo", RequestType.INIT)));
+    }
+
+    @Test
+    void testSubRequest_other_standardMapping() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        assertFalse(requestUtil
+                .isFrameworkInternalRequest(createRequest("/foo", null)));
+    }
+
+    @Test
+    void testRootRequest_init_customMapping() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/bar/*");
+        MockHttpServletRequest request = createRequest("/", RequestType.INIT);
+        request.setServletPath("/bar");
+        assertTrue(requestUtil.isFrameworkInternalRequest(request));
+
+        request = createRequest("", RequestType.INIT);
+        request.setServletPath("/bar");
+        assertTrue(requestUtil.isFrameworkInternalRequest(request));
+
+        request = createRequest(null, RequestType.INIT);
+        request.setServletPath("/bar");
+        assertTrue(requestUtil.isFrameworkInternalRequest(request));
+
+    }
+
+    @Test
+    void testRootRequest_other_customMapping() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/bar/*");
+        MockHttpServletRequest request = createRequest("/", null);
+        request.setServletPath("/bar");
+        assertFalse(requestUtil.isFrameworkInternalRequest(request));
+
+        request = createRequest("", null);
+        request.setServletPath("/bar");
+        assertFalse(requestUtil.isFrameworkInternalRequest(request));
+
+        request = createRequest(null, null);
+        request.setServletPath("/bar");
+        assertFalse(requestUtil.isFrameworkInternalRequest(request));
+    }
+
+    @Test
+    void testSubRequest_init_customMapping() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/bar/*");
+        MockHttpServletRequest request = createRequest("/foo",
+                RequestType.INIT);
+        request.setServletPath("/bar");
+        assertFalse(requestUtil.isFrameworkInternalRequest(request));
+    }
+
+    @Test
+    void testExternalRequest_init_customMapping() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/bar/*");
+        assertFalse(requestUtil.isFrameworkInternalRequest(
+                createRequest("/foo", RequestType.INIT)));
+    }
+
+    @Test
+    void testSubRequest_other_customMapping() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/bar/*");
+        MockHttpServletRequest request = createRequest("/foo", null);
+        request.setServletPath("/bar");
+        assertFalse(requestUtil.isFrameworkInternalRequest(request));
+    }
+
+    @Test
+    void testExternalRequest_other_customMapping() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/bar/*");
+        assertFalse(requestUtil
+                .isFrameworkInternalRequest(createRequest("/foo", null)));
+    }
+
+    @Route("")
+    @AnonymousAllowed
+    public static class PublicRootView extends Component {
+
+    }
+
+    @Route("other")
+    @AnonymousAllowed
+    public static class AnotherPublicView extends Component {
+
+    }
+
+    @Route("admin")
+    @RolesAllowed("admin")
+    public static class AdminView extends Component {
+
+    }
+
+    @Route("all")
+    @PermitAll
+    public static class AllUsersView extends Component {
+
+    }
+
+    @Test
+    void testAnonymousRouteRequest_rootMappedServlet_publicView() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        SpringServlet servlet = setupMockServlet();
+        addRoute(servlet, PublicRootView.class);
+        addRoute(servlet, AnotherPublicView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/");
+        assertTrue(requestUtil.isAnonymousRoute(request));
+
+        request = createRequest("other");
+        request.setServletPath("/");
+        assertTrue(requestUtil.isAnonymousRoute(request));
+    }
+
+    @Test
+    void testAnonymousRouteRequest_rootMappedServlet_notAView() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        SpringServlet servlet = setupMockServlet();
+        addRoute(servlet, PublicRootView.class);
+        addRoute(servlet, AnotherPublicView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/bar");
+        assertFalse(requestUtil.isAnonymousRoute(request));
+
+        request = createRequest("other");
+        request.setServletPath("/bar");
+        assertFalse(requestUtil.isAnonymousRoute(request));
+    }
+
+    @Test
+    void testAnonymousRouteRequest_rootMappedServlet_privateView() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        addRoute(setupMockServlet(), AdminView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/admin");
+        assertFalse(requestUtil.isAnonymousRoute(request));
+    }
+
+    @Test
+    void testAnonymousRouteRequest_checkersGetPublicRouteCheckContext() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        addRoute(setupMockServlet(), AdminView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/admin");
+        assertFalse(requestUtil.isAnonymousRoute(request));
+
+        ArgumentCaptor<NavigationContext> captor = ArgumentCaptor
+                .forClass(NavigationContext.class);
+        verify(accessControl).checkAccess(captor.capture(), anyBoolean());
+        NavigationContext context = captor.getValue();
+        assertEquals(NavigationContext.Phase.PUBLIC_ROUTE_CHECK,
+                context.getPhase());
+        assertNull(context.getPrincipal());
+        assertFalse(context.hasRole("admin"));
+    }
+
+    @Test
+    void testAnonymousRouteRequest_fooMappedServlet_publicView() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/foo/*");
+        SpringServlet servlet = setupMockServlet();
+        addRoute(servlet, PublicRootView.class);
+        addRoute(servlet, AnotherPublicView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/foo/");
+        assertTrue(requestUtil.isAnonymousRoute(request));
+
+        request = createRequest("");
+        request.setServletPath("/foo/");
+        assertTrue(requestUtil.isAnonymousRoute(request));
+
+        request = createRequest("/");
+        request.setServletPath("/foo/");
+        assertTrue(requestUtil.isAnonymousRoute(request));
+
+        request = createRequest("other");
+        request.setServletPath("/foo/");
+        assertTrue(requestUtil.isAnonymousRoute(request));
+    }
+
+    @Test
+    void testAnonymousRouteRequest_fooMappedServlet_notAView() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/foo/*");
+        SpringServlet servlet = setupMockServlet();
+        addRoute(servlet, PublicRootView.class);
+        addRoute(servlet, AnotherPublicView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/foo/bar");
+        assertFalse(requestUtil.isAnonymousRoute(request));
+
+        request = createRequest("other");
+        request.setServletPath("/foo/bar");
+        assertFalse(requestUtil.isAnonymousRoute(request));
+    }
+
+    @Test
+    void testAnonymousRouteRequest_fooMappedServlet_privateView() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/foo/*");
+        addRoute(setupMockServlet(), AdminView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/foo/admin");
+        assertFalse(requestUtil.isAnonymousRoute(request));
+    }
+
+    @Test
+    void testAnonymousRouteRequest_fooMappedServlet_publicViewPathOutsideServlet() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/foo/*");
+        SpringServlet servlet = setupMockServlet();
+        addRoute(servlet, PublicRootView.class);
+        addRoute(servlet, AnotherPublicView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/");
+        assertFalse(requestUtil.isAnonymousRoute(request));
+        request = createRequest("other");
+        request.setServletPath("/");
+        assertFalse(requestUtil.isAnonymousRoute(request));
+    }
+
+    @Test
+    void testRouteRequest_servletNotInited() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        setupMockServlet(false);
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/");
+        assertFalse(requestUtil.isAnonymousRoute(request));
+        request = createRequest("other");
+        request.setServletPath("/");
+        assertFalse(requestUtil.isAnonymousRoute(request));
+    }
+
+    @Test
+    void testApplyUrlMapping_fooMappedServlet_prependMapping() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/foo/*");
+        assertEquals("/foo/bar", requestUtil.applyUrlMapping("bar"));
+        assertEquals("/foo/bar", requestUtil.applyUrlMapping("/bar"));
+        assertEquals("/foo/bar/", requestUtil.applyUrlMapping("bar/"));
+        assertEquals("/foo/bar/", requestUtil.applyUrlMapping("/bar/"));
+        assertEquals("/foo/bar/baz", requestUtil.applyUrlMapping("bar/baz"));
+        assertEquals("/foo/bar/baz", requestUtil.applyUrlMapping("/bar/baz"));
+        assertEquals("/foo/", requestUtil.applyUrlMapping(""));
+        assertEquals("/foo/", requestUtil.applyUrlMapping("/"));
+        assertEquals("/foo/", requestUtil.applyUrlMapping(null));
+    }
+
+    @Test
+    void testApplyUrlMapping_rootMappedServlet_prependMapping() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        assertEquals("/bar", requestUtil.applyUrlMapping("bar"));
+        assertEquals("/bar", requestUtil.applyUrlMapping("/bar"));
+        assertEquals("/bar/", requestUtil.applyUrlMapping("bar/"));
+        assertEquals("/bar/", requestUtil.applyUrlMapping("/bar/"));
+        assertEquals("/bar/baz", requestUtil.applyUrlMapping("bar/baz"));
+        assertEquals("/bar/baz", requestUtil.applyUrlMapping("/bar/baz"));
+        assertEquals("/", requestUtil.applyUrlMapping(""));
+        assertEquals("/", requestUtil.applyUrlMapping("/"));
+        assertEquals("/", requestUtil.applyUrlMapping(null));
+    }
+
+    @Test
+    void testApplyUrlMapping_nullMappedServlet_prependMapping() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn(null);
+        assertEquals("/bar", requestUtil.applyUrlMapping("bar"));
+        assertEquals("/bar", requestUtil.applyUrlMapping("/bar"));
+        assertEquals("/bar/", requestUtil.applyUrlMapping("bar/"));
+        assertEquals("/bar/", requestUtil.applyUrlMapping("/bar/"));
+        assertEquals("/bar/baz", requestUtil.applyUrlMapping("bar/baz"));
+        assertEquals("/bar/baz", requestUtil.applyUrlMapping("/bar/baz"));
+        assertEquals("/", requestUtil.applyUrlMapping(""));
+        assertEquals("/", requestUtil.applyUrlMapping("/"));
+        assertEquals("/", requestUtil.applyUrlMapping(null));
+    }
+
+    @Test
+    void testAnonymousRouteRequest_accessControlDisable_notAnonymous() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        SpringServlet servlet = setupMockServlet();
+        addRoute(servlet, AnotherPublicView.class);
+        addRoute(servlet, AdminView.class);
+
+        MockHttpServletRequest request = createRequest("admin");
+        request.setServletPath("/");
+        assertFalse(requestUtil.isAnonymousRoute(request));
+
+        request = createRequest("other");
+        request.setServletPath("/");
+        assertTrue(requestUtil.isAnonymousRoute(request));
+
+        accessControl.setEnabled(false);
+        try {
+            request = createRequest("admin");
+            request.setServletPath("/");
+            assertFalse(requestUtil.isAnonymousRoute(request));
+
+            request = createRequest("other");
+            request.setServletPath("/");
+            assertFalse(requestUtil.isAnonymousRoute(request));
+        } finally {
+            accessControl.setEnabled(true);
+        }
+    }
+
+    @Test
+    void testFlowRoute_rootMappedServlet_publicView() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        SpringServlet servlet = setupMockServlet();
+        addRoute(servlet, PublicRootView.class);
+        addRoute(servlet, AnotherPublicView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/");
+        assertTrue(requestUtil.isSecuredFlowRoute(request));
+
+        request = createRequest("other");
+        request.setServletPath("/");
+        assertTrue(requestUtil.isSecuredFlowRoute(request));
+    }
+
+    @Test
+    void testFlowRoute_rootMappedServlet_notAView() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        SpringServlet servlet = setupMockServlet();
+        addRoute(servlet, PublicRootView.class);
+        addRoute(servlet, AnotherPublicView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/bar");
+        assertFalse(requestUtil.isSecuredFlowRoute(request));
+
+        request = createRequest("other");
+        request.setServletPath("/bar");
+        assertFalse(requestUtil.isSecuredFlowRoute(request));
+    }
+
+    @Test
+    void testFlowRoute_rootMappedServlet_privateView() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        SpringServlet servlet = setupMockServlet();
+        addRoute(servlet, AdminView.class);
+        addRoute(servlet, AllUsersView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/admin");
+        assertTrue(requestUtil.isSecuredFlowRoute(request));
+
+        request = createRequest(null);
+        request.setServletPath("/all");
+        assertTrue(requestUtil.isSecuredFlowRoute(request));
+    }
+
+    @Test
+    void testFlowRoute_fooMappedServlet_publicView() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/foo/*");
+        SpringServlet servlet = setupMockServlet();
+        addRoute(servlet, PublicRootView.class);
+        addRoute(servlet, AnotherPublicView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/foo/");
+        assertTrue(requestUtil.isSecuredFlowRoute(request));
+
+        request = createRequest("");
+        request.setServletPath("/foo/");
+        assertTrue(requestUtil.isSecuredFlowRoute(request));
+
+        request = createRequest("/");
+        request.setServletPath("/foo/");
+        assertTrue(requestUtil.isSecuredFlowRoute(request));
+
+        request = createRequest("other");
+        request.setServletPath("/foo/");
+        assertTrue(requestUtil.isSecuredFlowRoute(request));
+    }
+
+    @Test
+    void testFlowRoute_fooMappedServlet_notAView() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/foo/*");
+        SpringServlet servlet = setupMockServlet();
+        addRoute(servlet, PublicRootView.class);
+        addRoute(servlet, AnotherPublicView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/foo/bar");
+        assertFalse(requestUtil.isSecuredFlowRoute(request));
+
+        request = createRequest("other");
+        request.setServletPath("/foo/bar");
+        assertFalse(requestUtil.isSecuredFlowRoute(request));
+    }
+
+    @Test
+    void testFlowRoute_fooMappedServlet_privateView() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/foo/*");
+        SpringServlet servlet = setupMockServlet();
+        addRoute(servlet, AdminView.class);
+        addRoute(servlet, AllUsersView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/foo/admin");
+        assertTrue(requestUtil.isSecuredFlowRoute(request));
+
+        request = createRequest(null);
+        request.setServletPath("/foo/all");
+        assertTrue(requestUtil.isSecuredFlowRoute(request));
+    }
+
+    @Test
+    void testFlowRoute_fooMappedServlet_publicViewPathOutsideServlet() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/foo/*");
+        SpringServlet servlet = setupMockServlet();
+        addRoute(servlet, PublicRootView.class);
+        addRoute(servlet, AnotherPublicView.class);
+
+        MockHttpServletRequest request = createRequest(null);
+        request.setServletPath("/");
+        assertFalse(requestUtil.isSecuredFlowRoute(request));
+        request = createRequest("other");
+        request.setServletPath("/");
+        assertFalse(requestUtil.isSecuredFlowRoute(request));
+    }
+
+    private SpringServlet setupMockServlet() {
+        return setupMockServlet(true);
+    }
+
+    private SpringServlet setupMockServlet(boolean inited) {
+        SpringServlet servlet = mock(SpringServlet.class);
+        SpringVaadinServletService service = mock(
+                SpringVaadinServletService.class);
+        Router router = mock(Router.class);
+        RouteRegistry routeRegistry = mock(RouteRegistry.class);
+        DeploymentConfiguration deploymentConfiguration = mock(
+                DeploymentConfiguration.class);
+
+        when(springServletRegistration.getServlet()).thenReturn(servlet);
+        if (inited) {
+            when(servlet.getService()).thenReturn(service);
+        }
+        when(service.getRouter()).thenReturn(router);
+        when(service.getDeploymentConfiguration())
+                .thenReturn(deploymentConfiguration);
+        when(router.getRegistry()).thenReturn(routeRegistry);
+        return servlet;
+    }
+
+    @SafeVarargs
+    private void registerParentLayout(SpringServlet servlet,
+            Class<? extends Component>... views) {
+        List<RouteData> routeDataList = new ArrayList<>();
+        for (Class<? extends Component> view : views) {
+            Optional<Route> route = AnnotationReader.getAnnotationFor(view,
+                    Route.class);
+
+            if (route.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "Unable find a @Route annotation");
+            }
+
+            if (route.get().layout() != UI.class) {
+                // supports only one
+                RouteData routeData = mock(RouteData.class);
+                when(routeData.getNavigationTarget()).thenReturn((Class) view);
+                when(routeData.getParentLayouts())
+                        .thenReturn(List.of(route.get().layout()));
+                routeDataList.add(routeData);
+            }
+        }
+        when(servlet.getService().getRouter().getRegistry()
+                .getRegisteredRoutes()).thenReturn(routeDataList);
+    }
+
+    private void addRoute(SpringServlet servlet,
+            Class<? extends Component> view) {
+
+        Optional<Route> route = AnnotationReader.getAnnotationFor(view,
+                Route.class);
+
+        if (!route.isPresent()) {
+            throw new IllegalArgumentException(
+                    "Unable find a @Route annotation");
+        }
+
+        String path = RouteUtil.getRoutePath(new MockVaadinContext(), view);
+        RouteRegistry routeRegistry = servlet.getService().getRouter()
+                .getRegistry();
+        RouteTarget publicRouteTarget = mock(RouteTarget.class);
+        NavigationRouteTarget navigationTarget = mock(
+                NavigationRouteTarget.class);
+
+        when(routeRegistry.getNavigationRouteTarget(path))
+                .thenReturn(navigationTarget);
+        when(navigationTarget.getRouteTarget()).thenReturn(publicRouteTarget);
+        when(navigationTarget.getRouteParameters())
+                .thenReturn(RouteParameters.empty());
+
+        when(publicRouteTarget.getTarget()).thenReturn((Class) view);
+
+    }
+
+    static MockHttpServletRequest createRequest(String pathInfo) {
+        return createRequest(pathInfo, null);
+    }
+
+    static MockHttpServletRequest createRequest(String pathInfo,
+            RequestType type) {
+        return createRequest(pathInfo, type, Collections.emptyMap());
+    }
+
+    static MockHttpServletRequest createRequest(String pathInfo,
+            RequestType type, Map<String, String> headers) {
+        String uri = (pathInfo == null ? "/" : pathInfo);
+        MockHttpServletRequest r = new MockHttpServletRequest("GET", uri);
+        r.setPathInfo(pathInfo);
+        if (type != null) {
+            r.setParameter(ApplicationConstants.REQUEST_TYPE_PARAMETER,
+                    type.getIdentifier());
+        }
+        headers.forEach((key, value) -> r.addHeader(key, value));
+
+        return r;
+    }
+
+    @Test
+    void testGetUrlMapping_fooMappedServlet_returnsMappingValue() {
+        when(vaadinConfigurationProperties.getUrlMapping())
+                .thenReturn("/foo/*");
+        assertEquals("/foo/*", requestUtil.getUrlMapping());
+    }
+
+    @Test
+    void testGetUrlMapping_rootMappedServlet_returnsMappingValue() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn("/*");
+        assertEquals("/*", requestUtil.getUrlMapping());
+    }
+
+    @Test
+    void testGetUrlMapping_nullMapping_returnsNull() {
+        when(vaadinConfigurationProperties.getUrlMapping()).thenReturn(null);
+        assertNull(requestUtil.getUrlMapping());
+    }
+
+    @Test
+    void isAnonymousHillaRoute_matchingRequest_returnsTrue() {
+        MockHttpServletRequest request = createRequest("/hilla", null);
+        when(fileRouterRequestUtil.isAnonymousRoute(request)).thenReturn(true);
+        assertTrue(requestUtil.isAnonymousHillaRoute(request));
+    }
+
+    @Test
+    void isAnonymousHillaRoute_nonMatchingRequest_returnsFalse() {
+        MockHttpServletRequest request = createRequest("/hilla", null);
+        when(fileRouterRequestUtil.isAnonymousRoute(request)).thenReturn(false);
+        assertFalse(requestUtil.isAnonymousHillaRoute(request));
+    }
+
+    @Test
+    void isSecuredHillaRoute_matchingRequest_returnsTrue() {
+        MockHttpServletRequest request = createRequest("/hilla", null);
+        when(fileRouterRequestUtil.isSecuredRoute(request)).thenReturn(true);
+        assertTrue(requestUtil.isSecuredHillaRoute(request));
+    }
+
+    @Test
+    void isSecuredHillaRoute_nonMatchingRequest_returnsFalse() {
+        MockHttpServletRequest request = createRequest("/hilla", null);
+        when(fileRouterRequestUtil.isSecuredRoute(request)).thenReturn(false);
+        assertFalse(requestUtil.isSecuredHillaRoute(request));
+    }
+
+    @Test
+    void authorizeHillaRoute_unauthenticatedRequest_notGranted() {
+        MockHttpServletRequest request = createRequest("/hilla", null);
+        when(fileRouterRequestUtil.isSecuredRoute(request)).thenReturn(true);
+        var authorizationResult = requestUtil.authorizeHillaRoute(() -> null,
+                new RequestAuthorizationContext(request));
+        assertFalse(authorizationResult.isGranted());
+    }
+
+    @Test
+    void authorizeHillaRoute_authenticatedRequest_granted() {
+        MockHttpServletRequest request = createRequest("/hilla", null);
+        when(fileRouterRequestUtil.isSecuredRoute(request)).thenReturn(true);
+        var authorizationResult = requestUtil.authorizeHillaRoute(
+                () -> new TestingAuthenticationToken("user", "pass", "foo"),
+                new RequestAuthorizationContext(request));
+        assertTrue(authorizationResult.isGranted());
+    }
+
+    @Test
+    void authorizeHillaRoute_hasAllowedRole_granted() {
+        MockHttpServletRequest request = createRequest("/hilla", null);
+        when(fileRouterRequestUtil.isSecuredRoute(request)).thenReturn(true);
+        when(fileRouterRequestUtil.getAllowedAuthorities(request))
+                .thenReturn(Set.of("foo"));
+        var authorizationResult = requestUtil.authorizeHillaRoute(
+                () -> new TestingAuthenticationToken("user", "pass", "foo"),
+                new RequestAuthorizationContext(request));
+        assertTrue(authorizationResult.isGranted());
+    }
+
+    @Test
+    void authorizeHillaRoute_missingAllowedRole_notGranted() {
+        MockHttpServletRequest request = createRequest("/hilla", null);
+        when(fileRouterRequestUtil.isSecuredRoute(request)).thenReturn(true);
+        when(fileRouterRequestUtil.getAllowedAuthorities(request))
+                .thenReturn(Set.of("bar"));
+        var authorizationResult = requestUtil.authorizeHillaRoute(
+                () -> new TestingAuthenticationToken("user", "pass", "foo"),
+                new RequestAuthorizationContext(request));
+        assertFalse(authorizationResult.isGranted());
+    }
+}

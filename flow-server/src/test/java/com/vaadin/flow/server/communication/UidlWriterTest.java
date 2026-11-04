@@ -1,0 +1,881 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.communication;
+
+import jakarta.servlet.http.HttpServletRequest;
+
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.HasComponents;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.UITest;
+import com.vaadin.flow.component.dependency.JavaScript;
+import com.vaadin.flow.component.dependency.StyleSheet;
+import com.vaadin.flow.component.dependency.Uses;
+import com.vaadin.flow.component.internal.PendingJavaScriptInvocation;
+import com.vaadin.flow.component.internal.UIInternals;
+import com.vaadin.flow.component.internal.UIInternals.JavaScriptInvocation;
+import com.vaadin.flow.di.Lookup;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.dom.ElementFactory;
+import com.vaadin.flow.dom.JsFunction;
+import com.vaadin.flow.internal.BundleUtils;
+import com.vaadin.flow.internal.ConstantPool;
+import com.vaadin.flow.internal.JacksonCodec;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.internal.StateTree;
+import com.vaadin.flow.js.JsCall;
+import com.vaadin.flow.js.JsDefinition;
+import com.vaadin.flow.js.JsExpression;
+import com.vaadin.flow.router.ParentLayout;
+import com.vaadin.flow.router.Route;
+import com.vaadin.flow.router.RouteConfiguration;
+import com.vaadin.flow.router.RoutePathProvider;
+import com.vaadin.flow.router.RouterLayout;
+import com.vaadin.flow.server.MockServletServiceSessionSetup;
+import com.vaadin.flow.server.MockVaadinContext.RoutePathProviderImpl;
+import com.vaadin.flow.server.VaadinServletContext;
+import com.vaadin.flow.server.VaadinServletRequest;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.flow.shared.ApplicationConstants;
+import com.vaadin.flow.shared.ui.Dependency;
+import com.vaadin.flow.shared.ui.LoadMode;
+
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.core.Is.is;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
+
+@Isolated
+class UidlWriterTest {
+    private static final String CSS_STYLE_NAME = Dependency.Type.STYLESHEET
+            .name();
+    private MockServletServiceSessionSetup mocks;
+
+    @JavaScript("UI-parent-JAVASCRIPT")
+    private static class ParentUI extends UI {
+    }
+
+    @JavaScript("UI-JAVASCRIPT")
+    private static class TestUI extends ParentUI {
+    }
+
+    @Tag("div")
+    @JavaScript("super-JAVASCRIPT")
+    @StyleSheet("super-STYLESHEET")
+    public static class SuperComponent extends Component {
+    }
+
+    public static class EmptyClassWithInterface extends SuperComponent
+            implements AnotherComponentInterface {
+    }
+
+    @JavaScript("JAVASCRIPT")
+    @StyleSheet("STYLESHEET")
+    public static class ActualComponent extends EmptyClassWithInterface
+            implements ComponentInterface {
+    }
+
+    @JavaScript("child1-JAVASCRIPT")
+    @JavaScript("child2-JAVASCRIPT")
+    @StyleSheet("child1-STYLESHEET")
+    @StyleSheet("child2-STYLESHEET")
+    public static class ChildComponent extends ActualComponent
+            implements ChildComponentInterface2 {
+    }
+
+    @JavaScript("interface-JAVASCRIPT")
+    @StyleSheet("interface-STYLESHEET")
+    public interface ComponentInterface {
+    }
+
+    @JavaScript("anotherinterface-JAVASCRIPT")
+    @StyleSheet("anotherinterface-STYLESHEET")
+    public interface AnotherComponentInterface {
+    }
+
+    @JavaScript("childinterface1-JAVASCRIPT")
+    @StyleSheet("childinterface1-STYLESHEET")
+    public interface ChildComponentInterface1 {
+    }
+
+    @JavaScript("childinterface2-JAVASCRIPT")
+    @StyleSheet("childinterface2-STYLESHEET")
+    public interface ChildComponentInterface2 extends ChildComponentInterface1 {
+    }
+
+    @Tag("used")
+    @Uses(ChildComponent.class)
+    @Uses(UsingComponent.class)
+    public static class UsedComponent extends Component {
+    }
+
+    @Tag("using")
+    @Uses(UsedComponent.class)
+    public static class UsingComponent extends Component {
+    }
+
+    @Tag("test")
+    @JavaScript(value = "lazy.js", loadMode = LoadMode.LAZY)
+    @StyleSheet(value = "lazy.css", loadMode = LoadMode.LAZY)
+    @JavaScript(value = "inline.js", loadMode = LoadMode.INLINE)
+    @StyleSheet(value = "inline.css", loadMode = LoadMode.INLINE)
+    @JavaScript("eager.js")
+    @StyleSheet("eager.css")
+    public static class ComponentWithAllDependencyTypes extends Component {
+    }
+
+    @Tag("test")
+    @StyleSheet(value = "lazy.css", loadMode = LoadMode.LAZY, layer = "theme")
+    @StyleSheet(value = "inline.css", loadMode = LoadMode.INLINE, layer = "theme")
+    public static class ComponentWithLayeredStyleSheets extends Component {
+    }
+
+    @Tag("test")
+    @StyleSheet(value = "import.css", loadMode = LoadMode.INLINE, layer = "theme")
+    public static class ComponentWithLayeredInlineImport extends Component {
+    }
+
+    @Tag("base")
+    @Route(value = "", layout = ParentClass.class)
+    public static class BaseClass extends Component {
+    }
+
+    @Tag("parent")
+    @ParentLayout(SuperParentClass.class)
+    public static class ParentClass extends Component implements RouterLayout {
+    }
+
+    @Tag("super-parent")
+    public static class SuperParentClass extends Component
+            implements RouterLayout {
+    }
+
+    @Tag("components-container")
+    public static class ComponentsContainer extends Component
+            implements HasComponents {
+
+    }
+
+    @AfterEach
+    void tearDown() {
+        if (mocks != null) {
+            mocks.cleanup();
+        }
+    }
+
+    @Test
+    void testEncodeExecuteJavaScript_npmMode() {
+        Element element = ElementFactory.createDiv();
+
+        JavaScriptInvocation invocation1 = new JavaScriptInvocation(
+                "$0.focus()", element);
+        JavaScriptInvocation invocation2 = new JavaScriptInvocation(
+                "console.log($0, $1)", "Lives remaining:", Integer.valueOf(3));
+        List<PendingJavaScriptInvocation> executeJavaScriptList = Stream
+                .of(invocation1, invocation2)
+                .map(invocation -> new PendingJavaScriptInvocation(
+                        element.getNode(), invocation))
+                .collect(Collectors.toList());
+
+        ConstantPool constantPool = new ConstantPool();
+        ArrayNode json = UidlWriter.encodeExecuteJavaScriptList(
+                executeJavaScriptList, constantPool);
+        ObjectNode constants = constantPool.dumpConstants();
+
+        ArrayNode expectedJson = JacksonUtils.createArray(
+                JacksonUtils.createArray(
+                        // Null since element is not attached
+                        JacksonUtils.nullNode(),
+                        JacksonUtils.createNode(nameOfWhatRuns(
+                                JacksonUtils.createNode("$0.focus()"),
+                                constants))),
+                JacksonUtils.createArray(
+                        JacksonUtils.createNode("Lives remaining:"),
+                        JacksonUtils.createNode(3),
+                        JacksonUtils.createNode(nameOfWhatRuns(
+                                JacksonUtils.createNode("console.log($0, $1)"),
+                                constants))));
+
+        assertTrue(JacksonUtils.jsonEquals(expectedJson, json),
+                "an invocation should name what it runs among the constants of the message: "
+                        + json + " " + constants);
+    }
+
+    /**
+     * What names the given constant among the given ones, which is what an
+     * invocation that runs it carries instead of the constant itself.
+     */
+    private static String nameOfWhatRuns(JsonNode whatRuns,
+            ObjectNode constants) {
+        return JacksonUtils.getKeys(constants).stream()
+                .filter(key -> JacksonUtils.jsonEquals(whatRuns,
+                        constants.get(key)))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("The constants "
+                        + constants + " should carry " + whatRuns));
+    }
+
+    /**
+     * The constant that names the function of the JavaScript declared for the
+     * given number of arguments, which is what a call of it runs.
+     */
+    private static ObjectNode functionConstant(String expression,
+            int argumentCount) {
+        ObjectNode constant = JacksonUtils.createObjectNode();
+        constant.put("f", JsCall.functionId(expression, argumentCount, false));
+        return constant;
+    }
+
+    /**
+     * The constant that names the function of the JavaScript declared for a
+     * variable number of arguments, which carries how many of them a call has
+     * because the function collects them into a rest parameter and does not
+     * report them in its length.
+     */
+    private static ObjectNode variadicFunctionConstant(String expression,
+            int parameterCount, int argumentCount) {
+        ObjectNode constant = JacksonUtils.createObjectNode();
+        constant.put("f", JsCall.functionId(expression, parameterCount, true));
+        constant.put("n", argumentCount);
+        return constant;
+    }
+
+    @Test
+    void encodeExecuteJavaScript_sameScriptTwice_sentOnceAndNamedTwice() {
+        Element element = ElementFactory.createDiv();
+        ConstantPool constantPool = new ConstantPool();
+
+        ArrayNode first = UidlWriter.encodeExecuteJavaScriptList(
+                List.of(new PendingJavaScriptInvocation(element.getNode(),
+                        new JavaScriptInvocation("$0.focus()", element))),
+                constantPool);
+        constantPool.dumpConstants();
+        ArrayNode second = UidlWriter.encodeExecuteJavaScriptList(
+                List.of(new PendingJavaScriptInvocation(element.getNode(),
+                        new JavaScriptInvocation("$0.focus()", element))),
+                constantPool);
+
+        assertEquals(nameOfWhatRuns(first), nameOfWhatRuns(second),
+                "the same script should be named the same way");
+        assertFalse(constantPool.hasNewConstants(),
+                "and sent once, not with every invocation that runs it");
+    }
+
+    /**
+     * What the first invocation of the given list names as the thing it runs.
+     */
+    private static String nameOfWhatRuns(ArrayNode invocations) {
+        ArrayNode invocation = (ArrayNode) invocations.get(0);
+        return invocation.get(invocation.size() - 1).asString();
+    }
+
+    @Test
+    void encodeExecuteJavaScript_jsCall_sendsTheTargetInsteadOfTheScript() {
+        Element element = ElementFactory.createDiv();
+
+        JsCall call = new JsCall(TestJs.class, "method", List.of("foo"));
+        JavaScriptInvocation invocation = new JavaScriptInvocation(call,
+                call.getExpression(), "foo", element);
+
+        ConstantPool constantPool = new ConstantPool();
+        ArrayNode json = UidlWriter.encodeExecuteJavaScriptList(List.of(
+                new PendingJavaScriptInvocation(element.getNode(), invocation)),
+                constantPool);
+        ObjectNode constants = constantPool.dumpConstants();
+
+        ArrayNode expectedJson = JacksonUtils.createArray(
+                JacksonUtils.createArray(JacksonUtils.createNode("foo"),
+                        // Null since element is not attached
+                        JacksonUtils.nullNode(),
+                        JacksonUtils.createNode(nameOfWhatRuns(
+                                functionConstant("this.method($0)", 1),
+                                constants))));
+
+        assertTrue(JacksonUtils.jsonEquals(expectedJson, json),
+                "a call of declared JavaScript should name a function, the same way an expression names a script: "
+                        + json + " " + constants);
+        assertFalse(constants.toString().contains(TestJs.class.getName()),
+                "and the constant should carry neither JavaScript nor what declared it: "
+                        + constants);
+    }
+
+    @Test
+    void encodeExecuteJavaScript_subscribedDefinitionCall_addsTheReturnChannels() {
+        Element element = ElementFactory.createDiv();
+
+        JsCall call = new JsCall(TestJs.class, "method", List.of("foo"));
+        JavaScriptInvocation invocation = new JavaScriptInvocation(call,
+                call.getExpression(), "foo", element);
+        PendingJavaScriptInvocation pending = new PendingJavaScriptInvocation(
+                element.getNode(), invocation);
+        pending.then(value -> {
+        });
+
+        ConstantPool constantPool = new ConstantPool();
+        ArrayNode json = UidlWriter
+                .encodeExecuteJavaScriptList(List.of(pending), constantPool);
+
+        ArrayNode encoded = (ArrayNode) json.get(0);
+        assertEquals(5, encoded.size(),
+                "the argument and the element should be followed by the two channels and the function to run: "
+                        + encoded);
+        assertEquals(
+                nameOfWhatRuns(functionConstant("this.method($0)", 1),
+                        constantPool.dumpConstants()),
+                encoded.get(4).asString(),
+                "and the function should be the same one as for a call that is not subscribed to: "
+                        + encoded);
+    }
+
+    @Test
+    void encodeExecuteJavaScript_variadicCall_sendsHowManyArgumentsItCarries() {
+        Element element = ElementFactory.createDiv();
+
+        JsCall call = new JsCall(TestJs.class, "methodWithMany",
+                List.of("foo", new Object[] { 1, 2 }));
+        JavaScriptInvocation invocation = new JavaScriptInvocation(call,
+                call.getExpression(), "foo", 1, 2, element);
+
+        ConstantPool constantPool = new ConstantPool();
+        ArrayNode json = UidlWriter.encodeExecuteJavaScriptList(List.of(
+                new PendingJavaScriptInvocation(element.getNode(), invocation)),
+                constantPool);
+        ObjectNode constants = constantPool.dumpConstants();
+
+        ArrayNode encoded = (ArrayNode) json.get(0);
+        assertEquals(
+                nameOfWhatRuns(variadicFunctionConstant(
+                        "this.method($0, ...$1)", 2, 3), constants),
+                encoded.get(encoded.size() - 1).asString(),
+                "the three arguments the call spread should be counted for the client, which cannot read them off the function: "
+                        + encoded + " " + constants);
+    }
+
+    @Test
+    void encodeExecuteJavaScript_variadicCall_trailingFunctionSentAsAFunction() {
+        Element element = ElementFactory.createDiv();
+        JsFunction callback = JsFunction.of("return 1;");
+
+        JsCall call = new JsCall(TestJs.class, "methodWithMany",
+                List.of("foo", new Object[] { callback }));
+        // The parameters an element schedules: the arguments of the call as
+        // the client receives them, followed by the element itself
+        List<Object> parameters = new ArrayList<>(call.flattenArguments());
+        parameters.add(element);
+        JavaScriptInvocation invocation = new JavaScriptInvocation(call,
+                call.getExpression(), parameters.toArray());
+
+        ConstantPool constantPool = new ConstantPool();
+        ArrayNode json = UidlWriter.encodeExecuteJavaScriptList(List.of(
+                new PendingJavaScriptInvocation(element.getNode(), invocation)),
+                constantPool);
+
+        ArrayNode encoded = (ArrayNode) json.get(0);
+        assertTrue(JacksonUtils.jsonEquals(
+                JacksonCodec.encodeWithTypeInfo(callback), encoded.get(1)),
+                "a function among the trailing arguments should reach the browser as the function it is, which is what sending them one by one rather than as one array is for: "
+                        + encoded);
+    }
+
+    @JsDefinition
+    interface TestJs extends Serializable {
+        @JsExpression("this.method($0)")
+        void method(String value);
+
+        @JsExpression("this.method($0, ...$1)")
+        void methodWithMany(String value, Object... rest);
+    }
+
+    @Test
+    void componentDependencies_npmMode() throws Exception {
+        UI ui = initializeUIForDependenciesTest(new TestUI());
+        UidlWriter uidlWriter = new UidlWriter();
+        addInitialComponentDependencies(ui, uidlWriter);
+
+        // no dependencies should be resent in next response
+        ObjectNode response = uidlWriter.createUidl(ui, false);
+        assertFalse(response.has(LoadMode.EAGER.name()));
+        assertFalse(response.has(LoadMode.INLINE.name()));
+        assertFalse(response.has(LoadMode.LAZY.name()));
+    }
+
+    @Test
+    void componentDependencies_productionMode_scanForParentClasses()
+            throws Exception {
+        UI ui = initializeUIForDependenciesTest(new TestUI());
+        mocks.getDeploymentConfiguration().setProductionMode(true);
+
+        UidlWriter uidlWriter = new UidlWriter();
+        ui.add(new ChildComponent());
+
+        // no dependencies should be resent in next response
+        ObjectNode response = uidlWriter.createUidl(ui, false);
+        Set<String> chunks = getChunkIds(response);
+
+        Set<String> expectedChunks = Stream
+                .of(TestUI.class, BaseClass.class, ChildComponent.class,
+                        ActualComponent.class, EmptyClassWithInterface.class,
+                        SuperComponent.class)
+                .map(BundleUtils::getChunkId).collect(Collectors.toSet());
+
+        assertEquals(expectedChunks, chunks);
+    }
+
+    @Test
+    void componentDependencies_productionMode_scanForUsedComponents()
+            throws Exception {
+        UI ui = initializeUIForDependenciesTest(new TestUI());
+        mocks.getDeploymentConfiguration().setProductionMode(true);
+
+        UidlWriter uidlWriter = new UidlWriter();
+        ui.add(new UsingComponent());
+
+        ObjectNode response = uidlWriter.createUidl(ui, false);
+        Set<String> chunks = getChunkIds(response);
+
+        Set<String> expectedChunks = Stream
+                .of(TestUI.class, BaseClass.class, UsingComponent.class,
+                        UsedComponent.class, ChildComponent.class,
+                        ActualComponent.class, EmptyClassWithInterface.class,
+                        SuperComponent.class)
+                .map(BundleUtils::getChunkId).collect(Collectors.toSet());
+
+        assertEquals(expectedChunks, chunks);
+    }
+
+    @Test
+    void componentDependencies_developmentMode_onlySendComponentSpecificChunks()
+            throws Exception {
+        UidlWriter uidlWriter = new UidlWriter();
+        UI ui = initializeUIForDependenciesTest(new TestUI());
+        ui.add(new ChildComponent());
+
+        // no dependencies should be resent in next response
+        ObjectNode response = uidlWriter.createUidl(ui, false);
+        Set<String> chunks = getChunkIds(response);
+
+        Set<String> expectedChunks = Stream
+                .of(TestUI.class, BaseClass.class, ChildComponent.class)
+                .map(BundleUtils::getChunkId).collect(Collectors.toSet());
+
+        assertEquals(expectedChunks, chunks);
+    }
+
+    @Test
+    void dynamicImports_expressionSentAsString_functionSentAsValue()
+            throws Exception {
+        UI ui = initializeUIForDependenciesTest(new TestUI());
+        UidlWriter uidlWriter = new UidlWriter();
+        addInitialComponentDependencies(ui, uidlWriter);
+        JsFunction function = JsFunction.of("return import($0)", "x.js");
+
+        ui.getPage().addDynamicImport("return import('y.js')");
+        ui.getPage().addDynamicImport(function);
+        ObjectNode response = uidlWriter.createUidl(ui, false);
+
+        List<JsonNode> urls = JacksonUtils
+                .<ObjectNode> stream(
+                        (ArrayNode) response.get(LoadMode.LAZY.name()))
+                .map(dependency -> dependency.get(Dependency.KEY_URL)).toList();
+        assertEquals(List.of(
+                JacksonUtils.getMapper().valueToTree("return import('y.js')"),
+                JacksonCodec.encodeWithTypeInfo(function)), urls);
+    }
+
+    @Test
+    void testComponentInterfaceDependencies_npmMode() throws Exception {
+        UI ui = initializeUIForDependenciesTest(new TestUI());
+        UidlWriter uidlWriter = new UidlWriter();
+
+        addInitialComponentDependencies(ui, uidlWriter);
+
+        // test that dependencies only from new child interfaces are added
+        ui.add(new ActualComponent(), new SuperComponent(),
+                new ChildComponent());
+
+        ObjectNode response = uidlWriter.createUidl(ui, false);
+        Map<String, ObjectNode> dependenciesMap = getDependenciesMap(response);
+
+        assertEquals(4, dependenciesMap.size());
+        assertDependency("context://childinterface1-" + CSS_STYLE_NAME,
+                CSS_STYLE_NAME, dependenciesMap);
+        assertDependency("context://childinterface2-" + CSS_STYLE_NAME,
+                CSS_STYLE_NAME, dependenciesMap);
+        assertDependency("context://child1-" + CSS_STYLE_NAME, CSS_STYLE_NAME,
+                dependenciesMap);
+        assertDependency("context://child2-" + CSS_STYLE_NAME, CSS_STYLE_NAME,
+                dependenciesMap);
+    }
+
+    @Test
+    void checkAllTypesOfDependencies_npmMode() throws Exception {
+        UI ui = initializeUIForDependenciesTest(new TestUI());
+        UidlWriter uidlWriter = new UidlWriter();
+        addInitialComponentDependencies(ui, uidlWriter);
+
+        ui.add(new ComponentWithAllDependencyTypes());
+        ObjectNode response = uidlWriter.createUidl(ui, false);
+        Map<LoadMode, List<ObjectNode>> dependenciesMap = Stream
+                .of(LoadMode.values())
+                .map(mode -> (ArrayNode) response.get(mode.name()))
+                .flatMap(JacksonUtils::<ObjectNode> stream)
+                .collect(Collectors.toMap(
+                        jsonObject -> LoadMode.valueOf(jsonObject
+                                .get(Dependency.KEY_LOAD_MODE).textValue()),
+                        Collections::singletonList, (list1, list2) -> {
+                            List<ObjectNode> result = new ArrayList<>(list1);
+                            result.addAll(list2);
+                            return result;
+                        }));
+        dependenciesMap.get(LoadMode.LAZY).removeIf(UidlWriterTest::isChunk);
+        assertThat(
+                "Dependencies with all types of load mode should be present in this response",
+                dependenciesMap.size(), is(LoadMode.values().length));
+
+        List<ObjectNode> eagerDependencies = dependenciesMap
+                .get(LoadMode.EAGER);
+        assertThat("Should have an eager dependency", eagerDependencies,
+                hasSize(1));
+        assertThat("Eager dependencies should not have inline contents",
+                eagerDependencies.stream()
+                        .filter(json -> json.has(Dependency.KEY_CONTENTS))
+                        .collect(Collectors.toList()),
+                hasSize(0));
+
+        ObjectNode eagerDependency = eagerDependencies.get(0);
+        assertEquals("context://eager.css",
+                eagerDependency.get(Dependency.KEY_URL).textValue());
+        assertEquals(Dependency.Type.STYLESHEET, Dependency.Type
+                .valueOf(eagerDependency.get(Dependency.KEY_TYPE).textValue()));
+
+        List<ObjectNode> lazyDependencies = dependenciesMap.get(LoadMode.LAZY);
+        ObjectNode lazyDependency = lazyDependencies.get(0);
+        assertEquals("context://lazy.css",
+                lazyDependency.get(Dependency.KEY_URL).textValue());
+        assertEquals(Dependency.Type.STYLESHEET, Dependency.Type
+                .valueOf(lazyDependency.get(Dependency.KEY_TYPE).textValue()));
+
+        List<ObjectNode> inlineDependencies = dependenciesMap
+                .get(LoadMode.INLINE);
+        assertInlineDependencies(inlineDependencies);
+    }
+
+    @Test
+    void layeredStyleSheets_layerSentToClient_inlineContentsWrapped()
+            throws Exception {
+        UI ui = initializeUIForDependenciesTest(new TestUI());
+        UidlWriter uidlWriter = new UidlWriter();
+        addInitialComponentDependencies(ui, uidlWriter);
+
+        ui.add(new ComponentWithLayeredStyleSheets());
+        ObjectNode response = uidlWriter.createUidl(ui, false);
+
+        ObjectNode lazyCss = JacksonUtils
+                .<ObjectNode> stream(
+                        (ArrayNode) response.get(LoadMode.LAZY.name()))
+                .filter(dependency -> !isChunk(dependency))
+                .filter(dependency -> "context://lazy.css"
+                        .equals(dependency.get(Dependency.KEY_URL).textValue()))
+                .findFirst().orElseThrow();
+        assertEquals("theme", lazyCss.get(Dependency.KEY_LAYER).textValue());
+
+        ObjectNode inlineCss = (ObjectNode) response.get(LoadMode.INLINE.name())
+                .get(0);
+        assertEquals("@layer theme {\ninline.css\n}",
+                inlineCss.get(Dependency.KEY_CONTENTS).textValue());
+    }
+
+    @Test
+    void layeredInlineStyleSheetWithImport_throws() throws Exception {
+        UI ui = initializeUIForDependenciesTest(new TestUI());
+        mocks.getServlet().addServletContextResource("/import.css",
+                "@import 'a.css';");
+        UidlWriter uidlWriter = new UidlWriter();
+        addInitialComponentDependencies(ui, uidlWriter);
+
+        ui.add(new ComponentWithLayeredInlineImport());
+        IllegalStateException exception = assertThrows(
+                IllegalStateException.class,
+                () -> uidlWriter.createUidl(ui, false));
+        assertTrue(exception.getMessage().contains("import.css"),
+                exception.getMessage());
+    }
+
+    @Test
+    void productionMode_stylesheetDependency_urlContainsHash()
+            throws Exception {
+        UI ui = initializeUIForDependenciesTest(new TestUI());
+        mocks.getDeploymentConfiguration().setProductionMode(true);
+
+        // Add resources so hash can be computed. Paths must match what
+        // resolveResource() produces for the @StyleSheet annotation values.
+        mocks.getServlet().addServletContextResource("/eager.css",
+                "body { color: red; }");
+        mocks.getServlet().addServletContextResource("/lazy.css",
+                "body { color: blue; }");
+
+        UidlWriter uidlWriter = new UidlWriter();
+        addInitialComponentDependencies(ui, uidlWriter);
+        ui.add(new ComponentWithAllDependencyTypes());
+        ObjectNode response = uidlWriter.createUidl(ui, false);
+
+        Map<LoadMode, List<ObjectNode>> dependenciesMap = Stream
+                .of(LoadMode.values())
+                .map(mode -> (ArrayNode) response.get(mode.name()))
+                .flatMap(JacksonUtils::<ObjectNode> stream)
+                .collect(Collectors.toMap(
+                        jsonObject -> LoadMode.valueOf(jsonObject
+                                .get(Dependency.KEY_LOAD_MODE).textValue()),
+                        Collections::singletonList, (list1, list2) -> {
+                            List<ObjectNode> result = new ArrayList<>(list1);
+                            result.addAll(list2);
+                            return result;
+                        }));
+
+        // EAGER stylesheet should have hash
+        List<ObjectNode> eagerDeps = dependenciesMap.get(LoadMode.EAGER);
+        ObjectNode eagerCss = eagerDeps.stream()
+                .filter(d -> Dependency.Type.STYLESHEET.name()
+                        .equals(d.get(Dependency.KEY_TYPE).textValue()))
+                .findFirst().orElse(null);
+        assertNotNull(eagerCss, "Should have an eager stylesheet dependency");
+        String eagerUrl = eagerCss.get(Dependency.KEY_URL).textValue();
+        assertTrue(eagerUrl.matches("context://eager\\.css\\?"
+                + ApplicationConstants.CONTENT_HASH_PARAMETER + "=[0-9a-f]{8}"),
+                "Eager stylesheet URL should contain hash: " + eagerUrl);
+
+        // LAZY stylesheet should have hash
+        List<ObjectNode> lazyDeps = dependenciesMap.get(LoadMode.LAZY);
+        lazyDeps.removeIf(UidlWriterTest::isChunk);
+        ObjectNode lazyCss = lazyDeps.stream()
+                .filter(d -> Dependency.Type.STYLESHEET.name()
+                        .equals(d.get(Dependency.KEY_TYPE).textValue()))
+                .findFirst().orElse(null);
+        assertNotNull(lazyCss, "Should have a lazy stylesheet dependency");
+        String lazyUrl = lazyCss.get(Dependency.KEY_URL).textValue();
+        assertTrue(lazyUrl.matches("context://lazy\\.css\\?"
+                + ApplicationConstants.CONTENT_HASH_PARAMETER + "=[0-9a-f]{8}"),
+                "Lazy stylesheet URL should contain hash: " + lazyUrl);
+
+        // INLINE dependency should NOT have a URL (it has contents instead)
+        List<ObjectNode> inlineDeps = dependenciesMap.get(LoadMode.INLINE);
+        assertThat("Should have an inline dependency", inlineDeps, hasSize(1));
+        assertFalse(inlineDeps.get(0).has(Dependency.KEY_URL));
+    }
+
+    @Test
+    void resynchronizationRequested_responseFieldContainsResynchronize()
+            throws Exception {
+        UI ui = initializeUIForDependenciesTest(new TestUI());
+        UidlWriter uidlWriter = new UidlWriter();
+
+        ObjectNode response = uidlWriter.createUidl(ui, false, true);
+        assertTrue(response.has(ApplicationConstants.RESYNCHRONIZE_ID),
+                "Response contains resynchronize field");
+        assertTrue(
+                response.get(ApplicationConstants.RESYNCHRONIZE_ID)
+                        .booleanValue(),
+                "Response resynchronize field is set to true");
+    }
+
+    @Test
+    void createUidl_allChangesCollected_uiIsNotDirty() throws Exception {
+        UI ui = initializeUIForDependenciesTest(new TestUI());
+
+        ComponentsContainer container = new ComponentsContainer();
+        container.add(new ChildComponent());
+        ui.add(container);
+        // removing all elements causes an additional ListClearChange to be
+        // added during collectChanges process
+        container.removeAll();
+
+        UidlWriter uidlWriter = new UidlWriter();
+        uidlWriter.createUidl(ui, false, true);
+
+        assertFalse(ui.getInternals().isDirty(),
+                "UI is still dirty after creating UIDL");
+    }
+
+    @Test
+    void createUidl_collectChangesUIStillDirty_shouldNotLoopEndlessly()
+            throws Exception {
+        UI ui = initializeUIForDependenciesTest(spy(new TestUI()));
+        StateTree stateTree = spy(ui.getInternals().getStateTree());
+        UIInternals internals = spy(ui.getInternals());
+
+        when(ui.getInternals()).thenReturn(internals);
+        when(internals.getStateTree()).thenReturn(stateTree);
+        when(stateTree.hasDirtyNodes()).thenReturn(true);
+
+        UidlWriter uidlWriter = new UidlWriter();
+        uidlWriter.createUidl(ui, false, true);
+
+        assertTrue(ui.getInternals().isDirty(),
+                "Simulating collectChanges bug and expecting UI to be still dirty after creating UIDL");
+    }
+
+    private void assertInlineDependencies(List<ObjectNode> inlineDependencies) {
+        assertThat("Should have an inline dependency", inlineDependencies,
+                hasSize(1));
+        assertThat("Eager dependencies should not have urls",
+                inlineDependencies.stream()
+                        .filter(json -> json.has(Dependency.KEY_URL))
+                        .collect(Collectors.toList()),
+                hasSize(0));
+
+        ObjectNode inlineDependency = inlineDependencies.get(0);
+
+        String url = inlineDependency.get(Dependency.KEY_CONTENTS).textValue();
+        assertEquals("inline.css", url);
+        assertEquals(Dependency.Type.STYLESHEET, Dependency.Type.valueOf(
+                inlineDependency.get(Dependency.KEY_TYPE).textValue()));
+    }
+
+    private UI initializeUIForDependenciesTest(UI ui) throws Exception {
+        mocks = new MockServletServiceSessionSetup();
+
+        VaadinServletContext context = (VaadinServletContext) mocks.getService()
+                .getContext();
+        Lookup lookup = context.getAttribute(Lookup.class);
+        when(lookup.lookup(RoutePathProvider.class))
+                .thenReturn(new RoutePathProviderImpl());
+
+        VaadinSession session = mocks.getSession();
+        session.lock();
+        ui.getInternals().setSession(session);
+
+        RouteConfiguration routeConfiguration = RouteConfiguration
+                .forRegistry(ui.getInternals().getRouter().getRegistry());
+        routeConfiguration.update(() -> {
+            routeConfiguration.getHandledRegistry().clean();
+            routeConfiguration.setAnnotatedRoute(BaseClass.class);
+        });
+
+        for (String type : new String[] { "html", "js", "css" }) {
+            mocks.getServlet().addServletContextResource("inline." + type,
+                    "inline." + type);
+            // After context-root URL normalization the lookup uses a leading
+            // slash; register both variants so component-level inline content
+            // can be resolved.
+            mocks.getServlet().addServletContextResource("/inline." + type,
+                    "inline." + type);
+        }
+
+        HttpServletRequest servletRequestMock = mock(HttpServletRequest.class);
+
+        VaadinServletRequest vaadinRequestMock = mock(
+                VaadinServletRequest.class);
+
+        when(vaadinRequestMock.getHttpServletRequest())
+                .thenReturn(servletRequestMock);
+
+        ui.doInit(vaadinRequestMock, 1, "foo");
+        ui.getInternals().getRouter().initializeUI(ui,
+                UITest.requestToLocation(vaadinRequestMock));
+
+        return ui;
+    }
+
+    private void addInitialComponentDependencies(UI ui, UidlWriter uidlWriter) {
+        ui.add(new ActualComponent());
+
+        ObjectNode response = uidlWriter.createUidl(ui, false);
+        Map<String, ObjectNode> dependenciesMap = getDependenciesMap(response);
+
+        assertEquals(4, dependenciesMap.size());
+
+        // UI parent first, then UI, then super component's dependencies, then
+        // the interfaces and then the component
+        assertDependency("context://super-" + CSS_STYLE_NAME, CSS_STYLE_NAME,
+                dependenciesMap);
+
+        assertDependency("context://anotherinterface-" + CSS_STYLE_NAME,
+                CSS_STYLE_NAME, dependenciesMap);
+
+        assertDependency("context://interface-" + CSS_STYLE_NAME,
+                CSS_STYLE_NAME, dependenciesMap);
+
+        assertDependency("context://" + CSS_STYLE_NAME, CSS_STYLE_NAME,
+                dependenciesMap);
+    }
+
+    private Map<String, ObjectNode> getDependenciesMap(ObjectNode response) {
+        return getDependencies(response)
+                .filter(dependency -> !isChunk(dependency))
+                .collect(Collectors.toMap(jsonObject -> jsonObject
+                        .get(Dependency.KEY_URL).textValue(),
+                        Function.identity()));
+    }
+
+    private Set<String> getChunkIds(ObjectNode response)
+            throws NoSuchMethodException {
+        String loadChunkId = JsCall.functionId(
+                UIInternals.ChunkJs.class.getMethod("loadChunk", String.class));
+        return getDependencies(response).filter(UidlWriterTest::isChunk)
+                .map(dependency -> {
+                    JsonNode function = dependency.get(Dependency.KEY_URL)
+                            .get("@v-fn");
+                    assertEquals(loadChunkId, function.get("id").asString());
+                    return function.get("captures").get(0).asString();
+                }).collect(Collectors.toSet());
+    }
+
+    private static Stream<ObjectNode> getDependencies(ObjectNode response) {
+        return Stream.of(LoadMode.values())
+                .map(mode -> (ArrayNode) response.get(mode.name()))
+                .flatMap(JacksonUtils::<ObjectNode> stream);
+    }
+
+    private static boolean isChunk(ObjectNode dependency) {
+        return Dependency.Type.DYNAMIC_IMPORT.name()
+                .equals(dependency.get(Dependency.KEY_TYPE).textValue());
+    }
+
+    private void assertDependency(String url, String type,
+            Map<String, ObjectNode> dependenciesMap) {
+        ObjectNode jsonValue = dependenciesMap.get(url);
+        assertNotNull(jsonValue,
+                "Expected dependencies map to have dependency with key=" + url);
+        assertEquals(url, jsonValue.get(Dependency.KEY_URL).textValue());
+        assertEquals(type, jsonValue.get(Dependency.KEY_TYPE).textValue());
+    }
+
+}

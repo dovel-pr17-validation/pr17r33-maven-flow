@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "description": "Tailwind CSS dependencies",
+  "dependencies": {
+    "tailwindcss": "4.3.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3"
+  }
+}

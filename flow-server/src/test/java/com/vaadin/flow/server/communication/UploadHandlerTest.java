@@ -1,0 +1,1066 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.communication;
+
+import jakarta.servlet.ReadListener;
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletInputStream;
+import jakarta.servlet.ServletOutputStream;
+import jakarta.servlet.http.Part;
+
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.StringReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.apache.commons.io.IOUtils;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.ComponentEvent;
+import com.vaadin.flow.component.ComponentEventListener;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.internal.CurrentInstance;
+import com.vaadin.flow.internal.StateNode;
+import com.vaadin.flow.internal.streams.UploadCompleteEvent;
+import com.vaadin.flow.internal.streams.UploadStartEvent;
+import com.vaadin.flow.server.AbstractStreamResource;
+import com.vaadin.flow.server.Command;
+import com.vaadin.flow.server.HttpStatusCode;
+import com.vaadin.flow.server.MockVaadinServletService;
+import com.vaadin.flow.server.MockVaadinSession;
+import com.vaadin.flow.server.ServiceException;
+import com.vaadin.flow.server.StreamRegistration;
+import com.vaadin.flow.server.StreamResourceRegistry;
+import com.vaadin.flow.server.VaadinResponse;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.server.VaadinServletRequest;
+import com.vaadin.flow.server.streams.FileUploadHandler;
+import com.vaadin.flow.server.streams.InMemoryUploadCallback;
+import com.vaadin.flow.server.streams.InMemoryUploadHandler;
+import com.vaadin.flow.server.streams.TemporaryFileUploadHandler;
+import com.vaadin.flow.server.streams.UploadEvent;
+import com.vaadin.flow.server.streams.UploadHandler;
+import com.vaadin.flow.server.streams.UploadMetadata;
+import com.vaadin.flow.server.streams.UploadResult;
+import com.vaadin.flow.shared.ApplicationConstants;
+import com.vaadin.flow.shared.Registration;
+import com.vaadin.tests.util.AlwaysLockedVaadinSession;
+import com.vaadin.tests.util.MockUI;
+
+import static com.vaadin.flow.server.communication.StreamRequestHandler.DYN_RES_PREFIX;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@Isolated
+class UploadHandlerTest {
+
+    public static final String MULTIPART_STREAM_CONTENT = """
+            -------bound
+            Content-Disposition: form-data; name="file"; filename="sound.txt"
+            Content-Type: text/plain
+
+            Sound
+            -------bound
+            Content-Disposition: form-data; name="file"; filename="bytes.txt"
+            Content-Type: text/plain
+
+            Bytes
+            -------bound--
+            """.replaceAll("\n", "\r\n");
+    public static final String MULTIPART_CONTENT_TYPE = "multipart/form-data; boundary=-----bound";
+    private StreamRequestHandler handler = new StreamRequestHandler();
+    private MockVaadinSession session;
+    private VaadinServletRequest request;
+    private VaadinResponse response;
+    private StreamResourceRegistry streamResourceRegistry;
+    private UI ui;
+    private StateNode stateNode;
+    private Element element;
+    private TestComponent component;
+
+    @BeforeEach
+    void setUp() throws ServletException, ServiceException {
+        VaadinService service = new MockVaadinServletService();
+        ui = new MockUI() {
+            @Override
+            public Future<Void> access(Command command) {
+                command.execute();
+                return null;
+            }
+        };
+
+        session = new AlwaysLockedVaadinSession(service) {
+            @Override
+            public StreamResourceRegistry getResourceRegistry() {
+                return streamResourceRegistry;
+            }
+
+            @Override
+            public UI getUIById(int uiId) {
+                return ui;
+            }
+        };
+        streamResourceRegistry = new StreamResourceRegistry(session);
+        request = mock(VaadinServletRequest.class);
+        ServletContext servletContext = mock(ServletContext.class);
+        when(servletContext.getMimeType(anyString())).thenReturn(null);
+        when(request.getServletContext()).thenReturn(servletContext);
+        stateNode = mock(StateNode.class);
+        when(stateNode.isAttached()).thenReturn(true);
+        element = mock(Element.class);
+        component = new TestComponent();
+        when(element.getNode()).thenReturn(stateNode);
+        when(element.getComponent()).thenReturn(Optional.of(this.component));
+        response = mock(VaadinResponse.class);
+    }
+
+    @AfterEach
+    void cleanup() {
+        CurrentInstance.clearAll();
+    }
+
+    @Test
+    void doUploadHandleXhrFilePost_happyPath_setContentTypeAndResponseHandled()
+            throws IOException {
+        UploadHandler handler = (event) -> {
+            event.getResponse().setContentType("text/html; charset=utf-8");
+        };
+
+        handler.handleRequest(request, response, session, element);
+
+        verify(response).setContentType(
+                ApplicationConstants.CONTENT_TYPE_TEXT_HTML_UTF_8);
+        verify(response, times(1)).setStatus(200);
+    }
+
+    @Test
+    void xhrUpload_filenameFromHeader_extractedCorrectly() throws IOException {
+        final String[] capturedFilename = new String[1];
+
+        UploadHandler handler = (event) -> {
+            capturedFilename[0] = event.getFileName();
+        };
+
+        when(request.getHeader("X-Filename")).thenReturn("test.txt");
+
+        handler.handleRequest(request, response, session, element);
+
+        assertEquals("test.txt", capturedFilename[0]);
+    }
+
+    @Test
+    void xhrUpload_encodedFilename_decodedCorrectly() throws IOException {
+        final String[] capturedFilename = new String[1];
+
+        UploadHandler handler = (event) -> {
+            capturedFilename[0] = event.getFileName();
+        };
+
+        // encodeURIComponent("my file åäö.txt") in JavaScript
+        when(request.getHeader("X-Filename"))
+                .thenReturn("my%20file%20%C3%A5%C3%A4%C3%B6.txt");
+
+        handler.handleRequest(request, response, session, element);
+
+        assertEquals("my file åäö.txt", capturedFilename[0]);
+    }
+
+    @Test
+    void xhrUpload_contentTypeFromHeader_extractedCorrectly()
+            throws IOException {
+        final String[] capturedContentType = new String[1];
+
+        UploadHandler handler = (event) -> {
+            capturedContentType[0] = event.getContentType();
+        };
+
+        when(request.getHeader("X-Filename")).thenReturn("test.txt");
+        when(request.getHeader("Content-Type")).thenReturn("text/plain");
+
+        handler.handleRequest(request, response, session, element);
+
+        assertEquals("text/plain", capturedContentType[0]);
+    }
+
+    @Test
+    void xhrUpload_missingContentTypeHeader_defaultsToUnknown()
+            throws IOException {
+        final String[] capturedContentType = new String[1];
+
+        UploadHandler handler = (event) -> {
+            capturedContentType[0] = event.getContentType();
+        };
+
+        when(request.getHeader("X-Filename")).thenReturn("test.txt");
+        when(request.getHeader("Content-Type")).thenReturn(null);
+
+        handler.handleRequest(request, response, session, element);
+
+        assertEquals("unknown", capturedContentType[0]);
+    }
+
+    @Test
+    void doUploadHandleXhrFilePost_unhappyPath_responseHandled()
+            throws IOException {
+        UploadHandler handler = (event) -> {
+            throw new RuntimeException("Exception in xrh upload");
+        };
+
+        handler.handleRequest(request, response, session, element);
+
+        verify(response, times(1)).setStatus(500);
+    }
+
+    @Test
+    void createUploadHandlerToCopyStream_streamMatchesInput()
+            throws IOException {
+        String testString = "Test string for upload";
+
+        final byte[] testBytes = testString.getBytes();
+
+        byte[] output = new byte[testBytes.length];
+        AtomicInteger amount = new AtomicInteger();
+
+        UploadHandler uploadHandler = (event) -> {
+            try (InputStream inputStream = event.getInputStream()) {
+                amount.set(inputStream.read(output));
+            } catch (IOException ioe) {
+                // Set status before output is closed (see #8740)
+                response.setStatus(
+                        HttpStatusCode.INTERNAL_SERVER_ERROR.getCode());
+                throw new RuntimeException(ioe);
+            }
+        };
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, testString);
+
+        handler.handleRequest(session, request, response);
+
+        assertArrayEquals(testBytes, output, "Output differed from expected");
+
+        assertEquals(testBytes.length, amount.get(), "");
+    }
+
+    @Test
+    void createInMemoryUploadHandler_streamMatchesInput() throws IOException {
+        String testString = "Test string for upload";
+
+        final byte[] testBytes = testString.getBytes();
+
+        final byte[] output = new byte[testBytes.length];
+
+        // No lambda as that would require strange things from output
+        InMemoryUploadHandler uploadHandler = UploadHandler
+                .inMemory(new InMemoryUploadCallback() {
+                    @Override
+                    public void complete(UploadMetadata uploadMetadata,
+                            byte[] bytes) {
+                        assertEquals(output.length, bytes.length);
+                        System.arraycopy(bytes, 0, output, 0, bytes.length);
+                    }
+                });
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, testString);
+
+        handler.handleRequest(session, request, response);
+        session.getPendingAccessQueue()
+                .forEach(futureAccess -> futureAccess.run());
+
+        assertArrayEquals(testBytes, output, "Output differed from expected");
+    }
+
+    @Test
+    void createTempFileUploadHandler_streamMatchesInput() throws IOException {
+        String testString = "Test string for upload";
+
+        final byte[] testBytes = testString.getBytes();
+
+        List<File> outputFiles = new ArrayList<>(1);
+
+        TemporaryFileUploadHandler uploadHandler = UploadHandler
+                .toTempFile((uploadMetadata, file) -> outputFiles.add(file));
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, testString);
+
+        try {
+            handler.handleRequest(session, request, response);
+
+            assertEquals(1, outputFiles.size(),
+                    "Only one uploaded file expected.");
+            System.out.println(outputFiles.get(0).getPath());
+
+            assertArrayEquals(testBytes,
+                    Files.readAllBytes(outputFiles.get(0).toPath()),
+                    "Output differed from expected");
+        } finally {
+            // Cleanup temp file after test
+            for (File file : outputFiles) {
+                file.delete();
+            }
+        }
+    }
+
+    @Test
+    void createFileUploadHandler_streamMatchesInput() throws IOException {
+        String testString = "Test string for upload";
+
+        final byte[] testBytes = testString.getBytes();
+
+        List<File> outputFiles = new ArrayList<>(1);
+
+        FileUploadHandler uploadHandler = UploadHandler.toFile(
+                (uploadMetadata, file) -> outputFiles.add(file),
+                (uploadMetadata) -> new File(
+                        System.getProperty("java.io.tmpdir"),
+                        uploadMetadata.fileName()));
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, testString);
+
+        try {
+            handler.handleRequest(session, request, response);
+
+            assertEquals(1, outputFiles.size(),
+                    "Only one uploaded file expected.");
+            System.out.println(outputFiles.get(0).getPath());
+
+            assertArrayEquals(testBytes,
+                    Files.readAllBytes(outputFiles.get(0).toPath()),
+                    "Output differed from expected");
+        } finally {
+            // Cleanup temp file after test
+            for (File file : outputFiles) {
+                file.delete();
+            }
+        }
+    }
+
+    @Test
+    void mulitpartData_forInputIterator_dataIsGottenCorrectly()
+            throws IOException, ServletException {
+        List<String> outList = new ArrayList<>(2);
+        List<String> fileNames = new ArrayList<>(2);
+
+        UploadHandler uploadHandler = (event) -> {
+            fileNames.add(event.getFileName());
+            try (InputStream inputStream = event.getInputStream()) {
+                outList.add(
+                        IOUtils.toString(inputStream, StandardCharsets.UTF_8));
+            } catch (IOException ioe) {
+                // Set status before output is closed (see #8740)
+                response.setStatus(
+                        HttpStatusCode.INTERNAL_SERVER_ERROR.getCode());
+                throw new RuntimeException(ioe);
+            }
+        };
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, MULTIPART_STREAM_CONTENT);
+        when(request.getContentType()).thenReturn(MULTIPART_CONTENT_TYPE);
+
+        handler.handleRequest(session, request, response);
+
+        assertEquals(2, outList.size());
+        assertEquals(2, fileNames.size());
+
+        assertEquals("Sound", outList.get(0));
+        assertEquals("sound.txt", fileNames.get(0));
+
+        assertEquals("Bytes", outList.get(1));
+        assertEquals("bytes.txt", fileNames.get(1));
+    }
+
+    @Test
+    void mulitpartData_asParts_dataIsGottenCorrectly()
+            throws IOException, ServletException {
+        String testContent = "testBytes";
+
+        List<Part> parts = new ArrayList<>();
+        parts.add(createPart(createInputStream("one"), MULTIPART_CONTENT_TYPE,
+                "one.txt", 3));
+        parts.add(createPart(createInputStream("two"), MULTIPART_CONTENT_TYPE,
+                "two.txt", 3));
+
+        when(request.getParts()).thenReturn(parts);
+
+        List<String> outList = new ArrayList<>(2);
+        List<String> fileNames = new ArrayList<>(2);
+
+        UploadHandler uploadHandler = (event) -> {
+            fileNames.add(event.getFileName());
+            try (InputStream inputStream = event.getInputStream()) {
+                outList.add(
+                        IOUtils.toString(inputStream, StandardCharsets.UTF_8));
+            } catch (IOException ioe) {
+                // Set status before output is closed (see #8740)
+                response.setStatus(
+                        HttpStatusCode.INTERNAL_SERVER_ERROR.getCode());
+                throw new RuntimeException(ioe);
+            }
+        };
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, testContent);
+        when(request.getContentType()).thenReturn(MULTIPART_CONTENT_TYPE);
+
+        handler.handleRequest(session, request, response);
+
+        assertEquals(2, outList.size());
+        assertEquals(2, fileNames.size());
+
+        assertEquals("one", outList.get(0));
+        assertEquals("one.txt", fileNames.get(0));
+
+        assertEquals("two", outList.get(1));
+        assertEquals("two.txt", fileNames.get(1));
+    }
+
+    @Test
+    void responseHandled_calledAfterAllPartsHaveBeenHandled()
+            throws IOException, ServletException {
+
+        String testContent = "testBytes";
+
+        List<Part> parts = new ArrayList<>();
+        parts.add(createPart(createInputStream("one"), MULTIPART_CONTENT_TYPE,
+                "one.txt", 3));
+        parts.add(createPart(createInputStream("two"), MULTIPART_CONTENT_TYPE,
+                "two.txt", 3));
+
+        when(request.getParts()).thenReturn(parts);
+
+        AtomicBoolean handled = new AtomicBoolean(false);
+
+        UploadHandler uploadHandler = new UploadHandler() {
+            @Override
+            public void handleUploadRequest(UploadEvent event) {
+                assertFalse(handled.get(),
+                        "Handled should not be called before a upload request");
+            }
+
+            @Override
+            public void responseHandled(UploadResult result) {
+                handled.set(true);
+            }
+        };
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, testContent);
+        when(request.getContentType()).thenReturn(MULTIPART_CONTENT_TYPE);
+
+        handler.handleRequest(session, request, response);
+
+        assertTrue(handled.get(), "Handled was not called at the end");
+    }
+
+    @Test
+    void responseHandled_calledAfterWholeStreamHasBeenHandled()
+            throws IOException, ServletException {
+
+        AtomicBoolean handled = new AtomicBoolean(false);
+
+        UploadHandler uploadHandler = new UploadHandler() {
+            @Override
+            public void handleUploadRequest(UploadEvent event) {
+                assertFalse(handled.get(),
+                        "Handled should not be called before a upload request");
+            }
+
+            @Override
+            public void responseHandled(UploadResult result) {
+                handled.set(true);
+            }
+        };
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, MULTIPART_STREAM_CONTENT);
+        when(request.getContentType()).thenReturn(MULTIPART_CONTENT_TYPE);
+
+        handler.handleRequest(session, request, response);
+
+        assertTrue(handled.get(), "Handled was not called at the end");
+    }
+
+    @Test
+    void multipartRequest_responseHandled_calledWhenExceptionIsThrown()
+            throws IOException, ServletException {
+
+        String testContent = "testBytes";
+
+        List<Part> parts = new ArrayList<>();
+        parts.add(createPart(createInputStream("one"), MULTIPART_CONTENT_TYPE,
+                "one.txt", 3));
+        parts.add(createPart(createInputStream("two"), MULTIPART_CONTENT_TYPE,
+                "two.txt", 3));
+
+        when(request.getParts()).thenReturn(parts);
+
+        AtomicBoolean handled = new AtomicBoolean(false);
+
+        UploadHandler uploadHandler = new UploadHandler() {
+            @Override
+            public void handleUploadRequest(UploadEvent event) {
+                throw new RuntimeException("Exception in multipart upload");
+            }
+
+            @Override
+            public void responseHandled(UploadResult result) {
+                handled.set(true);
+            }
+        };
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, testContent);
+        when(request.getContentType()).thenReturn(MULTIPART_CONTENT_TYPE);
+
+        handler.handleRequest(session, request, response);
+
+        assertTrue(handled.get(), "Handled was not called at the end");
+    }
+
+    @Test
+    void multipartStreamRequest_responseHandled_calledWhenExceptionIsThrown()
+            throws IOException, ServletException {
+
+        AtomicBoolean handled = new AtomicBoolean(false);
+
+        UploadHandler uploadHandler = new UploadHandler() {
+            @Override
+            public void handleUploadRequest(UploadEvent event) {
+                throw new RuntimeException(
+                        "Exception in multipart stream upload");
+            }
+
+            @Override
+            public void responseHandled(UploadResult result) {
+                handled.set(true);
+            }
+        };
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, MULTIPART_STREAM_CONTENT);
+        when(request.getContentType()).thenReturn(MULTIPART_CONTENT_TYPE);
+
+        handler.handleRequest(session, request, response);
+
+        assertTrue(handled.get(), "Handled was not called at the end");
+    }
+
+    @Test
+    void doesNotRequireToCatchIOException() {
+        UploadHandler handler = event -> {
+            new FileInputStream(new File("foo"));
+        };
+    }
+
+    @Test
+    void singleUpload_startAndComplete_firesInternalEvents()
+            throws IOException, ServletException {
+        AtomicBoolean startFired = new AtomicBoolean(false);
+        AtomicBoolean completeFired = new AtomicBoolean(false);
+        component.addListener(UploadStartEvent.class, event -> {
+            startFired.set(true);
+        });
+        component.addListener(UploadCompleteEvent.class, event -> {
+            completeFired.set(true);
+        });
+        UploadHandler handler = (event) -> {
+        };
+        handler.handleRequest(request, response, session, element);
+        assertTrue(startFired.get(), "Start event was not fired");
+        assertTrue(completeFired.get(), "Complete event was not fired");
+
+        startFired.set(false);
+        completeFired.set(false);
+
+        handler = (event) -> {
+            throw new RuntimeException("Test exception");
+        };
+
+        try {
+            handler.handleRequest(request, response, session, element);
+        } catch (RuntimeException e) {
+            // expected
+        }
+
+        assertTrue(startFired.get(),
+                "Start event was not fired before exception");
+        assertTrue(completeFired.get(),
+                "Complete event was not fired after exception");
+    }
+
+    @Test
+    void multipartStreamRequest_startAndComplete_firesInternalEvents()
+            throws IOException, ServletException {
+        AtomicInteger startFired = new AtomicInteger(0);
+        AtomicInteger completeFired = new AtomicInteger(0);
+        component.addListener(UploadStartEvent.class, event -> {
+            startFired.incrementAndGet();
+        });
+        component.addListener(UploadCompleteEvent.class, event -> {
+            completeFired.incrementAndGet();
+        });
+        UploadHandler handler = (event) -> {
+        };
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(handler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, MULTIPART_STREAM_CONTENT);
+        when(request.getContentType()).thenReturn(MULTIPART_CONTENT_TYPE);
+
+        handler.handleRequest(request, response, session, element);
+        assertEquals(2, startFired.get(), "Start event was not fired");
+        assertEquals(2, completeFired.get(), "Complete event was not fired");
+    }
+
+    @Test
+    void multipartRequest_startAndComplete_firesInternalEvents()
+            throws IOException, ServletException {
+        List<Part> parts = new ArrayList<>();
+        parts.add(createPart(createInputStream("one"), MULTIPART_CONTENT_TYPE,
+                "one.txt", 3));
+        parts.add(createPart(createInputStream("two"), MULTIPART_CONTENT_TYPE,
+                "two.txt", 3));
+
+        when(request.getParts()).thenReturn(parts);
+
+        AtomicInteger startFired = new AtomicInteger(0);
+        AtomicInteger completeFired = new AtomicInteger(0);
+        component.addListener(UploadStartEvent.class, event -> {
+            startFired.incrementAndGet();
+        });
+        component.addListener(UploadCompleteEvent.class, event -> {
+            completeFired.incrementAndGet();
+        });
+        UploadHandler handler = (event) -> {
+        };
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(handler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, MULTIPART_STREAM_CONTENT);
+        when(request.getContentType()).thenReturn(MULTIPART_CONTENT_TYPE);
+
+        handler.handleRequest(request, response, session, element);
+        assertEquals(2, startFired.get(), "Start event was not fired");
+        assertEquals(2, completeFired.get(), "Complete event was not fired");
+    }
+
+    @Test
+    void fileUploadCallback_doesNotRequireCatch() {
+        new FileUploadHandler((meta, file) -> {
+            new FileInputStream(file);
+        }, uploadMetadata -> new File("foo"));
+    }
+
+    @Test
+    void tmpUploadCallback_doesNotRequireCatch() {
+        new TemporaryFileUploadHandler((meta, file) -> {
+            new FileInputStream(file);
+        });
+    }
+
+    @Test
+    void inmemoryUploadCallback_doesNotRequireCatch() {
+        new InMemoryUploadHandler((meta, data) -> {
+            ByteArrayInputStream stream = new ByteArrayInputStream(data);
+            stream.close();
+        });
+    }
+
+    @Test
+    void xhrUpload_earlyRejection_returns422WithJson() throws IOException {
+        UploadHandler handler = (event) -> {
+            if (!event.getFileName().endsWith(".png")) {
+                event.reject("Only PNG files are accepted");
+            }
+        };
+
+        when(request.getHeader("X-Filename")).thenReturn("test.zip");
+        when(response.getWriter()).thenReturn(mock(java.io.PrintWriter.class));
+
+        handler.handleRequest(request, response, session, element);
+
+        verify(response).setStatus(422);
+        verify(response).setContentType("application/json");
+    }
+
+    @Test
+    void xhrUpload_noRejection_returns200() throws IOException {
+        UploadHandler handler = (event) -> {
+            // Accept the file
+        };
+
+        when(request.getHeader("X-Filename")).thenReturn("test.png");
+
+        handler.handleRequest(request, response, session, element);
+
+        verify(response).setStatus(200);
+    }
+
+    @Test
+    void xhrUpload_rejectionWithDefaultMessage_usesDefaultMessage()
+            throws IOException {
+        AtomicBoolean rejected = new AtomicBoolean(false);
+
+        UploadHandler handler = (event) -> {
+            if (event.getFileName().endsWith(".zip")) {
+                event.reject();
+                rejected.set(true);
+            }
+        };
+
+        when(request.getHeader("X-Filename")).thenReturn("test.zip");
+        when(response.getWriter()).thenReturn(mock(java.io.PrintWriter.class));
+
+        handler.handleRequest(request, response, session, element);
+
+        assertTrue(rejected.get(), "File should have been rejected");
+        verify(response).setStatus(422);
+    }
+
+    @Test
+    void multipartUpload_mixedAcceptReject_returns207WithJson()
+            throws IOException, ServletException {
+        List<Part> parts = new ArrayList<>();
+        parts.add(createPart(createInputStream("one"), MULTIPART_CONTENT_TYPE,
+                "file1.png", 3));
+        parts.add(createPart(createInputStream("two"), MULTIPART_CONTENT_TYPE,
+                "file2.zip", 3));
+        parts.add(createPart(createInputStream("three"), MULTIPART_CONTENT_TYPE,
+                "file3.png", 5));
+
+        when(request.getParts()).thenReturn(parts);
+
+        List<String> processedFiles = new ArrayList<>();
+
+        UploadHandler uploadHandler = (event) -> {
+            if (event.getFileName().endsWith(".zip")) {
+                event.reject("ZIP files are not allowed");
+            } else {
+                processedFiles.add(event.getFileName());
+            }
+        };
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, "testContent");
+        when(request.getContentType()).thenReturn(MULTIPART_CONTENT_TYPE);
+        when(response.getWriter()).thenReturn(mock(java.io.PrintWriter.class));
+
+        handler.handleRequest(session, request, response);
+
+        // Should have processed 2 PNG files
+        assertEquals(2, processedFiles.size(),
+                "Two files should have been accepted");
+        assertTrue(processedFiles.contains("file1.png"),
+                "file1.png should be in processed files");
+        assertTrue(processedFiles.contains("file3.png"),
+                "file3.png should be in processed files");
+
+        // Should return 207 Multi-Status for mixed results
+        verify(response).setStatus(207);
+        verify(response).setContentType("application/json");
+    }
+
+    @Test
+    void multipartUpload_inMemoryWithValidator_rejectsOnePart_returns207()
+            throws IOException, ServletException {
+        List<Part> parts = new ArrayList<>();
+        parts.add(createPart(createInputStream("one"), MULTIPART_CONTENT_TYPE,
+                "file1.png", 3));
+        parts.add(createPart(createInputStream("two"), MULTIPART_CONTENT_TYPE,
+                "file2.zip", 3));
+
+        when(request.getParts()).thenReturn(parts);
+
+        List<String> processedFiles = new ArrayList<>();
+        UploadHandler uploadHandler = UploadHandler
+                .inMemory((meta, bytes) -> processedFiles.add(meta.fileName()))
+                .validateMetadata(event -> {
+                    if (event.getFileName().endsWith(".zip")) {
+                        event.reject("ZIP files are not allowed");
+                    }
+                });
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, "testContent");
+        when(request.getContentType()).thenReturn(MULTIPART_CONTENT_TYPE);
+        when(response.getWriter()).thenReturn(mock(java.io.PrintWriter.class));
+
+        handler.handleRequest(session, request, response);
+
+        assertEquals(List.of("file1.png"), processedFiles,
+                "Only the accepted part should reach the callback");
+        verify(response).setStatus(207);
+        verify(response).setContentType("application/json");
+    }
+
+    @Test
+    void multipartUpload_allRejected_returns422()
+            throws IOException, ServletException {
+        List<Part> parts = new ArrayList<>();
+        parts.add(createPart(createInputStream("one"), MULTIPART_CONTENT_TYPE,
+                "file1.zip", 3));
+        parts.add(createPart(createInputStream("two"), MULTIPART_CONTENT_TYPE,
+                "file2.exe", 3));
+
+        when(request.getParts()).thenReturn(parts);
+
+        UploadHandler uploadHandler = (event) -> {
+            event.reject("File type not allowed");
+        };
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, "testContent");
+        when(request.getContentType()).thenReturn(MULTIPART_CONTENT_TYPE);
+        when(response.getWriter()).thenReturn(mock(java.io.PrintWriter.class));
+
+        handler.handleRequest(session, request, response);
+
+        // Should return 422 for all rejected
+        verify(response).setStatus(422);
+        verify(response).setContentType("application/json");
+    }
+
+    @Test
+    void multipartUpload_allAccepted_returns200()
+            throws IOException, ServletException {
+        List<Part> parts = new ArrayList<>();
+        parts.add(createPart(createInputStream("one"), MULTIPART_CONTENT_TYPE,
+                "file1.png", 3));
+        parts.add(createPart(createInputStream("two"), MULTIPART_CONTENT_TYPE,
+                "file2.png", 3));
+
+        when(request.getParts()).thenReturn(parts);
+
+        UploadHandler uploadHandler = (event) -> {
+            // Accept all files
+        };
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, "testContent");
+        when(request.getContentType()).thenReturn(MULTIPART_CONTENT_TYPE);
+
+        handler.handleRequest(session, request, response);
+
+        // Should return 200 for all accepted
+        verify(response).setStatus(200);
+    }
+
+    @Test
+    void multipartUpload_earlyRejection_fileNotProcessed()
+            throws IOException, ServletException {
+        List<Part> parts = new ArrayList<>();
+        Part rejectedPart = createPart(createInputStream("content"),
+                MULTIPART_CONTENT_TYPE, "file.zip", 7);
+        parts.add(rejectedPart);
+
+        when(request.getParts()).thenReturn(parts);
+
+        AtomicBoolean inputStreamAccessed = new AtomicBoolean(false);
+
+        UploadHandler uploadHandler = (event) -> {
+            if (event.getFileName().endsWith(".zip")) {
+                event.reject("ZIP files not allowed");
+            } else {
+                // This should not be reached for rejected files
+                try {
+                    event.getInputStream().read();
+                    inputStreamAccessed.set(true);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        };
+
+        StreamRegistration streamRegistration = streamResourceRegistry
+                .registerResource(uploadHandler);
+        AbstractStreamResource res = streamRegistration.getResource();
+
+        mockRequest(res, "testContent");
+        when(request.getContentType()).thenReturn(MULTIPART_CONTENT_TYPE);
+        when(response.getWriter()).thenReturn(mock(java.io.PrintWriter.class));
+
+        handler.handleRequest(session, request, response);
+
+        assertFalse(inputStreamAccessed.get(),
+                "Input stream should not be accessed for rejected file");
+        verify(response).setStatus(422);
+    }
+
+    private Part createPart(InputStream inputStream, String contentType,
+            String name, long size) throws IOException {
+        Part part = mock(Part.class);
+        when(part.getInputStream()).thenReturn(inputStream);
+        when(part.getContentType()).thenReturn(contentType);
+        when(part.getSubmittedFileName()).thenReturn(name);
+        when(part.getSize()).thenReturn(size);
+        return part;
+    }
+
+    private void mockRequest(AbstractStreamResource res, String content)
+            throws IOException {
+
+        ServletOutputStream outputStream = mock(ServletOutputStream.class);
+        when(response.getOutputStream()).thenReturn(outputStream);
+        when(request.getPathInfo())
+                .thenReturn(String.format("/%s%s/%s/%s", DYN_RES_PREFIX,
+                        ui.getId().orElse("-1"), res.getId(), res.getName()));
+        when(request.getContentLengthLong())
+                .thenReturn(Long.valueOf(content.length()));
+        when(request.getContentLength()).thenReturn(content.length());
+        when(request.getHeader("Content-length"))
+                .thenReturn(String.valueOf(content.length()));
+        when(request.getInputStream()).thenReturn(createInputStream(content));
+        when(request.getMethod()).thenReturn("POST");
+
+        // Mock getParts() for multipart content
+        if (content.equals(MULTIPART_STREAM_CONTENT)) {
+            try {
+                List<Part> parts = new ArrayList<>();
+                parts.add(createPart(createInputStream("Sound"), "text/plain",
+                        "sound.txt", 5));
+                parts.add(createPart(createInputStream("Bytes"), "text/plain",
+                        "bytes.txt", 5));
+                when(request.getParts()).thenReturn(parts);
+            } catch (ServletException e) {
+                throw new IOException(e);
+            }
+        }
+    }
+
+    private ServletInputStream createInputStream(final String content) {
+        StringReader stringReader = new StringReader(content);
+        return new ServletInputStream() {
+            boolean finished = false;
+
+            @Override
+            public boolean isFinished() {
+                return finished;
+            }
+
+            @Override
+            public boolean isReady() {
+                try {
+                    return stringReader.ready();
+                } catch (IOException e) {
+                    return true;
+                }
+            }
+
+            @Override
+            public void setReadListener(ReadListener readListener) {
+            }
+
+            @Override
+            public void reset() throws IOException {
+                stringReader.reset();
+                finished = false;
+            }
+
+            @Override
+            public int read() throws IOException {
+                int read = stringReader.read();
+                if (read == -1) {
+                    finished = true;
+                }
+                return read;
+            }
+        };
+    }
+
+    @Tag("div")
+    private static class TestComponent extends Component {
+        @Override
+        public <T extends ComponentEvent<?>> Registration addListener(
+                Class<T> eventType, ComponentEventListener<T> listener) {
+            return super.addListener(eventType, listener);
+        }
+    }
+
+}

@@ -1,0 +1,63 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.frontend;
+
+import java.io.Serializable;
+import java.util.List;
+
+import com.vaadin.flow.server.frontend.scanner.FrontendDependenciesScanner;
+
+/**
+ * Implemented by classes that want to modify the bootstrap typescript.
+ * 
+ * @since 24.3
+ */
+public interface TypeScriptBootstrapModifier extends Serializable {
+
+    /**
+     * Modifies the bootstrap typescript by mutating the parameter.
+     *
+     * @param bootstrapTypeScript
+     *            the input typescript split into lines
+     * @param options
+     *            options used by the build
+     * @param frontendDependenciesScanner
+     *            the frontend dependencies scanner
+     * @deprecated {@code frontendDependenciesScanner} can be obtained calling
+     *             {@link Options#getFrontendDependenciesScanner()}. Use
+     *             {@link #modify(List, Options)} instead
+     * @since 24.4
+     */
+    @Deprecated(since = "25.2", forRemoval = true)
+    default void modify(List<String> bootstrapTypeScript, Options options,
+            FrontendDependenciesScanner frontendDependenciesScanner) {
+    }
+
+    /**
+     * Modifies the bootstrap typescript by mutating the parameter.
+     *
+     * @param bootstrapTypeScript
+     *            the input typescript split into lines
+     * @param options
+     *            options used by the build
+     * @since 25.1.6
+     */
+    default void modify(List<String> bootstrapTypeScript, Options options) {
+        modify(bootstrapTypeScript, options,
+                options.getFrontendDependenciesScanner());
+    }
+
+}

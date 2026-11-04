@@ -1,0 +1,600 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.component.html;
+
+import java.io.Serializable;
+import java.util.Objects;
+import java.util.Optional;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.Focusable;
+import com.vaadin.flow.component.HasAriaLabel;
+import com.vaadin.flow.component.HtmlContainer;
+import com.vaadin.flow.component.PropertyDescriptor;
+import com.vaadin.flow.component.PropertyDescriptors;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.internal.UrlUtil;
+import com.vaadin.flow.server.AbstractStreamResource;
+import com.vaadin.flow.server.InitParameters;
+import com.vaadin.flow.server.StreamResource;
+import com.vaadin.flow.server.StreamResourceRegistry;
+import com.vaadin.flow.server.streams.AbstractDownloadHandler;
+import com.vaadin.flow.server.streams.DownloadHandler;
+import com.vaadin.flow.signals.Signal;
+
+/**
+ * Component representing an <code>&lt;a&gt;</code> element.
+ * <p>
+ * A hyperlink to another URL, a download, or a location in the page.
+ *
+ * @see <a href=
+ *      "https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/a">MDN:
+ *      &lt;a&gt;</a>
+ * @author Vaadin Ltd
+ * @since 1.0
+ */
+@Tag(Tag.A)
+public class Anchor extends HtmlContainer
+        implements Focusable<Anchor>, HasAriaLabel {
+
+    private static final String HREF = "href";
+
+    private static final PropertyDescriptor<String, String> hrefDescriptor = PropertyDescriptors
+            .attributeWithDefault(HREF, "", false);
+
+    private static final PropertyDescriptor<String, Optional<String>> targetDescriptor = PropertyDescriptors
+            .optionalAttributeWithDefault("target",
+                    AnchorTarget.DEFAULT.getValue());
+
+    private static final String ROUTER_IGNORE_ATTRIBUTE = "router-ignore";
+    /**
+     * The href as it was set: either a {@link String} or an
+     * {@code AbstractStreamResource}. A disabled anchor has no {@code href}
+     * attribute, so the value is kept here and written back when the anchor is
+     * enabled again.
+     */
+    private Serializable href;
+
+    /**
+     * Creates a new empty anchor component.
+     */
+    public Anchor() {
+        super();
+    }
+
+    /**
+     * Creates an anchor component with the given text content and href.
+     *
+     * @see #setHref(String)
+     * @see #setText(String)
+     *
+     * @param href
+     *            the href to set
+     * @param text
+     *            the text content to set
+     */
+    public Anchor(String href, String text) {
+        setHref(href);
+        setText(text);
+    }
+
+    /**
+     * Creates an anchor component with the given href and binds its text
+     * content to the given signal.
+     * <p>
+     * Keeps the text content synchronized with the signal value while the
+     * element is in the attached state. When the element is in the detached
+     * state, signal value changes have no effect.
+     * <p>
+     * While a signal is bound, any attempt to set the text content manually via
+     * {@link #setText(String)} throws
+     * {@link com.vaadin.flow.signals.BindingActiveException}. The same happens
+     * when trying to bind a new signal while one is already bound.
+     *
+     * @see #setHref(String)
+     * @see #bindText(Signal)
+     *
+     * @param href
+     *            the href to set
+     * @param textSignal
+     *            the signal to bind, not {@code null}
+     * @since 25.1
+     */
+    public Anchor(String href, Signal<String> textSignal) {
+        setHref(href);
+        Objects.requireNonNull(textSignal, "textSignal must not be null");
+        bindText(textSignal);
+    }
+
+    /**
+     * Creates an anchor component with the given target, text content and href.
+     *
+     * @see #setHref(String)
+     * @see #setText(String)
+     * @see #setTarget(AnchorTargetValue)
+     *
+     * @param href
+     *            the href to set
+     * @param text
+     *            the text content to set
+     * @param target
+     *            the target window, tab or frame
+     * @since 8.0
+     */
+    public Anchor(String href, String text, AnchorTarget target) {
+        setHref(href);
+        setText(text);
+        setTarget(target);
+    }
+
+    /**
+     * Creates an anchor component with the given text content and stream
+     * resource.
+     *
+     * @see #setHref(AbstractStreamResource)
+     * @see #setText(String)
+     *
+     * @param href
+     *            the resource value, not null
+     * @param text
+     *            the text content to set
+     *
+     * @deprecated use {@link #Anchor(DownloadHandler, String)} instead
+     */
+    @Deprecated(since = "24.8", forRemoval = true)
+    public Anchor(AbstractStreamResource href, String text) {
+        setHref(href);
+        setText(text);
+    }
+
+    /**
+     * Creates an anchor component with the given text content and a callback
+     * that handles data download from the server to the client when clicking an
+     * anchor.
+     *
+     * Sets the 'download' attribute for link when given a non-inline handler
+     * implementing AbstractDownloadHandler.
+     *
+     * For custom handlers the mode {@link AttachmentType#DOWNLOAD} will be set.
+     *
+     * @see #setHref(DownloadHandler)
+     * @see #setText(String)
+     *
+     * @param downloadHandler
+     *            the callback that handles data download, not null
+     * @param text
+     *            the text content to set
+     * @since 24.8
+     */
+    public Anchor(DownloadHandler downloadHandler, String text) {
+        AttachmentType att = downloadHandler instanceof AbstractDownloadHandler
+                ? getLinkMode(downloadHandler)
+                : AttachmentType.DOWNLOAD;
+        setHref(downloadHandler, att);
+        setText(text);
+    }
+
+    /**
+     * Creates an anchor component with its text content bound to the given
+     * signal and a callback that handles data download from the server to the
+     * client when clicking this anchor.
+     * <p>
+     * Keeps the text content synchronized with the signal value while the
+     * element is in the attached state. When the element is in the detached
+     * state, signal value changes have no effect.
+     * <p>
+     * While a signal is bound, any attempt to set the text content manually via
+     * {@link #setText(String)} throws
+     * {@link com.vaadin.flow.signals.BindingActiveException}. The same happens
+     * when trying to bind a new signal while one is already bound.
+     * <p>
+     * Sets the {@code download} attribute for the link when given a non-inline
+     * handler implementing {@link AbstractDownloadHandler}. For custom handlers
+     * the mode {@link AttachmentType#DOWNLOAD} will be set.
+     *
+     * @see #setHref(DownloadHandler)
+     * @see #bindText(Signal)
+     *
+     * @param downloadHandler
+     *            the callback that handles data download, not null
+     * @param textSignal
+     *            the signal to bind, not {@code null}
+     * @since 25.1
+     */
+    public Anchor(DownloadHandler downloadHandler, Signal<String> textSignal) {
+        AttachmentType att = downloadHandler instanceof AbstractDownloadHandler
+                ? getLinkMode(downloadHandler)
+                : AttachmentType.DOWNLOAD;
+        setHref(downloadHandler, att);
+        Objects.requireNonNull(textSignal, "textSignal must not be null");
+        bindText(textSignal);
+    }
+
+    /**
+     * Creates an anchor component with the given text content and a callback
+     * that handles data download from the server to the client when clicking an
+     * anchor.
+     *
+     * Sets the 'download' attribute for link when given a non-inline handler
+     * implementing AbstractDownloadHandler.
+     *
+     * LinkMode determines if the attribute `download` should be set or not.
+     * {@link AttachmentType#DOWNLOAD} will set the download attribute, where as
+     * {@link AttachmentType#INLINE} will remove it.
+     *
+     * @see #setHref(DownloadHandler, AttachmentType)
+     * @see #setText(String)
+     *
+     * @param downloadHandler
+     *            the callback that handles data download, not null
+     * @param attachmentType
+     *            set the correct attribute for anchor according to given mode,
+     *            {@code null} will set type to {@link AttachmentType#DOWNLOAD}
+     * @param text
+     *            the text content to set
+     * @since 24.8
+     */
+    public Anchor(DownloadHandler downloadHandler,
+            AttachmentType attachmentType, String text) {
+        setHref(downloadHandler,
+                attachmentType == null ? AttachmentType.DOWNLOAD
+                        : attachmentType);
+        setText(text);
+    }
+
+    /**
+     * Creates an anchor component with the given href and components as
+     * children of this component.
+     *
+     * @see #setHref(DownloadHandler)
+     * @see #add(Component...)
+     *
+     * @param href
+     *            the href to set
+     * @param components
+     *            the components to add
+     * @since 1.3
+     */
+    public Anchor(String href, Component... components) {
+        setHref(href);
+        add(components);
+    }
+
+    /**
+     * Sets the URL that this anchor links to.
+     *
+     * A disabled Anchor removes the attribute from the HTML element, but it is
+     * stored (and reused when enabled again) in the server-side component.
+     *
+     * Use the method {@link #removeHref()} to remove the <b>href</b> attribute
+     * instead of setting it to an empty string.
+     *
+     * @see #removeHref()
+     * @see #setHref(DownloadHandler)
+     *
+     * @param href
+     *            the href to set
+     * @throws IllegalArgumentException
+     *             if the URL uses a scheme that is not considered safe. The
+     *             {@value InitParameters#URL_SAFE_SCHEMES} configuration is
+     *             read from the application that this anchor is attached to, so
+     *             for an anchor that isn't attached yet the exception is
+     *             instead thrown when it is attached. See
+     *             {@link #setUnsafeHref(String)} for setting a URL that
+     *             shouldn't be checked at all.
+     */
+    public void setHref(String href) {
+        if (href == null) {
+            throw new IllegalArgumentException("Href must not be null");
+        }
+        UrlUtil.validateUrl(this, HREF, href, "setUnsafeHref(String)",
+                this::clearHref);
+        this.href = href;
+        assignHrefAttribute();
+    }
+
+    /**
+     * Sets the URL that this anchor links to without validating its scheme.
+     * <p>
+     * Unlike {@link #setHref(String)}, this method does not reject URLs based
+     * on the {@value InitParameters#URL_SAFE_SCHEMES} configuration. Use it
+     * only for URLs that are fully under your control and known to be safe,
+     * such as a hard-coded {@code javascript:} or {@code data:} URL. Passing
+     * untrusted input here can expose the application to cross-site scripting
+     * (XSS) attacks.
+     *
+     * @see #setHref(String)
+     *
+     * @param href
+     *            the href to set
+     * @since 25.1.12
+     */
+    public void setUnsafeHref(String href) {
+        if (href == null) {
+            throw new IllegalArgumentException("Href must not be null");
+        }
+        UrlUtil.cancelUrlValidation(this, HREF);
+        this.href = href;
+        assignHrefAttribute();
+    }
+
+    /**
+     * Removes href attribute.
+     *
+     * @see Anchor#setHref(String)
+     *
+     * @since 1.2
+     */
+    public void removeHref() {
+        UrlUtil.cancelUrlValidation(this, HREF);
+        getElement().removeAttribute(HREF);
+        href = null;
+    }
+
+    private void clearHref() {
+        href = "";
+        assignHrefAttribute();
+    }
+
+    /**
+     * Sets the URL that this anchor links to with the URL of the given
+     * {@link StreamResource}.
+     *
+     * @param href
+     *            the resource value, not null
+     * @deprecated use {@link #setHref(DownloadHandler)} instead
+     */
+    @Deprecated(since = "24.8", forRemoval = true)
+    public void setHref(AbstractStreamResource href) {
+        UrlUtil.cancelUrlValidation(this, HREF);
+        this.href = href;
+        setRouterIgnore(true);
+        assignHrefAttribute();
+    }
+
+    /**
+     * Sets the URL that this anchor links to and that is bound to a given
+     * {@link DownloadHandler} callback on the server for handling data download
+     * from the server to the client when clicking an anchor.
+     *
+     * Sets the 'download' attribute for link when given a non-inline handler
+     * implementing AbstractDownloadHandler.
+     *
+     * @param downloadHandler
+     *            the callback that handles data download, not null
+     * @since 24.8
+     */
+    public void setHref(DownloadHandler downloadHandler) {
+        setHref(downloadHandler, getLinkMode(downloadHandler));
+    }
+
+    private AttachmentType getLinkMode(DownloadHandler downloadHandler) {
+        if (downloadHandler instanceof AbstractDownloadHandler<?> abstractDownloadHandler) {
+            if (abstractDownloadHandler.isInline()) {
+                return AttachmentType.INLINE;
+            } else {
+                return AttachmentType.DOWNLOAD;
+            }
+        }
+        // For a non abstract download handler the state should not change when
+        // setting new handler
+        return isDownload() ? AttachmentType.DOWNLOAD : AttachmentType.INLINE;
+    }
+
+    /**
+     * Sets the URL that this anchor links to and that is bound to a given
+     * {@link DownloadHandler} callback on the server for handling data download
+     * from the server to the client when clicking an anchor.
+     *
+     * LinkMode determines if the attribute `download` should be set or not.
+     * {@link AttachmentType#DOWNLOAD} will set the download attribute, where as
+     * {@link AttachmentType#INLINE} will remove it.
+     *
+     * @param downloadHandler
+     *            the callback that handles data download, not null
+     * @param attachmentType
+     *            set the correct attribute for anchor according to given mode,
+     *            {@code null} will set the type to
+     *            {@link AttachmentType#DOWNLOAD}
+     * @since 24.8
+     */
+    public void setHref(DownloadHandler downloadHandler,
+            AttachmentType attachmentType) {
+        UrlUtil.cancelUrlValidation(this, HREF);
+        this.href = new StreamResourceRegistry.ElementStreamResource(
+                downloadHandler, this.getElement());
+        setRouterIgnore(true);
+        assignHrefAttribute();
+        setDownload(attachmentType == null
+                || attachmentType.equals(AttachmentType.DOWNLOAD));
+    }
+
+    /**
+     * Set the download state of the anchor.
+     *
+     * {@code true} will add the download attribute making the anchor target to
+     * be downloaded on click.
+     *
+     * {@code false} will remove the download attribute.
+     *
+     * @param download
+     *            {@code true} to add the 'download' attribute and {@code false}
+     *            to remove it
+     * @since 24.8
+     */
+    public void setDownload(boolean download) {
+        if (download) {
+            getElement().setAttribute("download", true);
+        } else {
+            getElement().removeAttribute("download");
+        }
+    }
+
+    /**
+     * Check if the anchor target will be downloaded for a click.
+     *
+     * @return {@code true} if download is set for this anchor
+     * @since 24.8
+     */
+    public boolean isDownload() {
+        return getElement().hasAttribute("download");
+    }
+
+    /**
+     * The routing mechanism in Vaadin by default intercepts all anchor elements
+     * with relative URL. This method can be used make the router ignore this
+     * anchor and this way make this anchor behave normally and cause a full
+     * page load.
+     *
+     * @param ignore
+     *            true if this link should not be intercepted by the single-page
+     *            web application routing mechanism in Vaadin.
+     * @since 24.3
+     */
+    public void setRouterIgnore(boolean ignore) {
+        getElement().setAttribute(ROUTER_IGNORE_ATTRIBUTE, ignore);
+    }
+
+    /**
+     * Checks if this anchor should be ignored by the Vaadin router.
+     *
+     * @return true if this anchor should be ignored by the Vaadin router and
+     *         behave normally.
+     * @since 24.3
+     */
+    public boolean isRouterIgnore() {
+        return getElement().hasAttribute(ROUTER_IGNORE_ATTRIBUTE);
+    }
+
+    /**
+     * Gets the URL that this anchor links to.
+     *
+     * @see #setHref(String)
+     *
+     * @return the href value, or <code>""</code> if no href has been set
+     */
+    public String getHref() {
+        if (href instanceof String) {
+            // let the method return the actual href string even if disabled
+            return (String) href;
+        } else if (href instanceof AbstractStreamResource) {
+            return StreamResourceRegistry.getURI((AbstractStreamResource) href)
+                    .toString();
+        }
+        return get(hrefDescriptor);
+    }
+
+    @Override
+    public void onEnabledStateChanged(boolean enabled) {
+        super.onEnabledStateChanged(enabled);
+        assignHrefAttribute();
+    }
+
+    private void assignHrefAttribute() {
+        if (isEnabled()) {
+            if (href != null) {
+                if (href instanceof AbstractStreamResource) {
+                    getElement().setAttribute(HREF,
+                            (AbstractStreamResource) href);
+                } else {
+                    set(hrefDescriptor, (String) href);
+                }
+            }
+        } else {
+            getElement().removeAttribute(HREF);
+        }
+    }
+
+    /**
+     * Sets the target window, tab or frame for this anchor. The target is
+     * either the <code>window.name</code> of a specific target, or one of these
+     * special values:
+     * <ul>
+     * <li><code>_self</code>: Open the link in the current context. This is the
+     * default behavior.
+     * <li><code>_blank</code>: Opens the link in a new unnamed context.
+     * <li><code>_parent</code>: Opens the link in the parent context, or the
+     * current context if there is no parent context.
+     * <li><code>_top</code>: Opens the link in the top most grandparent
+     * context, or the current context if there is no parent context.
+     * </ul>
+     *
+     * @param target
+     *            the target value, or <code>""</code> to remove the target
+     *            value
+     */
+    public void setTarget(String target) {
+        set(targetDescriptor, target);
+    }
+
+    /**
+     * Gets the target window, tab or frame name for this anchor.
+     *
+     * @see #setTarget(String)
+     *
+     * @return an optional target, or an empty optional if no target has been
+     *         set
+     */
+    public Optional<String> getTarget() {
+        return get(targetDescriptor);
+    }
+
+    /**
+     * Sets the target window, tab or frame for this anchor. The target may be
+     * the one of these special values:
+     * <ul>
+     * <li><code>AnchorTarget.DEFAULT</code>: Removes the target value. This has
+     * the same effect as setting the target to <code>AnchorTarget.SELF</code>.
+     * <li><code>AnchorTarget.SELF</code>: Opens the link in the current
+     * context.
+     * <li><code>AnchorTarget.BLANK</code>: Opens the link in a new unnamed
+     * context.
+     * <li><code>AnchorTarget.PARENT</code>: Opens the link in the parent
+     * context, or the current context if there is no parent context.
+     * <li><code>AnchorTarget.TOP</code>: Opens the link in the top most
+     * grandparent context, or the current context if there is no parent
+     * context.
+     * </ul>
+     *
+     * @param target
+     *            the target value, not null
+     * @since 8.0
+     */
+    public void setTarget(AnchorTargetValue target) {
+        Objects.requireNonNull(target, "target cannot be null.");
+        setTarget(target.getValue());
+    }
+
+    /**
+     * Gets the target window, tab or frame value for this anchor.
+     *
+     * @see #setTarget(AnchorTargetValue)
+     * @see #getTarget()
+     *
+     * @return the target window value , or {@link AnchorTarget#DEFAULT} if no
+     *         target has been set
+     * @since 8.0
+     */
+    public AnchorTargetValue getTargetValue() {
+        Optional<String> target = getTarget();
+
+        if (target.isPresent()) {
+            return AnchorTargetValue.forString(target.get());
+        }
+        return AnchorTarget.DEFAULT;
+    }
+
+}

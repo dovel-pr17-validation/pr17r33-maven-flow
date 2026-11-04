@@ -1,0 +1,1029 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.frontend;
+
+import java.io.File;
+import java.io.IOException;
+import java.lang.annotation.Annotation;
+import java.net.MalformedURLException;
+import java.net.URISyntaxException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.Logger;
+
+import com.vaadin.experimental.FeatureFlags;
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.WebComponentExporter;
+import com.vaadin.flow.component.dependency.CssImport;
+import com.vaadin.flow.component.dependency.JavaScript;
+import com.vaadin.flow.component.dependency.JsModule;
+import com.vaadin.flow.component.page.AppShellConfigurator;
+import com.vaadin.flow.component.webcomponent.WebComponent;
+import com.vaadin.flow.internal.FrontendUtils;
+import com.vaadin.flow.internal.MockLogger;
+import com.vaadin.flow.router.Route;
+import com.vaadin.flow.server.Constants;
+import com.vaadin.flow.server.LoadDependenciesOnStartup;
+import com.vaadin.flow.server.frontend.NodeTestComponents.LumoTest;
+import com.vaadin.flow.server.frontend.NodeTestComponents.MainLayout;
+import com.vaadin.flow.server.frontend.scanner.ClassFinder;
+import com.vaadin.flow.server.frontend.scanner.DepsTests;
+import com.vaadin.flow.server.frontend.scanner.FrontendDependenciesScanner;
+import com.vaadin.flow.theme.AbstractTheme;
+import com.vaadin.flow.theme.Theme;
+import com.vaadin.tests.util.MockOptions;
+
+import static com.vaadin.flow.internal.FrontendUtils.DEFAULT_FRONTEND_DIR;
+import static com.vaadin.flow.internal.FrontendUtils.NODE_MODULES;
+import static com.vaadin.flow.internal.FrontendUtils.TOKEN_FILE;
+import static org.hamcrest.CoreMatchers.allOf;
+import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.CoreMatchers.not;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.mock;
+
+abstract class AbstractUpdateImportsTest extends NodeUpdateTestUtil {
+
+    @TempDir
+    File temporaryFolder;
+
+    @Route(value = "simplecss")
+    @CssImport("./foo.css")
+    public static class FooCssImport extends Component {
+
+    }
+
+    @Route(value = "themefor")
+    @CssImport(value = "./foo.css", themeFor = "something")
+    public static class ThemeForCssImport extends Component {
+
+    }
+
+    @Route(value = "simplecss")
+    @CssImport("./bar.css")
+    public static class BarCssImport extends Component {
+
+    }
+
+    @Route(value = "simplecss2")
+    @CssImport("./foo.css")
+    public static class FooCssImport2 extends Component {
+
+    }
+
+    @Theme(themeClass = LumoTest.class)
+    @CssImport("./foo.css")
+    public static class ThemeCssImport implements AppShellConfigurator {
+    }
+
+    @CssImport("./foo.css")
+    @CssImport("./bar.css")
+    public static class MultiCssImportAppShell implements AppShellConfigurator {
+    }
+
+    @CssImport("./foo.css")
+    public static class CssImportExporter
+            extends WebComponentExporter<FooCssImport> {
+        public CssImportExporter() {
+            super("css-import-exporter");
+        }
+
+        @Override
+        public void configureInstance(WebComponent<FooCssImport> webComponent,
+                FooCssImport component) {
+        }
+    }
+
+    @CssImport(value = "./foo.css", themeFor = "something")
+    public static class ThemeForCssImportExporter
+            extends WebComponentExporter<ThemeForCssImport> {
+        public ThemeForCssImportExporter() {
+            super("themefor-css-import-exporter");
+        }
+
+        @Override
+        public void configureInstance(
+                WebComponent<ThemeForCssImport> webComponent,
+                ThemeForCssImport component) {
+        }
+    }
+
+    protected File tmpRoot;
+    protected File frontendDirectory;
+    protected File nodeModulesPath;
+    protected UpdateImports updater;
+
+    private MockLogger logger;
+
+    private static final String ERROR_MSG = "foo-bar-baz";
+
+    private FeatureFlags featureFlags;
+
+    protected Options options;
+
+    private File tokenFile;
+
+    class UpdateImports extends AbstractUpdateImports {
+
+        private Map<File, List<String>> output;
+        private List<String> webComponentImports;
+
+        UpdateImports(Options options) {
+            super(options);
+        }
+
+        @Override
+        protected void writeOutput(Map<File, List<String>> output) {
+            this.output = output;
+        }
+
+        @Override
+        List<String> filterWebComponentImports(List<String> lines) {
+            webComponentImports = super.filterWebComponentImports(lines);
+            return webComponentImports;
+        }
+
+        public Map<File, List<String>> getOutput() {
+            return output;
+        }
+
+        protected List<String> getMergedOutput() {
+            return merge(output);
+        }
+
+        @Override
+        protected Collection<String> getGeneratedModules() {
+            return Arrays.asList("generated-modules-foo",
+                    "generated-modules-bar");
+        }
+
+        @Override
+        protected Logger getLogger() {
+            return logger;
+        }
+
+        @Override
+        protected String getImportsNotFoundMessage() {
+            return ERROR_MSG;
+        }
+    }
+
+    @BeforeEach
+    void setup() throws Exception {
+        tmpRoot = temporaryFolder;
+
+        logger = new MockLogger();
+
+        frontendDirectory = new File(tmpRoot, DEFAULT_FRONTEND_DIR);
+        nodeModulesPath = new File(tmpRoot, NODE_MODULES);
+        tokenFile = new File(tmpRoot, TOKEN_FILE);
+
+        ClassFinder classFinder = getClassFinder();
+        featureFlags = mock(FeatureFlags.class);
+        options = new MockOptions(classFinder, tmpRoot).withTokenFile(tokenFile)
+                .withProductionMode(true).withFeatureFlags(featureFlags)
+                .withBundleBuild(true)
+                .withFrontendDependenciesScanner(getScanner(classFinder));
+        updater = new UpdateImports(options);
+        assertTrue(nodeModulesPath.mkdirs());
+        createExpectedImports(frontendDirectory, nodeModulesPath);
+        assertTrue(
+                new File(
+                        new File(
+                                new File(frontendDirectory,
+                                        FrontendUtils.GENERATED),
+                                FrontendUtils.JAR_RESOURCES_FOLDER),
+                        "ExampleConnector.js").exists());
+    }
+
+    protected abstract FrontendDependenciesScanner getScanner(
+            ClassFinder finder);
+
+    @Test
+    void importsFilesAreNotFound_throws() {
+        deleteExpectedImports(frontendDirectory, nodeModulesPath);
+        assertThrows(IllegalStateException.class, () -> updater.run());
+    }
+
+    @Test
+    void generatedResources_relativeImport_dotSlash_notStripped()
+            throws IOException {
+        createExpectedImport(frontendDirectory, nodeModulesPath,
+                "./generated/jar-resources/foo.js");
+        var resource = resolveImportFile(frontendDirectory, nodeModulesPath,
+                "./generated/jar-resources/ExampleConnector.js");
+        Files.writeString(resource.toPath(), "import \"./foo.js\";");
+        updater.run();
+
+        String output = logger.getLogs();
+        assertThat(output, not(allOf(
+                containsString("Use the './' prefix for files in the '"),
+                containsString(
+                        "folder: 'generated/jar-resources/foo.js', please update your annotations."))));
+
+    }
+
+    @Test
+    void copiedJarResources_containsImport_importFollowedAndAdded()
+            throws IOException {
+        // No theme annotation should be available for this
+        Class<?>[] testClasses = { UI.class, AllEagerAppConf.class,
+                NodeTestComponents.ReferenceView.class,
+                NodeTestComponents.VaadinBowerComponent.class };
+        ClassFinder classFinder = getClassFinder(testClasses);
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+
+        createExpectedImport(frontendDirectory, nodeModulesPath,
+                "./generated/jar-resources/sub/example-import.js");
+        var resource = resolveImportFile(frontendDirectory, nodeModulesPath,
+                "./generated/jar-resources/ExampleConnector.js");
+        Files.writeString(resource.toPath(),
+                "import \"./sub/example-import.js\";");
+        updater.run();
+
+        List<String> flowImports = new ArrayList<>(
+                updater.getOutput().get(updater.generatedFlowImports));
+
+        assertTrue(flowImports.contains(
+                "import 'Frontend/generated/jar-resources/ExampleConnector.js';"));
+        assertTrue(flowImports.contains(
+                "import 'Frontend/generated/jar-resources/sub/example-import.js';"));
+
+    }
+
+    @Test
+    void getModuleLines_npmPackagesDontExist_logExplanation() {
+        boolean atLeastOneRemoved = false;
+        for (String imprt : getExpectedImports()) {
+            if (imprt.startsWith("@vaadin") && imprt.endsWith(".js")) {
+                assertTrue(resolveImportFile(nodeModulesPath, nodeModulesPath,
+                        imprt).delete());
+                atLeastOneRemoved = true;
+            }
+        }
+        assertTrue(atLeastOneRemoved);
+        updater.run();
+
+        assertThat(logger.getLogs(),
+                allOf(containsString("@vaadin/vaadin-lumo-styles/spacing.js"),
+                        containsString(ERROR_MSG)));
+    }
+
+    @Test
+    void getModuleLines_oneFrontendDependencyDoesntExist_throwExceptionAndlogExplanation() {
+        String fooFileName = "./foo.js";
+        assertFileRemoved(fooFileName, frontendDirectory);
+
+        try {
+            updater.run();
+            fail("Execute should have failed with missing file");
+        } catch (IllegalStateException e) {
+            assertThat(e.getMessage(),
+                    allOf(containsString("Failed to find the following files:"),
+                            containsString(fooFileName),
+                            containsString(getFrontendErrorMessageSuffix())));
+        }
+
+    }
+
+    @Test
+    void getModuleLines_oneFrontendDependencyAndFrontendDirectoryDontExist_throwExceptionAdvisingUserToRunPrepareFrontend()
+            throws Exception {
+        ClassFinder classFinder = getClassFinder();
+        options.withTokenFile(null);
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+
+        Files.move(frontendDirectory.toPath(),
+                new File(tmpRoot, "_frontend").toPath());
+
+        try {
+            updater.run();
+            fail("Execute should have failed with advice to run `prepare-frontend`");
+        } catch (IllegalStateException e) {
+            assertThat(e.getMessage(), containsString(
+                    "Unable to locate frontend resources and missing token file. "
+                            + "Please run the `prepare-frontend` Vaadin plugin goal before deploying the application"));
+        }
+    }
+
+    @Test
+    void getModuleLines_multipleFrontendDependencyDoesntExist_throwExceptionAndlogExplanation() {
+        String localTemplateFileName = "./local-template.js";
+        String fooFileName = "./foo.js";
+
+        assertFileRemoved(localTemplateFileName, frontendDirectory);
+        assertFileRemoved(fooFileName, frontendDirectory);
+
+        try {
+            updater.run();
+            fail("Execute should have failed with missing files");
+        } catch (IllegalStateException e) {
+            assertThat(e.getMessage(),
+                    allOf(containsString("Failed to find the following files:"),
+                            containsString(localTemplateFileName),
+                            containsString(fooFileName),
+                            containsString(getFrontendErrorMessageSuffix())));
+        }
+
+    }
+
+    private void assertFileRemoved(String fileName, File directory) {
+        assertTrue(resolveImportFile(directory, directory, fileName).delete(),
+                String.format(
+                        "File `%s` was not removed from, or does not exist in, `%s`",
+                        fileName, directory));
+    }
+
+    private String getFrontendErrorMessageSuffix() {
+        String suffix = String.format("%n  Locations searched were:"
+                + "%n      - `%s` in this project"
+                + "%n      - `%s` in included JARs"
+                + "%n      - `%s` in included JARs"
+                + "%n%n  Please, double check that those files exist. If you use a custom directory "
+                + "for your resource files instead of default "
+                + "`frontend` folder then make sure you it's correctly configured "
+                + "(e.g. set '%s' property)", frontendDirectory.getPath(),
+                Constants.RESOURCES_FRONTEND_DEFAULT,
+                Constants.COMPATIBILITY_RESOURCES_FRONTEND_DEFAULT,
+                FrontendUtils.PARAM_FRONTEND_DIR);
+
+        return suffix;
+    }
+
+    @Test
+    void generateLines_resultingLinesContainsThemeLinesAndExpectedImportsAndCssLinesAndGeneratedImportsAndLoggerReports()
+            throws Exception {
+        List<String> expectedLines = new ArrayList<>();
+        getExpectedImports().stream().filter(imp -> imp.equals("/foo.css"))
+                .forEach(imp -> expectedLines
+                        .add("import '" + addFrontendAlias(imp) + "';"));
+
+        // An import without `.js` extension
+        expectedLines.add(
+                "import '@vaadin/vaadin-mixed-component/src/vaadin-something-else';");
+        // An import not found in node_modules
+        expectedLines.add("import 'unresolved/component';");
+
+        expectedLines.add(
+                "import \\$cssFromFile_\\d from '@vaadin/vaadin-mixed-component/bar.css\\?inline';");
+        expectedLines.add(
+                "import \\$cssFromFile_\\d from 'Frontend/foo.css\\?inline';");
+        expectedLines.add(
+                "import \\$cssFromFile_\\d from 'Frontend/foo.css\\?inline';");
+        expectedLines.add(
+                "import \\$cssFromFile_\\d from 'Frontend/foo.css\\?inline';");
+        expectedLines.add(
+                "import \\$cssFromFile_\\d from 'Frontend/foo.css\\?inline';");
+        expectedLines.add(
+                "import \\$cssFromFile_\\d from 'Frontend/foo.css\\?inline';");
+        expectedLines.add(
+                "injectGlobalCss\\(\\$cssFromFile_\\d.toString\\(\\), 'CSSImport end', document\\);");
+        expectedLines.add(
+                "addCssBlock\\(`<style include=\"bar\">\\$\\{\\$css_\\d\\}</style>`\\);");
+        expectedLines.add(
+                "registerStyles\\('', \\$css_\\d, \\{moduleId: 'baz'\\}\\);");
+        expectedLines.add(
+                "registerStyles\\('', \\$css_\\d, \\{include: 'bar', moduleId: 'baz'\\}\\);");
+        expectedLines.add(
+                "registerStyles\\('foo-bar', \\$css_\\d, \\{moduleId: 'flow_css_mod_\\d'\\}\\);");
+        expectedLines.add(
+                "registerStyles\\('foo-bar', \\$css_\\d, \\{include: 'bar', moduleId: 'flow_css_mod_\\d'\\}\\);");
+
+        expectedLines
+                .add("import 'Frontend/generated/flow/generated-modules-foo';");
+        expectedLines
+                .add("import 'Frontend/generated/flow/generated-modules-bar';");
+
+        // AppShell and @Theme CSS imports are expected to be generated in
+        // the dedicated file.
+        List<String> expectedAppShellImports = List.of(
+                "import \\{ injectGlobalCss \\}.*",
+                "import \\{ css, unsafeCSS, registerStyles \\}.*",
+                "import \\$cssFromFile_\\d from 'lumo-css-import.css\\?inline';",
+                "injectGlobalCss\\(\\$cssFromFile_\\d.toString\\(\\), 'CSSImport end', document\\);");
+
+        updater.run();
+
+        List<String> appShellImports = updater.getOutput()
+                .get(updater.appShellImports);
+        String appShellOutput = String.join("\n", appShellImports);
+        for (String line : expectedAppShellImports) {
+            assertTrue(Pattern.compile(line).matcher(appShellOutput).find(),
+                    "\n" + line + " IS NOT FOUND IN: \n" + appShellImports);
+        }
+
+        List<String> mergedOutput = updater.getMergedOutput();
+        String outputString = String.join("\n", mergedOutput);
+        for (String line : expectedLines) {
+            assertTrue(Pattern.compile(line).matcher(outputString).find(),
+                    "\n" + line + " IS NOT FOUND IN: \n" + mergedOutput);
+        }
+
+        // All generated module ids are distinct
+        Pattern moduleIdPattern = Pattern
+                .compile(".*moduleId: '(flow_css_mod_[^']*)'.*");
+        List<String> moduleIds = mergedOutput.stream()
+                .map(moduleIdPattern::matcher).filter(Matcher::matches)
+                .map(m -> m.group(1)).collect(Collectors.toList());
+        long uniqueModuleIds = moduleIds.stream().distinct().count();
+        assertTrue(moduleIds.size() > 0, "expected modules");
+        assertEquals(moduleIds.size(), uniqueModuleIds,
+                "duplicates in generated " + moduleIds);
+
+        String output = logger.getLogs();
+
+        assertThat(output, containsString(
+                "Use the './' prefix for files in JAR files: 'ExampleConnector.js'"));
+        assertThat(output,
+                containsString("Use the './' prefix for files in the '"
+                        + frontendDirectory.getPath()
+                        + "' folder: 'vaadin-mixed-component/src/vaadin-mixed-component.js'"));
+
+        // Using regex match because of the ➜ character in TC
+        assertThat(output, allOf(containsString(
+                "Failed to find the following imports in the `node_modules` tree:"),
+                containsString("unresolved/component")));
+
+        assertThat(output, not(containsString(
+                "changing 'frontend://foo-dir/javascript-lib.js' to './foo-dir/javascript-lib.js'")));
+    }
+
+    @Test
+    void cssFileNotFound_loggerReports() {
+        assertTrue(resolveImportFile(frontendDirectory, nodeModulesPath,
+                "@vaadin/vaadin-mixed-component/bar.css").delete());
+        updater.run();
+        String output = logger.getLogs();
+        assertThat(output, containsString(
+                "Failed to find the following css files in the `node_modules`"));
+        assertThat(output,
+                containsString("@vaadin/vaadin-mixed-component/bar.css"));
+    }
+
+    @Test
+    void generate_containsLumoThemeFiles() {
+        updater.run();
+
+        assertContainsImports(true, "@vaadin/vaadin-lumo-styles/color.js",
+                "@vaadin/vaadin-lumo-styles/color-global.js",
+                "@vaadin/vaadin-lumo-styles/typography.js",
+                "@vaadin/vaadin-lumo-styles/typography-global.js",
+                "@vaadin/vaadin-lumo-styles/sizing.js",
+                "@vaadin/vaadin-lumo-styles/spacing.js",
+                "@vaadin/vaadin-lumo-styles/style.js",
+                "@vaadin/vaadin-lumo-styles/icons.js");
+    }
+
+    @Test
+    void generate_embeddedImports_doNotContainLumoGlobalThemeFiles()
+            throws IOException {
+        updater.run();
+
+        List<String> flowImports = new ArrayList<>(
+                updater.getOutput().get(updater.generatedFlowImports));
+
+        Predicate<String> lumoGlobalsMatcher = Pattern
+                .compile("@vaadin/vaadin-lumo-styles/.*-global.js")
+                .asPredicate();
+        assertTrue(flowImports.stream().anyMatch(lumoGlobalsMatcher));
+
+        assertTrue(
+                updater.webComponentImports.stream()
+                        .noneMatch(lumoGlobalsMatcher),
+                "Import for web-components should not contain lumo global imports");
+
+        // Compare lines ignoring CSS variable index differences caused
+        // by deduplication across merged output files
+        Set<String> flowNormalized = normalizeCssIndices(flowImports);
+        Set<String> wcNormalized = normalizeCssIndices(
+                updater.webComponentImports);
+
+        Set<String> difference = new LinkedHashSet<>(flowNormalized);
+        difference.removeAll(wcNormalized);
+        // Remove injectGlobalCss (webComponent uses
+        // injectGlobalWebcomponentCss instead)
+        difference.removeIf(Pattern.compile("injectGlobalCss.*").asPredicate());
+
+        List<String> unexpected = difference.stream()
+                .filter(lumoGlobalsMatcher.negate()).toList();
+        assertTrue(unexpected.isEmpty(),
+                "Flow and web-component imports must be the same, except for lumo globals. Unexpected: "
+                        + unexpected);
+    }
+
+    private Set<String> normalizeCssIndices(List<String> lines) {
+        Set<String> normalized = new LinkedHashSet<>();
+        for (String line : lines) {
+            if (!line.isBlank()) {
+                normalized.add(line
+                        .replaceAll("\\$cssFromFile_\\d+", "\\$cssFromFile_N")
+                        .replaceAll("\\$css_\\d+", "\\$css_N")
+                        .replaceAll("flow_css_mod_\\d+", "flow_css_mod_N"));
+            }
+        }
+        return normalized;
+    }
+
+    @Test
+    void generate_embeddedImports_addAlsoGlobalStyles() throws IOException {
+        Class<?>[] testClasses = { FooCssImport.class, FooCssImport2.class,
+                UI.class, AllEagerAppConf.class };
+        ClassFinder classFinder = getClassFinder(testClasses);
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+        updater.run();
+
+        Pattern injectGlobalCssPattern = Pattern
+                .compile("^\\s*injectGlobalCss\\(([^,]+),.*");
+        Predicate<String> globalCssImporter = injectGlobalCssPattern
+                .asPredicate();
+
+        List<String> globalCss = updater.getOutput()
+                .get(updater.generatedFlowImports).stream()
+                .filter(globalCssImporter).map(line -> {
+                    Matcher matcher = injectGlobalCssPattern.matcher(line);
+                    matcher.find();
+                    return matcher.group(1);
+                }).collect(Collectors.toList());
+
+        assertTrue(
+                updater.webComponentImports.stream()
+                        .anyMatch(line -> line.contains(
+                                "import { injectGlobalWebcomponentCss }")),
+                "Should contain function to import global CSS into embedded component");
+        globalCss.forEach(css -> assertTrue(
+                updater.webComponentImports.stream()
+                        .anyMatch(line -> line.contains(
+                                "injectGlobalWebcomponentCss(" + css + ");")),
+                "Should register global CSS " + css + " for webcomponent"));
+
+    }
+
+    @Test
+    void jsModulesOrderIsPreservedAnsAfterJsModules() {
+        updater.run();
+
+        assertImportOrder("jsmodule/g.js", "javascript/a.js", "javascript/b.js",
+                "javascript/c.js");
+    }
+
+    @Test
+    void duplicateEagerCssOnlyImportedOnce() throws Exception {
+        Class<?>[] testClasses = { FooCssImport.class, FooCssImport2.class,
+                UI.class, AllEagerAppConf.class };
+        ClassFinder classFinder = getClassFinder(testClasses);
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+        updater.run();
+
+        Map<File, List<String>> output = updater.getOutput();
+
+        File flowGeneratedImports = FrontendUtils
+                .getFlowGeneratedImports(frontendDirectory);
+
+        assertOnce("import { injectGlobalCss } from",
+                output.get(flowGeneratedImports));
+        assertOnce("import { css, unsafeCSS, registerStyles } from",
+                output.get(flowGeneratedImports));
+        assertOnce("from 'Frontend/foo.css?inline';",
+                output.get(flowGeneratedImports));
+    }
+
+    @Test
+    void eagerCssImportsMerged() throws Exception {
+        createExpectedImport(frontendDirectory, nodeModulesPath, "./bar.css");
+        Class<?>[] testClasses = { FooCssImport.class, BarCssImport.class,
+                UI.class, AllEagerAppConf.class };
+        ClassFinder classFinder = getClassFinder(testClasses);
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+        updater.run();
+
+        Map<File, List<String>> output = updater.getOutput();
+
+        File flowGeneratedImports = FrontendUtils
+                .getFlowGeneratedImports(frontendDirectory);
+
+        assertOnce("import { injectGlobalCss } from",
+                output.get(flowGeneratedImports));
+        assertOnce("import { css, unsafeCSS, registerStyles } from",
+                output.get(flowGeneratedImports));
+        assertOnce("from 'Frontend/foo.css?inline';",
+                output.get(flowGeneratedImports));
+        assertOnce("from 'Frontend/bar.css?inline';",
+                output.get(flowGeneratedImports));
+        assertOnce("import $cssFromFile_0 from",
+                output.get(flowGeneratedImports));
+        assertOnce("import $cssFromFile_1 from",
+                output.get(flowGeneratedImports));
+    }
+
+    @Test
+    void themeForCssImports_eagerLoaded() throws Exception {
+        Class<?>[] testClasses = { ThemeForCssImport.class, UI.class };
+        ClassFinder classFinder = getClassFinder(testClasses);
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+        updater.run();
+
+        Map<File, List<String>> output = updater.getOutput();
+
+        File flowGeneratedImports = FrontendUtils
+                .getFlowGeneratedImports(frontendDirectory);
+
+        assertOnce("import { injectGlobalCss } from",
+                output.get(flowGeneratedImports));
+        assertOnce("import { css, unsafeCSS, registerStyles } from",
+                output.get(flowGeneratedImports));
+        assertOnce("from 'Frontend/foo.css?inline';",
+                output.get(flowGeneratedImports));
+        assertOnce("import $cssFromFile_0 from",
+                output.get(flowGeneratedImports));
+    }
+
+    protected void assertOnce(String key, List<String> output) {
+        int found = 0;
+        for (String row : output) {
+            if (row.contains(key)) {
+                found++;
+            }
+        }
+        assertEquals(1, found, "Expected one instance of '" + key + "'");
+    }
+
+    @Test
+    void importingBinaryFile_importVisitorShouldNotFail()
+            throws IOException, URISyntaxException {
+        // Add a binary image import to 'commmon-js-file.js' which should not
+        // fail the import visitor and should be ignored
+        File newFile = resolveImportFile(frontendDirectory, nodeModulesPath,
+                "./common-js-file.js");
+        Files.copy(
+                Paths.get(getClass().getClassLoader().getResource("dice.jpg")
+                        .toURI()),
+                new File(newFile.getParentFile(), "dice.jpg").toPath());
+        Files.write(newFile.toPath(),
+                Collections.singleton("import './dice.jpg'"));
+
+        updater.run();
+    }
+
+    @Route("")
+    @JsModule("./jsm-all.js")
+    @JsModule(value = "./jsm-all2.js", developmentOnly = false)
+    @JsModule(value = "./jsm-dev.js", developmentOnly = true)
+    @JavaScript("./js-all.js")
+    @JavaScript(value = "./js-all2.js", developmentOnly = false)
+    @JavaScript(value = "./js-dev.js", developmentOnly = true)
+    public static class DevelopmentAndProductionDependencies extends Component {
+    }
+
+    @Test
+    void developmentDependencies_includedInDevelopmentMode()
+            throws IOException, URISyntaxException {
+        createAndLoadDependencies(false);
+
+        List<String> out = updater.getMergedOutput().stream()
+                .filter(row -> !row.startsWith("export "))
+                .filter(row -> !row.startsWith("window.Vaadin"))
+                .filter(row -> !row.contains("Frontend/generated/flow"))
+                .filter(row -> !row.contains("const loadOnDemand"))
+                .filter(row -> !DepsTests.isUiImport(row)).toList();
+
+        assertEquals(List.of("import 'Frontend/jsm-all.js';",
+                "import 'Frontend/jsm-all2.js';",
+                "import 'Frontend/jsm-dev.js';", "import 'Frontend/js-all.js';",
+                "import 'Frontend/js-all2.js';",
+                "import 'Frontend/js-dev.js';"), out);
+
+    }
+
+    @Test
+    void developmentDependencies_notIncludedInProductionMode()
+            throws IOException, URISyntaxException {
+        createAndLoadDependencies(true);
+
+        List<String> out = updater.getMergedOutput().stream()
+                .filter(row -> !row.startsWith("export "))
+                .filter(row -> !row.startsWith("window.Vaadin"))
+                .filter(row -> !row.contains("Frontend/generated/flow"))
+                .filter(row -> !row.contains("const loadOnDemand"))
+                .filter(row -> !DepsTests.isUiImport(row)).toList();
+        assertEquals(List.of("import 'Frontend/jsm-all.js';",
+                "import 'Frontend/jsm-all2.js';",
+                "import 'Frontend/js-all.js';",
+                "import 'Frontend/js-all2.js';"), out);
+    }
+
+    private void createAndLoadDependencies(boolean productionMode)
+            throws IOException {
+        createExpectedImport(frontendDirectory, nodeModulesPath,
+                "./jsm-all.js");
+        createExpectedImport(frontendDirectory, nodeModulesPath,
+                "./jsm-all2.js");
+        createExpectedImport(frontendDirectory, nodeModulesPath, "./js-all.js");
+        createExpectedImport(frontendDirectory, nodeModulesPath,
+                "./js-all2.js");
+
+        if (!productionMode) {
+            createExpectedImport(frontendDirectory, nodeModulesPath,
+                    "./jsm-dev.js");
+            createExpectedImport(frontendDirectory, nodeModulesPath,
+                    "./js-dev.js");
+        }
+
+        ClassFinder classFinder = getClassFinder(
+                DevelopmentAndProductionDependencies.class);
+
+        options.withProductionMode(productionMode);
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+        updater.run();
+
+    }
+
+    @Route(value = "")
+    static class MainView extends Component {
+        NodeTestComponents.TranslatedImports translatedImports;
+        NodeTestComponents.LocalP3Template localP3Template;
+        NodeTestComponents.JavaScriptOrder javaScriptOrder;
+    }
+
+    @LoadDependenciesOnStartup
+    static class AllEagerAppConf implements AppShellConfigurator {
+
+    }
+
+    @JsModule("./fake-material-theme.js")
+    public static class FakeMaterialTheme implements AbstractTheme {
+
+        @Override
+        public String getBaseUrl() {
+            return "fake-material-base";
+        }
+
+        @Override
+        public String getThemeUrl() {
+            return null;
+        }
+
+    }
+
+    @Test
+    void multipleThemes_importsOnlyFromActiveTheme() throws Exception {
+        // The active theme comes from NodeTestComponents.MainLayout
+        createExpectedImport(frontendDirectory, nodeModulesPath,
+                "./fake-material-theme.js");
+        Class[] testClasses = { FakeMaterialTheme.class, MainLayout.class,
+                LumoTest.class };
+        ClassFinder classFinder = getClassFinder(testClasses);
+
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+        updater.run();
+        String output = String.join("\n", updater.getMergedOutput());
+
+        // Lumo is the active theme so its imports should be included
+        assertTrue(output
+                .contains("import '@vaadin/vaadin-lumo-styles/color.js';"));
+
+        // FakeMaterialTheme is inactive and its JS module annotation value
+        // should not be there
+        assertFalse(output.contains("Frontend/fake-material-theme.js"));
+
+    }
+
+    void assertFullSortOrder(List<String> expectedJsModuleImports)
+            throws MalformedURLException {
+        Class[] testClasses = { MainView.class,
+                NodeTestComponents.TranslatedImports.class,
+                NodeTestComponents.LocalP3Template.class,
+                NodeTestComponents.JavaScriptOrder.class, UI.class,
+                AllEagerAppConf.class };
+        ClassFinder classFinder = getClassFinder(testClasses);
+
+        options.withTokenFile(new File(tmpRoot, TOKEN_FILE));
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+        updater.run();
+
+        // Imports are collected as
+        // - theme and css
+        // - JsModules
+        // - JavaScript
+        // - Generated webcompoents
+        List<String> expectedImports = new ArrayList<>();
+        List<String> uiAndGeneratedImports = new ArrayList<>();
+
+        // JsModules
+        expectedImports.addAll(expectedJsModuleImports);
+
+        getAnntotationsAsStream(JavaScript.class, testClasses)
+                .map(JavaScript::value).map(this::updateToImport)
+                .forEach(expectedImports::add);
+
+        updater.getGeneratedModules().stream()
+                .map(updater::resolveGeneratedModule).map(this::updateToImport)
+                .forEach(uiAndGeneratedImports::add);
+
+        List<String> result = updater.getMergedOutput();
+        result.removeIf(line -> line.startsWith("import { injectGlobalCss }"));
+        result.removeIf(line -> line.startsWith("export "));
+        result.removeIf(line -> line.isBlank());
+        result.removeIf(line -> line.contains("loadOnDemand"));
+        result.removeIf(line -> line.contains("window.Vaadin"));
+        result.removeIf(DepsTests::isUiImport);
+
+        expectedImports.addAll(uiAndGeneratedImports);
+        assertEquals(expectedImports, result);
+    }
+
+    private <T extends Annotation> Stream<T> getAnntotationsAsStream(
+            Class<T> annotation, Class<?>... classes) {
+        Stream<T> stream = Stream.empty();
+        for (Class<?> clazz : classes) {
+            stream = Stream.concat(stream,
+                    Stream.of(clazz.getAnnotationsByType(annotation)));
+        }
+        return stream;
+    }
+
+    private String updateToImport(String value) {
+        if (value.startsWith("./")) {
+            value = value.replace("./", FrontendUtils.FRONTEND_FOLDER_ALIAS);
+        }
+        return String.format("import '%s';", value);
+    }
+
+    private void assertContainsImports(boolean contains, String... imports) {
+        for (String line : imports) {
+            boolean result = updater.getMergedOutput()
+                    .contains("import '" + addFrontendAlias(line) + "';");
+            String message = "\n  " + (contains ? "NOT " : "") + "FOUND '"
+                    + line + " IN: \n" + updater.getMergedOutput();
+            if (contains) {
+                assertTrue(result, message);
+            } else {
+                assertFalse(result, message);
+            }
+        }
+    }
+
+    private void assertImportOrder(String... imports) {
+        int curIndex = -1;
+        for (String line : imports) {
+            String prefixed = addFrontendAlias(line);
+            int nextIndex = updater.getMergedOutput()
+                    .indexOf("import '" + prefixed + "';");
+            assertTrue(nextIndex != -1, "import '" + prefixed + "' not found");
+            assertTrue(curIndex <= nextIndex,
+                    "import '" + prefixed + "' appears in the wrong order");
+            curIndex = nextIndex;
+        }
+    }
+
+    @Test
+    void generatedFlowImports_importsAreOnTopBeforeOtherInstructions() {
+        updater.run();
+
+        List<String> lines = updater.getOutput()
+                .get(updater.generatedFlowImports);
+        assertImportsBeforeNonImportLines(lines);
+    }
+
+    @Test
+    void generatedFlowWebComponentImports_importsAreOnTopBeforeOtherInstructions()
+            throws Exception {
+        Class<?>[] testClasses = { CssImportExporter.class, FooCssImport.class,
+                UI.class, AllEagerAppConf.class };
+        ClassFinder classFinder = getClassFinder(testClasses);
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+        updater.run();
+
+        List<String> lines = updater.webComponentImports;
+        assertNotNull(lines,
+                "Web component imports should have been generated");
+        assertImportsBeforeNonImportLines(lines);
+    }
+
+    @Test
+    void generatedAppShellImports_importsAreOnTopBeforeOtherInstructions()
+            throws Exception {
+        Class<?>[] testClasses = { MultiCssImportAppShell.class };
+        ClassFinder classFinder = getClassFinder(testClasses);
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+        updater.run();
+
+        List<String> lines = updater.getOutput().get(updater.appShellImports);
+        assertNotNull(lines, "App shell imports should have been generated");
+        assertImportsBeforeNonImportLines(lines);
+    }
+
+    @Test
+    void duplicateCssImportInWebComponentAndEager_importedOnlyOnce()
+            throws Exception {
+        Class<?>[] testClasses = { CssImportExporter.class, FooCssImport.class,
+                UI.class, AllEagerAppConf.class };
+        ClassFinder classFinder = getClassFinder(testClasses);
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+        updater.run();
+
+        List<String> lines = updater.webComponentImports;
+        assertNotNull(lines,
+                "Web component imports should have been generated");
+        assertOnce("from 'Frontend/foo.css?inline';", lines);
+    }
+
+    @Test
+    void duplicateThemeForCssImportInWebComponentAndEager_importedOnlyOnce()
+            throws Exception {
+        Class<?>[] testClasses = { ThemeForCssImportExporter.class,
+                ThemeForCssImport.class, UI.class, AllEagerAppConf.class };
+        ClassFinder classFinder = getClassFinder(testClasses);
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+        updater.run();
+
+        List<String> lines = updater.webComponentImports;
+        assertNotNull(lines,
+                "Web component imports should have been generated");
+        assertOnce("from 'Frontend/foo.css?inline';", lines);
+        assertOnce("registerStyles('something'", lines);
+    }
+
+    @Test
+    void duplicateCssImportInAppShellAndEager_importedOnlyOnce()
+            throws Exception {
+        Class<?>[] testClasses = { ThemeCssImport.class, FooCssImport.class,
+                CssImportExporter.class, UI.class };
+        ClassFinder classFinder = getClassFinder(testClasses);
+        updater = new UpdateImports(options
+                .withFrontendDependenciesScanner(getScanner(classFinder)));
+        updater.run();
+
+        List<String> lines = updater.webComponentImports;
+        assertNotNull(lines,
+                "Web component imports should have been generated");
+        assertOnce("from 'Frontend/foo.css?inline';", lines);
+    }
+
+    private void assertImportsBeforeNonImportLines(List<String> lines) {
+        boolean seenNonImport = false;
+        for (String line : lines) {
+            if (line.isBlank()) {
+                continue;
+            }
+            if (!line.startsWith("import ")) {
+                seenNonImport = true;
+            } else if (seenNonImport) {
+                fail("Import line found after non-import line. "
+                        + "All import lines should be at the top.\n"
+                        + "Offending line: " + line + "\n" + "Full output:\n"
+                        + String.join("\n", lines));
+            }
+        }
+    }
+
+}

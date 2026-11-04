@@ -1,0 +1,227 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.internal.nodefeature;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.EventData;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.component.polymertemplate.EventHandler;
+import com.vaadin.flow.component.polymertemplate.RepeatIndex;
+import com.vaadin.flow.component.template.internal.DeprecatedPolymerTemplate;
+import com.vaadin.flow.dom.impl.BasicElementStateProvider;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.internal.ConstantPoolKey;
+import com.vaadin.flow.internal.HasCurrentService;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.internal.StateNode;
+import com.vaadin.flow.server.VaadinService;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+/**
+ * @author Vaadin Ltd
+ * @since 1.0.
+ */
+@Isolated
+class PolymerServerEventHandlersTest extends HasCurrentService {
+    private StateNode stateNode;
+    private PolymerServerEventHandlers handlers;
+    private Collection<Method> methodCollector;
+    private Map<String, Method> correctlyAnnotatedHandlers;
+    private Map<String, Method> wronglyAnnotatedHandlers;
+
+    private static class AbstractTemplate extends Component
+            implements DeprecatedPolymerTemplate {
+
+    }
+
+    @Tag("polymer")
+    private static class CorrectAnnotationUsage extends AbstractTemplate {
+
+        @EventHandler
+        public void noParams() {
+        }
+
+        @EventHandler
+        public void eventDataParam(@EventData("test") String test) {
+        }
+
+        @EventHandler
+        public void repeatIndexParam1(@RepeatIndex int index) {
+        }
+
+        @EventHandler
+        public void repeatIndexParam2(@RepeatIndex Integer index) {
+        }
+
+        @EventHandler
+        public void eventDataAndRepeatIndexOnDifferentParams(
+                @EventData("test") String test, @RepeatIndex int index) {
+        }
+
+    }
+
+    private static class WrongAnnotationUsage {
+        @EventHandler
+        public void notAnnotatedParam(int iCauseExceptions) {
+        }
+
+        @EventHandler
+        public void wrongTypeOfRepeatIndexParam(
+                @RepeatIndex String iCauseThemToo) {
+        }
+
+        @EventHandler
+        public void eventDataAndRepeatIndexOnOneParam(
+                @EventData("test") @RepeatIndex int meToo) {
+        }
+    }
+
+    private static Map<String, Method> getEventHandlerNamesAndMethods(
+            Class<?> clazz) {
+        return Stream.of(clazz.getMethods())
+                .filter(method -> Objects
+                        .nonNull(method.getAnnotation(EventHandler.class)))
+                .collect(
+                        Collectors.toMap(Method::getName, Function.identity()));
+    }
+
+    @BeforeEach
+    void setUp() {
+        Collection<Class<? extends NodeFeature>> features = BasicElementStateProvider
+                .getFeatures();
+        stateNode = new StateNode(features.toArray(new Class[features.size()]));
+        stateNode.getFeature(ElementData.class).setTag("test");
+        handlers = new PolymerServerEventHandlers(stateNode);
+        methodCollector = new ArrayList<>();
+        correctlyAnnotatedHandlers = getEventHandlerNamesAndMethods(
+                CorrectAnnotationUsage.class);
+        wronglyAnnotatedHandlers = getEventHandlerNamesAndMethods(
+                WrongAnnotationUsage.class);
+
+    }
+
+    @Override
+    protected VaadinService createService() {
+        VaadinService service = mock(VaadinService.class);
+        DeploymentConfiguration configuration = mock(
+                DeploymentConfiguration.class);
+        when(configuration.isProductionMode()).thenReturn(true);
+        when(service.getDeploymentConfiguration()).thenReturn(configuration);
+
+        return service;
+    }
+
+    private void addAndVerifyMethod(Method method) {
+        handlers.addHandlerMethod(method, methodCollector);
+
+        assertEquals(1, methodCollector.size());
+        assertEquals(method, methodCollector.iterator().next());
+        assertEquals(method.getParameters().length,
+                extractParametersData(method).size());
+    }
+
+    private ArrayNode extractParametersData(Method method) {
+        ConstantPoolKey parametersData = (ConstantPoolKey) stateNode
+                .getFeature(PolymerEventListenerMap.class)
+                .get(method.getName());
+        assertNotNull(parametersData);
+
+        ObjectNode json = JacksonUtils.createObjectNode();
+        parametersData.export(json);
+        return (ArrayNode) json.get(parametersData.getId());
+    }
+
+    @Test
+    void testNoParamsMethod() {
+        addAndVerifyMethod(correctlyAnnotatedHandlers.get("noParams"));
+    }
+
+    @Test
+    void testCorrectMethodWithDifferentAnnotations()
+            throws NoSuchFieldException, IllegalAccessException {
+        // Insert component without using ComponentMapping::setComponent as we
+        // only want to map and test the method
+        // `eventDataAndRepeatIndexOnDifferentParams`
+        Field component = ComponentMapping.class.getDeclaredField("component");
+        component.setAccessible(true);
+        component.set(stateNode.getFeature(ComponentMapping.class),
+                new CorrectAnnotationUsage());
+        addAndVerifyMethod(correctlyAnnotatedHandlers
+                .get("eventDataAndRepeatIndexOnDifferentParams"));
+    }
+
+    @Test
+    void testEventDataParam()
+            throws NoSuchFieldException, IllegalAccessException {
+        // Insert component without using ComponentMapping::setComponent as we
+        // only want to map and test the method `eventDataParam`
+        Field component = ComponentMapping.class.getDeclaredField("component");
+        component.setAccessible(true);
+        component.set(stateNode.getFeature(ComponentMapping.class),
+                new CorrectAnnotationUsage());
+        addAndVerifyMethod(correctlyAnnotatedHandlers.get("eventDataParam"));
+    }
+
+    @Test
+    void testRepeatIndexParam1() {
+        addAndVerifyMethod(correctlyAnnotatedHandlers.get("repeatIndexParam1"));
+    }
+
+    @Test
+    void testRepeatIndexParam2() {
+        addAndVerifyMethod(correctlyAnnotatedHandlers.get("repeatIndexParam2"));
+    }
+
+    @Test
+    void testNotAnnotatedParam() {
+        assertThrows(IllegalStateException.class, () -> addAndVerifyMethod(
+                wronglyAnnotatedHandlers.get("notAnnotatedParam")));
+    }
+
+    @Test
+    void testWrongTypeOfRepeatIndexParam() {
+        assertThrows(IllegalStateException.class, () -> addAndVerifyMethod(
+                wronglyAnnotatedHandlers.get("wrongTypeOfRepeatIndexParam")));
+    }
+
+    @Test
+    void testMultipleAnnotationsOnOneParam() {
+        assertThrows(IllegalStateException.class,
+                () -> addAndVerifyMethod(wronglyAnnotatedHandlers
+                        .get("eventDataAndRepeatIndexOnOneParam")));
+    }
+}

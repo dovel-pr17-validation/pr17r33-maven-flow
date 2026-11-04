@@ -1,0 +1,125 @@
+/**
+ * Copyright (C) 2022-2026 Vaadin Ltd
+ *
+ * This program is available under Vaadin Commercial License and Service Terms.
+ *
+ * See <https://vaadin.com/commercial-license-and-service-terms> for the full
+ * license.
+ */
+package com.vaadin.flow.component.polymertemplate;
+
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
+
+import org.jsoup.Jsoup;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.component.polymertemplate.TemplateParser.TemplateData;
+import com.vaadin.flow.component.template.Id;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.internal.CurrentInstance;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.templatemodel.TemplateModel;
+
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.is;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+/**
+ * @author Vaadin Ltd
+ * @since 1.0.
+ */
+@Isolated
+class TemplateInitializerTest {
+    private TemplateParser templateParser;
+    private VaadinService service;
+
+    @Tag("template-initializer-test")
+    public class InTemplateClass extends PolymerTemplate<TemplateModel> {
+        @Id("inTemplate")
+        public Element element;
+
+        public InTemplateClass() {
+            super(templateParser);
+        }
+    }
+
+    @Tag("template-initializer-test")
+    public class OutsideTemplateClass extends PolymerTemplate<TemplateModel> {
+        @Id("outsideTemplate")
+        public Element element;
+
+        public OutsideTemplateClass() {
+            super(templateParser);
+        }
+    }
+
+    @BeforeEach
+    void setUp() throws Exception {
+        service = mock(VaadinService.class);
+        VaadinService.setCurrent(service);
+        DeploymentConfiguration configuration = mock(
+                DeploymentConfiguration.class);
+
+        when(service.getDeploymentConfiguration()).thenReturn(configuration);
+
+        String parentTemplateId = InTemplateClass.class.getAnnotation(Tag.class)
+                .value();
+        assertThat("Both classes should have the same '@Tag' annotation",
+                OutsideTemplateClass.class.getAnnotation(Tag.class).value(),
+                is(parentTemplateId));
+
+        String inTemplateElementId = InTemplateClass.class.getField("element")
+                .getAnnotation(Id.class).value();
+        String outsideTemplateElementId = OutsideTemplateClass.class
+                .getField("element").getAnnotation(Id.class).value();
+
+        templateParser = (clazz, tag, service) -> new TemplateData("",
+                Jsoup.parse(String.format("<dom-module id='%s'><template>"
+                        + "    <template><div id='%s'>Test</div></template>"
+                        + "    <div id='%s'></div>"
+                        + "    <div a='{{twoWay}}' b='{{invalid}} syntax' c='{{two.way}}'"
+                        + "        d='{{invalidSyntax' e='{{withEvent::eventName}}' f='[[oneWay]]'></div>"
+                        + "</template></dom-module>", parentTemplateId,
+                        inTemplateElementId, outsideTemplateElementId)));
+    }
+
+    @AfterEach
+    void tearDown() {
+        CurrentInstance.clearAll();
+    }
+
+    @Test
+    void inTemplateShouldThrowAnException() {
+        assertThrows(IllegalStateException.class,
+                () -> new TemplateInitializer(new InTemplateClass(),
+                        templateParser, service));
+    }
+
+    @Test
+    void outsideTemplateShouldNotThrowAnException() {
+        new TemplateInitializer(new OutsideTemplateClass(), templateParser,
+                service);
+    }
+
+    @Test
+    void twoWayBindingPaths() {
+        Set<String> twoWayBindingPaths = new TemplateInitializer(
+                new OutsideTemplateClass(), templateParser, service)
+                .getTwoWayBindingPaths();
+
+        assertEquals(
+                new HashSet<>(Arrays.asList("twoWay", "two.way", "withEvent")),
+                twoWayBindingPaths);
+    }
+
+}

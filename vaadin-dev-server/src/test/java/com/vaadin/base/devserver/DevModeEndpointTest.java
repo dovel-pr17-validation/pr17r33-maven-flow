@@ -1,0 +1,193 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.base.devserver;
+
+import jakarta.servlet.ServletRegistration;
+
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+
+import com.vaadin.base.devserver.startup.AbstractDevModeTest;
+import com.vaadin.base.devserver.startup.DevModeStartupListener;
+import com.vaadin.flow.di.ResourceProvider;
+import com.vaadin.flow.internal.DevModeHandlerManager;
+import com.vaadin.flow.internal.FrontendUtils;
+import com.vaadin.flow.server.VaadinServlet;
+import com.vaadin.flow.server.VaadinServletContext;
+import com.vaadin.flow.server.frontend.EndpointGeneratorTaskFactory;
+import com.vaadin.flow.server.frontend.FrontendBuildUtils;
+
+import static com.vaadin.flow.server.Constants.CONNECT_JAVA_SOURCE_FOLDER_TOKEN;
+import static com.vaadin.flow.server.Constants.TARGET;
+import static com.vaadin.flow.testutil.FrontendStubs.createStubNode;
+import static com.vaadin.flow.testutil.FrontendStubs.createStubViteServer;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
+
+@Isolated
+class DevModeEndpointTest extends AbstractDevModeTest {
+
+    Set<Class<?>> classes;
+    DevModeStartupListener devModeStartupListener;
+
+    private static class VaadinServletSubClass extends VaadinServlet {
+
+    }
+
+    @BeforeEach
+    @Override
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    public void setup() throws Exception {
+        super.setup();
+        assertFalse(
+                DevModeHandlerManager
+                        .getDevModeHandler(
+                                new VaadinServletContext(servletContext))
+                        .isPresent(),
+                "No DevModeHandler should be available at test start");
+
+        createStubNode(false, true, baseDir);
+        createStubViteServer("ready in 500 ms", 500, baseDir, true);
+
+        // Prevent TaskRunNpmInstall#cleanUp from deleting node_modules
+        new File(baseDir, "node_modules/.modules.yaml").createNewFile();
+
+        ServletRegistration vaadinServletRegistration = mock(
+                ServletRegistration.class);
+
+        doReturn(new TestEndpointGeneratorTaskFactory()).when(lookup)
+                .lookup(EndpointGeneratorTaskFactory.class);
+
+        ResourceProvider resourceProvider = mock(ResourceProvider.class);
+        when(lookup.lookup(ResourceProvider.class))
+                .thenReturn(resourceProvider);
+
+        when(vaadinServletRegistration.getClassName())
+                .thenReturn(VaadinServletSubClass.class.getName());
+
+        classes = new HashSet<>();
+        classes.add(this.getClass());
+
+        Map registry = new HashMap();
+
+        // Adding extra registrations to make sure that
+        // DevModeInitializer picks
+        // the correct registration which is a VaadinServlet
+        // registration.
+        registry.put("extra1", mock(ServletRegistration.class));
+        registry.put("foo", vaadinServletRegistration);
+        registry.put("extra2", mock(ServletRegistration.class));
+        when(servletContext.getServletRegistrations()).thenReturn(registry);
+        when(servletContext.getInitParameterNames())
+                .thenReturn(Collections.emptyEnumeration());
+        when(servletContext.getClassLoader())
+                .thenReturn(this.getClass().getClassLoader());
+
+        Files.createDirectories(new File(baseDir, "src/main/java").toPath());
+
+        devModeStartupListener = new DevModeStartupListener();
+    }
+
+    @Test
+    void should_generateOpenApi() throws Exception {
+        File generatedOpenApiJson = Paths
+                .get(baseDir, TARGET, "classes/com/vaadin/hilla/openapi.json")
+                .toFile();
+
+        assertFalse(generatedOpenApiJson.exists());
+        MockedStatic<FrontendUtils> frontendUtils = mockStatic(
+                FrontendUtils.class, Mockito.CALLS_REAL_METHODS);
+        MockedStatic<FrontendBuildUtils> frontendBuildUtils = mockStatic(
+                FrontendBuildUtils.class, Mockito.CALLS_REAL_METHODS);
+        try {
+            frontendUtils.when(() -> FrontendUtils.isHillaUsed(any()))
+                    .thenReturn(true);
+            frontendBuildUtils
+                    .when(() -> FrontendBuildUtils.isHillaUsed(any(), any()))
+                    .thenReturn(true);
+            devModeStartupListener.onStartup(classes, servletContext);
+            handler = getDevModeHandler();
+            waitForDevServer();
+        } finally {
+            frontendUtils.close();
+            frontendBuildUtils.close();
+        }
+        assertTrue(generatedOpenApiJson.exists(),
+                "Should generate OpenAPI spec if Endpoint is used.");
+    }
+
+    @Test
+    void should_generateTs_files() throws Exception {
+        // Configure a folder that has .java classes with valid
+        // endpoints
+        // Not using `src/test/java` because there are invalid endpoint
+        // names
+        // in some tests
+        File src = new File(
+                getClass().getClassLoader().getResource("java").getFile());
+        when(appConfig.getStringProperty(eq(CONNECT_JAVA_SOURCE_FOLDER_TOKEN),
+                anyString())).thenReturn(src.getAbsolutePath());
+
+        File ts1 = new File(baseDir,
+                FrontendUtils.DEFAULT_PROJECT_FRONTEND_GENERATED_DIR
+                        + "MyEndpoint.ts");
+        File ts2 = new File(baseDir,
+                FrontendUtils.DEFAULT_PROJECT_FRONTEND_GENERATED_DIR
+                        + "connect-client.default.ts");
+
+        assertFalse(ts1.exists());
+        assertFalse(ts2.exists());
+        MockedStatic<FrontendUtils> frontendUtils = mockStatic(
+                FrontendUtils.class, Mockito.CALLS_REAL_METHODS);
+        MockedStatic<FrontendBuildUtils> frontendBuildUtils = mockStatic(
+                FrontendBuildUtils.class, Mockito.CALLS_REAL_METHODS);
+        try {
+            frontendUtils.when(() -> FrontendUtils.isHillaUsed(any()))
+                    .thenReturn(true);
+            frontendBuildUtils
+                    .when(() -> FrontendBuildUtils.isHillaUsed(any(), any()))
+                    .thenReturn(true);
+            devModeStartupListener.onStartup(classes, servletContext);
+            handler = getDevModeHandler();
+            waitForDevServer();
+        } finally {
+            frontendUtils.close();
+            frontendBuildUtils.close();
+        }
+        assertTrue(ts1.exists());
+        assertTrue(ts2.exists());
+    }
+
+}

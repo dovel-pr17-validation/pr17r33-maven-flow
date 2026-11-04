@@ -1,0 +1,632 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.component;
+
+import java.lang.reflect.Method;
+import java.time.LocalDate;
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.Collectors;
+
+import org.apache.commons.lang3.SerializationUtils;
+import org.junit.jupiter.api.Test;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.BaseJsonNode;
+import tools.jackson.databind.node.JsonNodeType;
+
+import com.vaadin.flow.di.Instantiator;
+import com.vaadin.flow.dom.DomListenerRegistration;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.function.SerializableRunnable;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.server.MockServletServiceSessionSetup.TestVaadinServletService;
+import com.vaadin.tests.PublicApiAnalyzer;
+import com.vaadin.tests.util.MockUI;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class AbstractSinglePropertyFieldTest {
+
+    @Tag("tag")
+    public static class StringField
+            extends AbstractSinglePropertyField<StringField, String> {
+
+        public StringField(String synchronizedPropertyName) {
+            super(synchronizedPropertyName, "", false);
+        }
+
+        public StringField() {
+            this("property");
+        }
+
+        // Exposed as public for testing purposes
+        @Override
+        public void setSynchronizedEvent(String synchronizedEventName) {
+            super.setSynchronizedEvent(synchronizedEventName);
+        }
+
+    }
+
+    @Test
+    void stringField_basicCases() {
+        StringField field = new StringField();
+        ValueChangeMonitor<String> monitor = new ValueChangeMonitor<>(field);
+
+        assertEquals("", field.getValue());
+        assertFalse(field.getElement().hasProperty("property"));
+        monitor.assertNoEvent();
+
+        field.setValue("foo");
+        assertEquals("foo", field.getElement().getProperty("property"));
+        monitor.assertEvent(false, "", "foo");
+
+        field.getElement().setProperty("property", "bar");
+        assertEquals("bar", field.getValue());
+        monitor.assertEvent(false, "foo", "bar");
+
+        // Cannot do removeProperty because
+        // https://github.com/vaadin/flow/issues/3994
+        field.getElement().setProperty("property", null);
+        assertEquals("", field.getValue());
+        monitor.assertEvent(false, "bar", "");
+    }
+
+    public static class GenericStringField<T> extends StringField {
+    }
+
+    @Test
+    void genericSubclassOfConcreteField_propertyTypeFromSuperclass() {
+        GenericStringField<Object> field = new GenericStringField<>();
+
+        field.setValue("foo");
+
+        assertEquals("foo", field.getElement().getProperty("property"));
+    }
+
+    @Tag("tag")
+    @SuppressWarnings("rawtypes")
+    public static class RawField extends AbstractSinglePropertyField {
+        public RawField() {
+            super("property", "", false);
+        }
+    }
+
+    @Test
+    void rawField_propertyTypeNotResolvable_throws() {
+        IllegalStateException exception = assertThrows(
+                IllegalStateException.class, RawField::new);
+        assertEquals(
+                "Cannot automatically determine element property type based on type parameters.",
+                exception.getMessage());
+    }
+
+    @Test
+    void stringField_setValueNull_exceptionAndNoEvent() {
+        StringField field = new StringField();
+        ValueChangeMonitor<String> monitor = new ValueChangeMonitor<>(field);
+
+        try {
+            assertThrows(NullPointerException.class,
+                    () -> field.setValue(null));
+        } finally {
+            monitor.assertNoEvent();
+        }
+    }
+
+    @Test
+    void stringField_initProperty_noEvent() {
+        StringField field = new StringField();
+        ValueChangeMonitor<String> monitor = new ValueChangeMonitor<>(field);
+
+        field.getElement().setProperty("property", "");
+
+        monitor.assertNoEvent();
+    }
+
+    @Test
+    void synchronizedEvent_default() {
+        StringField stringField = new StringField();
+
+        assertEquals("property-changed",
+                stringField.getSynchronizationRegistration().getEventType());
+    }
+
+    @Test
+    void synchronizedEvent_redefined() {
+        StringField stringField = new StringField();
+        DomListenerRegistration origReg = stringField
+                .getSynchronizationRegistration();
+        SerializableRunnable unregisterListener = mock(
+                SerializableRunnable.class);
+        origReg.onUnregister(unregisterListener);
+
+        stringField.setSynchronizedEvent("blur");
+        DomListenerRegistration recentReg = stringField
+                .getSynchronizationRegistration();
+        verify(unregisterListener).run();
+        assertNotSame(origReg, recentReg);
+        assertEquals("blur", recentReg.getEventType());
+    }
+
+    @Test
+    void synchronizedEvent_null_noSynchronization() {
+        StringField stringField = new StringField();
+        SerializableRunnable unregisterListener = mock(
+                SerializableRunnable.class);
+        stringField.getSynchronizationRegistration()
+                .onUnregister(unregisterListener);
+
+        stringField.setSynchronizedEvent(null);
+        assertNull(stringField.getSynchronizationRegistration());
+        verify(unregisterListener).run();
+    }
+
+    @Test
+    void synchronizedEvent_camelCaseProperty_dashCaseEvent() {
+        StringField stringField = new StringField("immediateValue");
+
+        assertEquals("immediate-value-changed",
+                stringField.getSynchronizationRegistration().getEventType());
+    }
+
+    @Tag("tag")
+    private static class StringNullField
+            extends AbstractSinglePropertyField<StringNullField, String> {
+        public StringNullField() {
+            super("property", null, true);
+        }
+    }
+
+    @Test
+    void stringNullField_basicCases() {
+        StringNullField field = new StringNullField();
+        ValueChangeMonitor<String> monitor = new ValueChangeMonitor<>(field);
+
+        assertEquals(null, field.getValue());
+        assertFalse(field.getElement().hasProperty("property"));
+        monitor.assertNoEvent();
+
+        field.getElement().setProperty("property", "");
+        assertEquals("", field.getValue());
+        monitor.assertEvent(false, null, "");
+
+        field.setValue(null);
+        assertFalse(field.getElement().hasProperty("property"));
+        monitor.assertEvent(false, "", null);
+    }
+
+    @Tag("tag")
+    private static class DoubleField
+            extends AbstractSinglePropertyField<DoubleField, Double> {
+        public DoubleField() {
+            super("property", Double.valueOf(0), false);
+        }
+    }
+
+    @Test
+    void doubleField_basicCases() {
+        DoubleField field = new DoubleField();
+        ValueChangeMonitor<Double> monitor = new ValueChangeMonitor<>(field);
+
+        assertEquals(0.0, field.getValue(), 0);
+        assertFalse(field.getElement().hasProperty("property"));
+        monitor.assertNoEvent();
+
+        field.setValue(10.1);
+        assertEquals(10.1, field.getElement().getProperty("property", 0.0), 0);
+        monitor.assertEvent(false, 0.0, 10.1);
+
+        field.getElement().setProperty("property", 1.1);
+        assertEquals(1.1, field.getValue(), 0);
+        monitor.assertEvent(false, 10.1, 1.1);
+
+        // Cannot do removeProperty because
+        // https://github.com/vaadin/flow/issues/3994
+        field.getElement().setProperty("property", null);
+        assertEquals(0.0, field.getValue(), 0);
+        monitor.assertEvent(false, 1.1, 0.0);
+    }
+
+    @Tag("tag")
+    private static class IntegerField
+            extends AbstractSinglePropertyField<IntegerField, Integer> {
+        public IntegerField() {
+            super("property", Integer.valueOf(42), false);
+        }
+    }
+
+    @Test
+    void integerField_basicCases() {
+        IntegerField field = new IntegerField();
+        ValueChangeMonitor<Integer> monitor = new ValueChangeMonitor<>(field);
+
+        assertEquals(42, field.getValue().intValue());
+        assertFalse(field.getElement().hasProperty("property"));
+        monitor.assertNoEvent();
+
+        field.setValue(0);
+        assertEquals(0, field.getElement().getProperty("property", -1));
+        monitor.assertEvent(false, 42, 0);
+
+        field.getElement().setProperty("property", 1);
+        assertEquals(1, field.getValue().intValue());
+        monitor.assertEvent(false, 0, 1);
+
+        // Cannot do removeProperty because
+        // https://github.com/vaadin/flow/issues/3994
+        field.getElement().setProperty("property", null);
+        assertEquals(42, field.getValue().intValue());
+        monitor.assertEvent(false, 1, 42);
+    }
+
+    @Tag("tag")
+    private static class BooleanField
+            extends AbstractSinglePropertyField<BooleanField, Boolean> {
+        public BooleanField() {
+            super("property", Boolean.FALSE, false);
+        }
+    }
+
+    @Test
+    void booleanField_basicCases() {
+        BooleanField field = new BooleanField();
+        ValueChangeMonitor<Boolean> monitor = new ValueChangeMonitor<>(field);
+
+        assertFalse(field.getValue());
+        assertFalse(field.getElement().hasProperty("property"));
+        monitor.assertNoEvent();
+
+        field.setValue(true);
+        assertTrue(field.getElement().getProperty("property", false));
+        monitor.assertEvent(false, false, true);
+
+        field.getElement().setProperty("property", false);
+        assertFalse(field.getValue());
+        monitor.assertEvent(false, true, false);
+
+        // Set value to true again so we can test that null -> false
+        field.setValue(true);
+        monitor.discard();
+
+        // Cannot do removeProperty because
+        // https://github.com/vaadin/flow/issues/3994
+        field.getElement().setProperty("property", null);
+        assertFalse(field.getValue());
+        monitor.assertEvent(false, true, false);
+    }
+
+    @Tag("tag")
+    // Broken since AbstractSinglePropertyField cannot know how to store
+    // LocalDate instances in an element property
+    private static class SimpleDateField
+            extends AbstractSinglePropertyField<SimpleDateField, LocalDate> {
+        public SimpleDateField() {
+            super("property", null, true);
+        }
+    }
+
+    @Test
+    void simpleDateField_constructor_throws() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            new SimpleDateField();
+        });
+    }
+
+    @Tag("tag")
+    private static class DateField
+            extends AbstractSinglePropertyField<DateField, LocalDate> {
+        public DateField() {
+            super("property", null, String.class, LocalDate::parse,
+                    LocalDate::toString);
+        }
+    }
+
+    @Test
+    void dateField_basicCases() {
+        DateField field = new DateField();
+        ValueChangeMonitor<LocalDate> monitor = new ValueChangeMonitor<>(field);
+
+        assertEquals(null, field.getValue());
+        assertFalse(field.getElement().hasProperty("property"));
+        monitor.assertNoEvent();
+
+        field.setValue(LocalDate.of(2018, 4, 25));
+        assertEquals("2018-04-25", field.getElement().getProperty("property"));
+        monitor.assertEvent(false, null, LocalDate.of(2018, 4, 25));
+
+        field.getElement().setProperty("property", "2017-03-24");
+        assertEquals(LocalDate.of(2017, 3, 24), field.getValue());
+        monitor.assertEvent(false, LocalDate.of(2018, 4, 25),
+                LocalDate.of(2017, 3, 24));
+
+        // Cannot do removeProperty because
+        // https://github.com/vaadin/flow/issues/3994
+        field.getElement().setProperty("property", null);
+        assertEquals(null, field.getValue());
+        monitor.assertEvent(false, LocalDate.of(2017, 3, 24), null);
+    }
+
+    @Tag("tag")
+    private static class IntegerToStringField
+            extends AbstractSinglePropertyField<IntegerToStringField, Integer> {
+        public IntegerToStringField() {
+            super("property", null, String.class, Integer::new,
+                    String::valueOf);
+        }
+
+        @Override
+        protected boolean hasValidValue() {
+            return getElement().getProperty("property", "").matches("[0-9]*");
+        }
+    }
+
+    @Test
+    void integerToString_basicCases() {
+        IntegerToStringField field = new IntegerToStringField();
+        ValueChangeMonitor<Integer> monitor = new ValueChangeMonitor<>(field);
+        assertNull(field.getValue());
+
+        // Verify base cases
+        field.getElement().setProperty("property", "10");
+        assertEquals(10, field.getValue().intValue());
+        monitor.assertEvent(false, null, 10);
+
+        // Verify base cases
+        field.getElement().setProperty("property", null);
+        assertNull(field.getValue());
+        monitor.assertEvent(false, 10, null);
+
+        field.setValue(20);
+        assertEquals("20", field.getElement().getProperty("property"));
+        monitor.assertEvent(false, null, 20);
+    }
+
+    @Test
+    void integerToString_nonIntegerInput_ignore() {
+        IntegerToStringField field = new IntegerToStringField();
+        ValueChangeMonitor<Integer> monitor = new ValueChangeMonitor<>(field);
+
+        field.getElement().setProperty("property", "Not a number");
+        monitor.assertNoEvent();
+        assertNull(field.getValue());
+        assertEquals("Not a number", field.getElement().getProperty("property"),
+                "Unparseable should not affect property");
+
+        field.setValue(10);
+        monitor.assertEvent(false, null, 10);
+        assertEquals("10", field.getElement().getProperty("property"),
+                "setValue should override unparseable property");
+    }
+
+    @Tag("tag")
+    private static class RadixField
+            extends AbstractSinglePropertyField<RadixField, Integer> {
+
+        private int radix = 10;
+
+        public RadixField() {
+            super("property", Integer.valueOf(0), String.class,
+                    (instance, value) -> instance.presentationToModel(value),
+                    (instance, value) -> instance.modelToPresentation(value));
+        }
+
+        private Integer presentationToModel(String presentationValue) {
+            return Integer.valueOf(Integer.parseInt(presentationValue, radix));
+        }
+
+        private String modelToPresentation(Integer integer) {
+            return Integer.toString(integer.intValue(), radix);
+        }
+
+        public void setRadix(int radix) {
+            this.radix = radix;
+
+            setPresentationValue(getValue());
+        }
+    }
+
+    @Test
+    void radixField() {
+        RadixField field = new RadixField();
+        ValueChangeMonitor<Integer> changeMonitor = new ValueChangeMonitor<>(
+                field);
+
+        field.setValue(20);
+        changeMonitor.discard();
+        assertEquals("20", field.getElement().getProperty("property"));
+
+        field.setRadix(16);
+        changeMonitor.assertNoEvent();
+        assertEquals("14", field.getElement().getProperty("property"));
+
+        field.getElement().setProperty("property", "f");
+        changeMonitor.discard();
+        assertEquals(15, field.getValue().intValue());
+    }
+
+    @Tag("tag")
+    private static class JsonField
+            extends AbstractSinglePropertyField<JsonField, JsonNode> {
+        public JsonField() {
+            super("property", JacksonUtils.nullNode(), false);
+        }
+    }
+
+    @Tag("tag")
+    private static class JsonArrayField
+            extends AbstractSinglePropertyField<JsonArrayField, ArrayNode> {
+        public JsonArrayField() {
+            super("property", JacksonUtils.createArray(), false);
+        }
+    }
+
+    @Test
+    void jsonField() {
+        JsonField field = new JsonField();
+        ValueChangeMonitor<JsonNode> monitor = new ValueChangeMonitor<>(field);
+
+        assertEquals(JsonNodeType.NULL, field.getValue().getNodeType());
+        monitor.assertNoEvent();
+
+        field.setValue(JacksonUtils.createArray(JacksonUtils.createNode("foo"),
+                JacksonUtils.createNode(42)));
+        monitor.discard();
+        assertEquals("[\"foo\",42]",
+                field.getElement().getPropertyRaw("property").toString());
+
+        field.getElement().setPropertyJson("property",
+                JacksonUtils.createObjectNode());
+        monitor.discard();
+        assertEquals("{}", field.getValue().toString());
+
+        field.getElement().setProperty("property", "text");
+        monitor.discard();
+        assertEquals("\"text\"", field.getValue().toString());
+    }
+
+    @Test
+    void jsonArrayField() {
+        JsonArrayField field = new JsonArrayField();
+        ValueChangeMonitor<ArrayNode> monitor = new ValueChangeMonitor<>(field);
+
+        assertEquals(JsonNodeType.ARRAY, field.getValue().getNodeType());
+        assertEquals(0, field.getValue().size());
+        monitor.assertNoEvent();
+
+        field.setValue(JacksonUtils.createArray(JacksonUtils.createNode("foo"),
+                JacksonUtils.createNode(42)));
+        monitor.discard();
+        assertEquals("[\"foo\",42]",
+                field.getElement().getPropertyRaw("property").toString());
+
+        field.getElement().setPropertyJson("property", JacksonUtils.createArray(
+                JacksonUtils.createNode(37), JacksonUtils.createNode("bar")));
+        monitor.discard();
+        assertEquals("[37,\"bar\"]", field.getValue().toString());
+    }
+
+    @Test
+    void noOwnPublicApi() {
+        List<Method> newPublicMethods = PublicApiAnalyzer
+                .findNewPublicMethods(AbstractSinglePropertyField.class)
+                .collect(Collectors.toList());
+        assertEquals(Collections.emptyList(), newPublicMethods);
+    }
+
+    @Test
+    void serializable() {
+        StringField field = new StringField();
+        field.addValueChangeListener(ignore -> {
+        });
+        field.setValue("foo");
+
+        StringField anotherField = SerializationUtils.roundtrip(field);
+        assertEquals("foo", anotherField.getValue());
+    }
+
+    @Test
+    void getValue_wrapExistingElement_elementHasProperty_valueIsThePropertyValue() {
+        Element element = new Element("tag");
+        element.setProperty("property", "foo");
+
+        UI ui = new MockUI();
+        UI.setCurrent(ui);
+
+        Instantiator instantiator = mock(Instantiator.class);
+        TestVaadinServletService service = (TestVaadinServletService) ui
+                .getSession().getService();
+        service.setInstantiator(instantiator);
+
+        when(instantiator.createComponent(StringField.class))
+                .thenAnswer(a -> new StringField());
+
+        StringField field = Component.from(element, StringField.class);
+        assertEquals("foo", field.getValue());
+    }
+
+    /** Jackson tests **/
+
+    @Tag("tag")
+    private static class JacksonField
+            extends AbstractSinglePropertyField<JacksonField, BaseJsonNode> {
+        public JacksonField() {
+            super("property", JacksonUtils.nullNode(), false);
+        }
+    }
+
+    @Tag("tag")
+    private static class JacksonArrayField
+            extends AbstractSinglePropertyField<JacksonArrayField, ArrayNode> {
+        public JacksonArrayField() {
+            super("property", JacksonUtils.createArray(), false);
+        }
+    }
+
+    @Test
+    void jacksonField() {
+        JacksonField field = new JacksonField();
+        ValueChangeMonitor<BaseJsonNode> monitor = new ValueChangeMonitor<>(
+                field);
+
+        assertEquals(JsonNodeType.NULL, field.getValue().getNodeType());
+        monitor.assertNoEvent();
+
+        field.setValue(JacksonUtils.createArray(JacksonUtils.createNode("foo"),
+                JacksonUtils.createNode(42)));
+        monitor.discard();
+        assertEquals("[\"foo\",42]",
+                field.getElement().getPropertyRaw("property").toString());
+
+        field.getElement().setPropertyJson("property",
+                JacksonUtils.createObjectNode());
+        monitor.discard();
+        assertEquals("{}", field.getValue().toString());
+
+        field.getElement().setProperty("property", "text");
+        monitor.discard();
+        assertEquals("\"text\"", field.getValue().toString());
+    }
+
+    @Test
+    void jacksonArrayField() {
+        JacksonArrayField field = new JacksonArrayField();
+        ValueChangeMonitor<ArrayNode> monitor = new ValueChangeMonitor<>(field);
+
+        assertEquals(JsonNodeType.ARRAY, field.getValue().getNodeType());
+        assertEquals(0, field.getValue().size());
+        monitor.assertNoEvent();
+
+        field.setValue(JacksonUtils.createArray(JacksonUtils.createNode("foo"),
+                JacksonUtils.createNode(42)));
+        monitor.discard();
+        assertEquals("[\"foo\",42]",
+                field.getElement().getPropertyRaw("property").toString());
+
+        field.getElement().setPropertyJson("property", JacksonUtils.createArray(
+                JacksonUtils.createNode(37), JacksonUtils.createNode("bar")));
+        monitor.discard();
+        assertEquals("[37,\"bar\"]", field.getValue().toString());
+    }
+}

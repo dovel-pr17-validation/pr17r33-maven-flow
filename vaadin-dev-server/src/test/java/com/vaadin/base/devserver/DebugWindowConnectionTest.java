@@ -1,0 +1,313 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.base.devserver;
+
+import java.lang.reflect.InvocationTargetException;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.atmosphere.cpr.AtmosphereRequest;
+import org.atmosphere.cpr.AtmosphereResource;
+import org.atmosphere.cpr.Broadcaster;
+import org.junit.jupiter.api.Test;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.flow.di.Lookup;
+import com.vaadin.flow.internal.BrowserLiveReload;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.server.DevToolsToken;
+import com.vaadin.flow.server.MockVaadinContext;
+import com.vaadin.flow.server.VaadinContext;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.server.startup.ApplicationConfiguration;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+class DebugWindowConnectionTest {
+
+    private final DebugWindowConnection reload = new DebugWindowConnection(
+            getMockContext());
+
+    @Test
+    void onConnect_suspend_sayHello() {
+        AtmosphereResource resource = mock(AtmosphereResource.class);
+        createMockRequestWithToken(resource, DevToolsToken.getToken());
+
+        Broadcaster broadcaster = mock(Broadcaster.class);
+        when(resource.getBroadcaster()).thenReturn(broadcaster);
+
+        reload.onConnect(resource);
+
+        assertTrue(reload.isLiveReload(resource));
+        verify(resource).suspend(-1);
+        verify(broadcaster).broadcast("{\"command\": \"hello\"}", resource);
+    }
+
+    @Test
+    void onconnect_should_allow_connection_if_valid_token_is_present() {
+        AtmosphereResource resource = mock(AtmosphereResource.class);
+        createMockRequestWithToken(resource, DevToolsToken.getToken());
+
+        Broadcaster broadcaster = mock(Broadcaster.class);
+        when(resource.getBroadcaster()).thenReturn(broadcaster);
+
+        reload.onConnect(resource);
+
+        assertTrue(reload.isLiveReload(resource));
+        verify(resource, times(1)).suspend(-1);
+        verify(broadcaster, times(1)).broadcast("{\"command\": \"hello\"}",
+                resource);
+    }
+
+    @Test
+    void onconnect_should_prevent_connection_if_invalid_token_is_present() {
+        AtmosphereResource resource = mock(AtmosphereResource.class);
+        createMockRequestWithToken(resource, "invalidToken");
+
+        Broadcaster broadcaster = mock(Broadcaster.class);
+        when(resource.getBroadcaster()).thenReturn(broadcaster);
+
+        reload.onConnect(resource);
+
+        assertFalse(reload.isLiveReload(resource));
+        verify(resource, times(0)).suspend(-1);
+        verify(broadcaster, times(0)).broadcast("{\"command\": \"hello\"}",
+                resource);
+
+    }
+
+    @Test
+    void onconnect_should_prevent_connection_if_no_token_at_all() {
+        AtmosphereResource resource = mock(AtmosphereResource.class);
+        AtmosphereRequest request = createMockRequestWithToken(resource, "");
+
+        Broadcaster broadcaster = mock(Broadcaster.class);
+        when(resource.getBroadcaster()).thenReturn(broadcaster);
+
+        reload.onConnect(resource);
+
+        assertFalse(reload.isLiveReload(resource));
+        verify(resource, times(0)).suspend(-1);
+        verify(broadcaster, times(0)).broadcast("{\"command\": \"hello\"}",
+                resource);
+
+        when(request.getParameter("token")).thenReturn(null);
+
+        reload.onConnect(resource);
+
+        assertFalse(reload.isLiveReload(resource));
+        verify(resource, times(0)).suspend(-1);
+        verify(broadcaster, times(0)).broadcast("{\"command\": \"hello\"}",
+                resource);
+    }
+
+    @Test
+    void reload_twoConnections_sendReloadCommand() {
+        AtmosphereResource resource1 = mock(AtmosphereResource.class);
+        createMockRequestWithToken(resource1, DevToolsToken.getToken());
+
+        AtmosphereResource resource2 = mock(AtmosphereResource.class);
+        createMockRequestWithToken(resource2, DevToolsToken.getToken());
+
+        Broadcaster broadcaster = mock(Broadcaster.class);
+        when(resource1.getBroadcaster()).thenReturn(broadcaster);
+        when(resource2.getBroadcaster()).thenReturn(broadcaster);
+        reload.onConnect(resource1);
+        reload.onConnect(resource2);
+        assertTrue(reload.isLiveReload(resource1));
+        assertTrue(reload.isLiveReload(resource2));
+
+        reload.reload();
+
+        ObjectNode reloadCommand = JacksonUtils.createObjectNode();
+        reloadCommand.put("command", "reload");
+        String reloadJson = reloadCommand.toString();
+        verify(broadcaster).broadcast(reloadJson, resource1);
+        verify(broadcaster).broadcast(reloadJson, resource2);
+    }
+
+    @Test
+    void requestDevToolsInterface_alwaysReturnsEqualingInterfaceForResource() {
+        AtmosphereResource resource1 = mock(AtmosphereResource.class);
+        AtmosphereResource resource2 = mock(AtmosphereResource.class);
+
+        DevToolsInterface devToolsInterface = reload
+                .getDevToolsInterface(resource1);
+        DevToolsInterface devToolsInterface2 = reload
+                .getDevToolsInterface(resource2);
+
+        assertNotEquals(devToolsInterface, devToolsInterface2,
+                "DevTollsInterface for different resources should not be equal");
+        assertEquals(devToolsInterface, reload.getDevToolsInterface(resource1));
+        assertEquals(devToolsInterface2,
+                reload.getDevToolsInterface(resource2));
+
+        Map<DevToolsInterface, String> map = new HashMap<>();
+        map.put(devToolsInterface, "one");
+        map.put(devToolsInterface2, "two");
+
+        assertEquals("one", map.get(reload.getDevToolsInterface(resource1)));
+        assertEquals("two", map.get(reload.getDevToolsInterface(resource2)));
+    }
+
+    @Test
+    void reload_resourceIsNotSet_reloadCommandIsNotSent() {
+        AtmosphereResource resource = mock(AtmosphereResource.class);
+        Broadcaster broadcaster = mock(Broadcaster.class);
+        when(resource.getBroadcaster()).thenReturn(broadcaster);
+        assertFalse(reload.isLiveReload(resource));
+
+        reload.reload();
+
+        verifyNoInteractions(broadcaster);
+    }
+
+    @Test
+    void reload_resourceIsDisconnected_reloadCommandIsNotSent() {
+        AtmosphereResource resource = mock(AtmosphereResource.class);
+        createMockRequestWithToken(resource, DevToolsToken.getToken());
+
+        Broadcaster broadcaster = mock(Broadcaster.class);
+        when(resource.getBroadcaster()).thenReturn(broadcaster);
+        reload.onConnect(resource);
+        assertTrue(reload.isLiveReload(resource));
+        reset(broadcaster);
+        reload.onDisconnect(resource);
+        assertFalse(reload.isLiveReload(resource));
+
+        reload.reload();
+
+        verifyNoInteractions(broadcaster);
+    }
+
+    @Test
+    void getBackend_JRebelClassEventListenerClassLoaded_returnsJREBEL() {
+        class JRebelInitializer {
+        }
+        DebugWindowConnection connection = new DebugWindowConnection(
+                new ClassLoader(getClass().getClassLoader()) {
+                    @Override
+                    protected Class<?> findClass(String name)
+                            throws ClassNotFoundException {
+                        switch (name) {
+                        case "org.zeroturnaround.jrebel.vaadin.JRebelInitializer":
+                            return JRebelInitializer.class;
+                        default:
+                            throw new ClassNotFoundException();
+                        }
+                    }
+                }, getMockContext());
+        assertEquals(BrowserLiveReload.Backend.JREBEL, connection.getBackend());
+    }
+
+    @Test
+    void getBackend_HotSwapVaadinIntegrationClassLoaded_returnsHOTSWAP_AGENT() {
+        class VaadinIntegration {
+        }
+        DebugWindowConnection connection = new DebugWindowConnection(
+                new ClassLoader(getClass().getClassLoader()) {
+                    @Override
+                    protected Class<?> findClass(String name)
+                            throws ClassNotFoundException {
+                        switch (name) {
+                        case "org.hotswap.agent.plugin.vaadin.VaadinIntegration":
+                            return VaadinIntegration.class;
+                        default:
+                            throw new ClassNotFoundException();
+                        }
+                    }
+                }, getMockContext());
+        assertEquals(BrowserLiveReload.Backend.HOTSWAP_AGENT,
+                connection.getBackend());
+    }
+
+    @Test
+    void getBackend_SpringBootDevtoolsClassesLoaded_returnsSPRING_BOOT_DEVTOOLS() {
+        class SpringServlet {
+        }
+        class LiveReloadServer {
+        }
+        DebugWindowConnection connection = new DebugWindowConnection(
+                new ClassLoader(getClass().getClassLoader()) {
+                    @Override
+                    protected Class<?> findClass(String name)
+                            throws ClassNotFoundException {
+                        switch (name) {
+                        case "com.vaadin.flow.spring.SpringServlet":
+                            return SpringServlet.class;
+                        case "org.springframework.boot.devtools.livereload.LiveReloadServer":
+                            return LiveReloadServer.class;
+                        default:
+                            throw new ClassNotFoundException();
+                        }
+                    }
+                }, getMockContext());
+        assertEquals(BrowserLiveReload.Backend.SPRING_BOOT_DEVTOOLS,
+                connection.getBackend());
+    }
+
+    @Test
+    void backwardsCompatibilityClassExists() {
+        // JRebel and HotswapAgent live reload triggering only works if
+        // com.vaadin.flow.internal.BrowserLiveReloadAccessor exists on
+        // classpath.
+        ClassLoader classLoader = getClass().getClassLoader();
+        String className = "com.vaadin.base.devserver.BrowserLiveReloadAccessorImpl";
+        String methodName = "getLiveReload";
+        try {
+            Class<?> clazz = classLoader.loadClass(className);
+            clazz.getMethod(methodName, VaadinService.class);
+            clazz.getDeclaredConstructor().newInstance();
+        } catch (ClassNotFoundException | NoSuchMethodException
+                | InstantiationException | IllegalAccessException
+                | InvocationTargetException e) {
+            e.printStackTrace();
+            fail(className
+                    + " required on classpath for JRebel / HotswapAgent live reload integration, must be instantiable and have method "
+                    + methodName + " accepting a VaadinService");
+        }
+    }
+
+    private VaadinContext getMockContext() {
+        VaadinContext context = new MockVaadinContext();
+        ApplicationConfiguration appConfig = mock(
+                ApplicationConfiguration.class);
+        when(appConfig.isProductionMode()).thenReturn(false);
+        context.setAttribute(ApplicationConfiguration.class, appConfig);
+        context.setAttribute(Lookup.class,
+                Lookup.of(appConfig, ApplicationConfiguration.class));
+        return context;
+    }
+
+    private AtmosphereRequest createMockRequestWithToken(
+            AtmosphereResource resource, String tokenToGiveBack) {
+        AtmosphereRequest request = mock(AtmosphereRequest.class);
+        when(resource.getRequest()).thenReturn(request);
+        when(request.getParameter("token")).thenReturn(tokenToGiveBack);
+        return request;
+    }
+
+}

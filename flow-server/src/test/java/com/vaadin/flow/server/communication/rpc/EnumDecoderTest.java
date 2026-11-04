@@ -1,0 +1,76 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.communication.rpc;
+
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.internal.JacksonUtils;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class EnumDecoderTest {
+
+    private StringToEnumDecoder decoder = new StringToEnumDecoder();
+
+    enum Title {
+        MR, MRS;
+    }
+
+    @Test
+    void isApplicable_applicableToStringAndEnum() {
+        assertTrue(decoder.isApplicable(JacksonUtils.createNode("foo"),
+                Title.class));
+    }
+
+    @Test
+    void isApplicable_notApplicableToBooleanAndEnum() {
+        assertFalse(decoder.isApplicable(JacksonUtils.createNode(true),
+                Enum.class));
+    }
+
+    @Test
+    void isApplicable_notApplicableToStringAndString() {
+        assertFalse(decoder.isApplicable(JacksonUtils.createNode("foo"),
+                String.class));
+    }
+
+    @Test
+    void isApplicable_notApplicableToStringAndAbstractEnum() {
+        assertFalse(decoder.isApplicable(JacksonUtils.createNode("foo"),
+                Enum.class));
+    }
+
+    @Test
+    void stringToEnum_convertableString_valueIsConverted()
+            throws RpcDecodeException {
+        Title title = Title.MRS;
+        Title decoded = decoder.decode(JacksonUtils.createNode(title.name()),
+                Title.class);
+        assertEquals(title, decoded);
+    }
+
+    @Test
+    void stringToEnum_nonConvertableString_valueIsConverted()
+            throws RpcDecodeException {
+        assertThrows(IllegalArgumentException.class, () -> {
+            decoder.decode(JacksonUtils.createNode("foo"), Title.class);
+        });
+    }
+
+}

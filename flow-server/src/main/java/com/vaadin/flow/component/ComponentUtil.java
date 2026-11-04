@@ -1,0 +1,1097 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.component;
+
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
+import java.util.stream.Stream.Builder;
+
+import com.vaadin.flow.component.Component.MapToExistingElement;
+import com.vaadin.flow.component.dependency.JavaScript;
+import com.vaadin.flow.component.dependency.StyleSheet;
+import com.vaadin.flow.component.dependency.Uses;
+import com.vaadin.flow.component.internal.ComponentMetaData;
+import com.vaadin.flow.component.internal.ComponentMetaData.DependencyInfo;
+import com.vaadin.flow.component.internal.ComponentMetaData.SynchronizedPropertyInfo;
+import com.vaadin.flow.di.Instantiator;
+import com.vaadin.flow.dom.DomEvent;
+import com.vaadin.flow.dom.DomListenerRegistration;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.dom.ShadowRoot;
+import com.vaadin.flow.function.SerializableConsumer;
+import com.vaadin.flow.function.SerializableSupplier;
+import com.vaadin.flow.function.SerializableTriConsumer;
+import com.vaadin.flow.i18n.LocaleChangeEvent;
+import com.vaadin.flow.i18n.LocaleChangeObserver;
+import com.vaadin.flow.internal.ReflectionCache;
+import com.vaadin.flow.internal.StateNode;
+import com.vaadin.flow.internal.StateTree;
+import com.vaadin.flow.internal.nodefeature.ElementData;
+import com.vaadin.flow.internal.nodefeature.VirtualChildrenList;
+import com.vaadin.flow.router.Route;
+import com.vaadin.flow.router.Router;
+import com.vaadin.flow.server.Attributes;
+import com.vaadin.flow.server.ErrorEvent;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.flow.shared.Registration;
+
+/**
+ * Utility methods for {@link Component}.
+ *
+ * @author Vaadin Ltd
+ * @since 1.0
+ */
+public class ComponentUtil {
+
+    static ReflectionCache<Component, ComponentMetaData> componentMetaDataCache = new ReflectionCache<>(
+            ComponentMetaData::new);
+
+    private static final Map<String, Set<Class<? extends Component>>> tagToComponentsMap = new ConcurrentHashMap<>();
+
+    /**
+     * Registers a component class with a specific HTML tag. This mapping is
+     * maintained in a static map and is used primarily during development mode
+     * for various component operations like rendering and event handling.
+     *
+     * @param tag
+     *            The HTML tag associated with the component class.
+     * @param componentClass
+     *            The component class to be registered with the given tag.
+     * @since 24.5
+     * @deprecated the mapping was added for internal use by development tools,
+     *             which no longer need it, and it is never filled in Spring
+     *             Boot applications. It will be removed without a replacement.
+     */
+    @Deprecated(since = "25.4", forRemoval = true)
+    public static void registerComponentClass(String tag,
+            Class<? extends Component> componentClass) {
+        tagToComponentsMap
+                .computeIfAbsent(tag, k -> ConcurrentHashMap.newKeySet())
+                .add(componentClass);
+    }
+
+    /**
+     * Removes all component classes from the mapping of HTML tags to component
+     * classes.
+     * <p>
+     * The mapping is static, so it outlives the application that registered the
+     * classes. Clear it when the application stops, so that the mapping does
+     * not keep the classes, and through them their class loader, reachable
+     * after the application has been reloaded in a new class loader.
+     *
+     * @see #registerComponentClass(String, Class)
+     * @deprecated the mapping was added for internal use by development tools,
+     *             which no longer need it, and it is never filled in Spring
+     *             Boot applications. It will be removed without a replacement.
+     * @since 25.4
+     */
+    @Deprecated(since = "25.4", forRemoval = true)
+    public static void unregisterAllComponentClasses() {
+        tagToComponentsMap.clear();
+    }
+
+    /**
+     * Retrieves the set of component classes associated with a specific HTML
+     * tag.
+     * <p>
+     * Note: This method retrieves data from a mapping that is only populated in
+     * development mode. In production mode, this method will always return an
+     * empty set.
+     *
+     * @param tag
+     *            The HTML tag for which component classes are to be retrieved.
+     * @return A set of component classes associated with the specified HTML
+     *         tag. Returns an empty set if no classes are associated with the
+     *         tag or if running in production mode.
+     * @since 24.5
+     * @deprecated the mapping was added for internal use by development tools,
+     *             which no longer need it, and it is never filled in Spring
+     *             Boot applications. It will be removed without a replacement.
+     */
+    @Deprecated(since = "25.4", forRemoval = true)
+    public static Set<Class<? extends Component>> getComponentsByTag(
+            String tag) {
+        return tagToComponentsMap.getOrDefault(tag, Collections.emptySet());
+    }
+
+    /**
+     * Provides access to the entire mapping of HTML tags to component classes.
+     * <p>
+     * Note: This mapping is only populated in development mode. The map is
+     * returned as unmodifiable to prevent external modifications.
+     *
+     * @return An unmodifiable map of HTML tags to sets of component classes.
+     *         This map is only populated in development mode and will be empty
+     *         in production mode.
+     * @since 24.5
+     * @deprecated the mapping was added for internal use by development tools,
+     *             which no longer need it, and it is never filled in Spring
+     *             Boot applications. It will be removed without a replacement.
+     */
+    @Deprecated(since = "25.4", forRemoval = true)
+    public static Map<String, Set<Class<? extends Component>>> getAllTagMappings() {
+        return Collections.unmodifiableMap(tagToComponentsMap);
+    }
+
+    private ComponentUtil() {
+        // Util methods only
+    }
+
+    /**
+     * Finds the first component instance in each {@link Element} subtree by
+     * traversing the {@link Element} tree starting from the given element.
+     *
+     * @param element
+     *            the element to start scanning from
+     * @param componentConsumer
+     *            a consumer which is called for each found component
+     */
+    public static void findComponents(Element element,
+            Consumer<Component> componentConsumer) {
+        assert element != null;
+        assert componentConsumer != null;
+
+        Optional<Component> maybeComponent = element.getComponent();
+
+        if (maybeComponent.isPresent()) {
+            Component component = maybeComponent.get();
+            componentConsumer.accept(component);
+            return;
+        }
+
+        element.getChildren().forEach(childElement -> ComponentUtil
+                .findComponents(childElement, componentConsumer));
+    }
+
+    /**
+     * Gets the parent of the given component, which is inside the given
+     * composite.
+     * <p>
+     * This method is meant for internal use only.
+     *
+     * @param composite
+     *            the composite containing the component
+     * @param component
+     *            the component to get the parent for, must be inside the
+     *            composite or a nested composite
+     * @return the parent of the component, never <code>null</code>
+     */
+    public static Component getParentUsingComposite(Composite<?> composite,
+            Component component) {
+        // If this is the component inside a composite or a nested
+        // composite, we need to traverse the composite hierarchy to find
+        // the parent
+        Composite<?> compositeAncestor = composite;
+        while (true) {
+            Component compositeChild = compositeAncestor.getContent();
+            if (compositeChild == component) {
+                return compositeAncestor;
+            }
+            compositeAncestor = (Composite<?>) compositeAncestor.getContent();
+        }
+
+    }
+
+    /**
+     * Returns the innermost component from a {@link Composite} chain, i.e. the
+     * first content which is not a {@link Composite}.
+     *
+     * @param composite
+     *            a composite in the chain
+     * @return the innermost component
+     */
+    public static Component getInnermostComponent(Composite<?> composite) {
+        Component content = composite.getContent();
+        while (content instanceof Composite) {
+            content = ((Composite<?>) content).getContent();
+        }
+        return content;
+    }
+
+    /**
+     * Checks if the given component is inside a {@link Composite} chain, i.e.
+     * it is a composite in the chain or the content of the innermost
+     * {@link Composite}.
+     *
+     * @param composite
+     *            the first composite
+     * @param component
+     *            the component to look for
+     * @return <code>true</code> if the component is inside the composite chain,
+     *         <code>false</code> otherwise
+     */
+    public static boolean isCompositeContent(Composite<?> composite,
+            Component component) {
+        Component compositeContent = composite.getContent();
+        if (compositeContent == component) {
+            return true;
+        } else if (compositeContent instanceof Composite) {
+            // Nested composites
+            return isCompositeContent((Composite<?>) compositeContent,
+                    component);
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Finds the first component by traversing upwards in the element hierarchy,
+     * starting from the given element.
+     *
+     * @param element
+     *            the element from which to begin the search
+     * @return optional of the component, empty if no component is found
+     */
+    public static Optional<Component> findParentComponent(Element element) {
+        Element mappedElement = element;
+        while (mappedElement != null
+                && !mappedElement.getComponent().isPresent()) {
+            mappedElement = mappedElement.getParent();
+        }
+        if (mappedElement == null) {
+            return Optional.empty();
+        }
+
+        return Optional.of(getInnermostComponent(mappedElement));
+    }
+
+    /**
+     * Checks whether the given component is effectively visible — the component
+     * itself and every ancestor up to the root are visible.
+     * {@link Component#isVisible()} only reports the component's own visibility
+     * flag; a component whose own flag is {@code true} can still be invisible
+     * on the client if any ancestor was hidden via {@code setVisible(false)}.
+     * This method walks the parent chain and returns {@code false} as soon as
+     * any node in the chain is hidden.
+     *
+     * @param component
+     *            the component to check, not {@code null}
+     * @return {@code true} if the component and all its ancestors are visible
+     * @since 25.2
+     */
+    public static boolean isEffectivelyVisible(Component component) {
+        return component.getElement().getNode().isVisible();
+    }
+
+    /**
+     * Gets the innermost mapped component for the element.
+     * <p>
+     * This returns {@link Element#getComponent()} if something else than a
+     * {@link Composite} is mapped to the element. If a {@link Composite} is
+     * mapped to the element, finds the innermost content of the
+     * {@link Composite} chain.
+     *
+     * @param element
+     *            the element which is mapped to a component
+     * @return the innermost component mapped to the element
+     */
+    public static Component getInnermostComponent(Element element) {
+        assert element.getComponent().isPresent();
+
+        Component component = element.getComponent().get();
+        if (component instanceof Composite) {
+            return ComponentUtil
+                    .getInnermostComponent((Composite<?>) component);
+        }
+
+        return component;
+    }
+
+    /**
+     * Handles triggering the {@link Component#onAttach(AttachEvent) onAttach}
+     * method and firing the {@link AttachEvent} for the given component when it
+     * has been attached to a UI.
+     *
+     * @param component
+     *            the component attached to a UI
+     * @param initialAttach
+     *            indicates if this is the first time the component (element)
+     *            has been attached
+     */
+    public static void onComponentAttach(Component component,
+            boolean initialAttach) {
+        if (component instanceof Composite) {
+            onComponentAttach(((Composite<?>) component).getContent(),
+                    initialAttach);
+        }
+
+        if (component instanceof LocaleChangeObserver) {
+            component.getUI().ifPresent(ui -> ((LocaleChangeObserver) component)
+                    .localeChange(new LocaleChangeEvent(ui, ui.getLocale())));
+        }
+
+        AttachEvent attachEvent = new AttachEvent(component, initialAttach);
+        component.onAttach(attachEvent);
+        fireEvent(component, attachEvent);
+
+        // inform component about onEnabledState if new state differs from
+        // internal state
+        if (component instanceof HasEnabled
+                && component.getElement().isEnabled() != component.getElement()
+                        .getNode().isEnabledSelf()) {
+
+            Element parent = component.getElement().getParent();
+            if (parent != null
+                    && isAttachedToParent(component.getElement(), parent)) {
+                component.onEnabledStateChanged(
+                        component.getElement().isEnabled());
+            }
+        }
+
+        ComponentUtil.setJavaClassNameInDevelopment(component);
+    }
+
+    private static void setJavaClassNameInDevelopment(Component component) {
+        Optional<UI> ui = component.getUI();
+        if (ui.isEmpty()) {
+            return;
+        }
+        VaadinSession session = ui.get().getSession();
+        if (session == null || session.getConfiguration() == null
+                || session.getConfiguration().isProductionMode()) {
+            return;
+        }
+
+        StateNode n = component.getElement().getNode();
+        if (n.hasFeature(ElementData.class)) {
+            n.getFeature(ElementData.class).setJavaClass(component.getClass());
+
+        }
+    }
+
+    /**
+     * Handles triggering the {@link Component#onDetach(DetachEvent) onDetach}
+     * method and firing the {@link DetachEvent} for the given component right
+     * before it is detached from a UI.
+     *
+     * @param component
+     *            the component detached from a UI
+     */
+    public static void onComponentDetach(Component component) {
+        if (component instanceof Composite) {
+            onComponentDetach(((Composite<?>) component).getContent());
+        }
+
+        DetachEvent detachEvent = new DetachEvent(component);
+        try {
+            component.onDetach(detachEvent);
+        } catch (RuntimeException e) {
+            VaadinSession session = VaadinSession.getCurrent();
+            if (session == null) {
+                throw e;
+            }
+            session.getErrorHandler().error(new ErrorEvent(e));
+        }
+        fireEvent(component, detachEvent);
+
+        // inform component about onEnabledState if parent and child states
+        // differ.
+        if (component instanceof HasEnabled
+                && component.getElement().isEnabled() != component.getElement()
+                        .getNode().isEnabledSelf()) {
+            Element parent = component.getElement().getParent();
+            if (parent != null) {
+                boolean state = isAttachedToParent(component.getElement(),
+                        parent) ? checkParentChainState(parent)
+                                : component.getElement().getNode()
+                                        .isEnabledSelf();
+                component.onEnabledStateChanged(state);
+            } else {
+                component.onEnabledStateChanged(
+                        component.getElement().isEnabled());
+            }
+        }
+    }
+
+    private static boolean isAttachedToParent(Element element, Element parent) {
+        return parent.getChildren().anyMatch(child -> child.equals(element))
+                || isVirtualChild(element, parent);
+    }
+
+    private static boolean isVirtualChild(Element element, Element parent) {
+        Iterator<StateNode> iterator = parent.getNode()
+                .getFeatureIfInitialized(VirtualChildrenList.class)
+                .map(VirtualChildrenList::iterator)
+                .orElse(Collections.emptyIterator());
+        while (iterator.hasNext()) {
+            if (iterator.next().equals(element.getNode())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean checkParentChainState(Element element) {
+        if (!element.getNode().isEnabledSelf()) {
+            return false;
+        }
+
+        Element parent = element.getParent();
+        if (parent != null) {
+            if (isAttachedToParent(element, parent)) {
+                return checkParentChainState(parent);
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Adds a listener for an event of the given type to the {@code component}.
+     *
+     * @param <T>
+     *            the component event type
+     * @param component
+     *            the component to add the {@code listener}
+     * @param eventType
+     *            the component event type, not <code>null</code>
+     * @param listener
+     *            the listener to add, not <code>null</code>
+     * @return a handle that can be used for removing the listener
+     */
+    public static <T extends ComponentEvent<?>> Registration addListener(
+            Component component, Class<T> eventType,
+            ComponentEventListener<T> listener) {
+        return component.addListener(eventType, listener);
+    }
+
+    /**
+     * Adds a listener for an event of the given type to the {@code component},
+     * and customizes the corresponding DOM event listener with the given
+     * consumer. This allows overriding eg. the debounce settings defined in the
+     * {@link DomEvent} annotation.
+     * <p>
+     * Note that customizing the DOM event listener works only for event types
+     * which are annotated with {@link DomEvent}. Use
+     * {@link #addListener(Component, Class, ComponentEventListener)} for other
+     * listeners, or if you don't need to customize the DOM listener.
+     *
+     * @param <T>
+     *            the event type
+     * @param component
+     *            the component to add the {@code listener}
+     * @param eventType
+     *            the event type for which to call the listener, must be
+     *            annotated with {@link DomEvent}
+     * @param listener
+     *            the listener to call when the event occurs, not {@code null}
+     * @param domListenerConsumer
+     *            a consumer to customize the behavior of the DOM event
+     *            listener, not {@code null}
+     * @return a handle that can be used for removing the listener
+     * @throws IllegalArgumentException
+     *             if the event type is not annotated with {@link DomEvent}
+     * @since 1.1
+     */
+    public static <T extends ComponentEvent<?>> Registration addListener(
+            Component component, Class<T> eventType,
+            ComponentEventListener<T> listener,
+            Consumer<DomListenerRegistration> domListenerConsumer) {
+        return component.getEventBus().addListener(eventType, listener,
+                domListenerConsumer);
+    }
+
+    /**
+     * Check if the component has at least one registered listener of the given
+     * event type.
+     *
+     * @param <T>
+     *            the component event type
+     * @param component
+     *            the component to which the listener(s) are registered.
+     * @param eventType
+     *            the event type for which the listener(s) are registered.
+     * @return a boolean indicating whether at least one listener registered to
+     *         the component for the given event type.
+     * @since 23.0.7
+     */
+    public static <T extends ComponentEvent<?>> boolean hasEventListener(
+            Component component, Class<? extends T> eventType) {
+        return component.hasListener(eventType);
+    }
+
+    /**
+     * Returns all listeners that match or extend the given event type.
+     *
+     * @param component
+     *            the component from which to get the listeners
+     * @param eventType
+     *            the component event type
+     * @return A collection with all registered listeners for a given event
+     *         type. Empty if no listeners are found.
+     * @since 23.2
+     */
+    public static Collection<?> getListeners(Component component,
+            Class<? extends ComponentEvent> eventType) {
+        return component.getListeners(eventType);
+    }
+
+    /**
+     * Dispatches the event to all listeners registered for the event type.
+     *
+     * @see Component#fireEvent(ComponentEvent)
+     *
+     * @param <T>
+     *            the type of the component
+     * @param component
+     *            the component for which to fire events
+     * @param componentEvent
+     *            the event to fire
+     */
+    public static <T extends Component> void fireEvent(T component,
+            ComponentEvent<? extends T> componentEvent) {
+        component.fireEvent(componentEvent);
+    }
+
+    /**
+     * Creates a new component instance using the given element, maps the
+     * component to the element and optionally maps the element to the component
+     * (if <code>mapComponent</code> is <code>true</code>).
+     * <p>
+     * This is a helper method for Element#as and Component#from.
+     *
+     * @see Component#from(Element, Class)
+     * @see Element#as(Class)
+     *
+     * @param <T>
+     *            the component type
+     * @param element
+     *            the element
+     * @param componentType
+     *            the component type
+     * @param mapComponent
+     *            <code>true</code> to also map the element to the component,
+     *            <code>false</code> to only map the component to the element
+     * @return a new component instance of the given type
+     */
+    public static <T extends Component> T componentFromElement(Element element,
+            Class<T> componentType, boolean mapComponent) {
+        if (element == null) {
+            throw new IllegalArgumentException("Element to use cannot be null");
+        }
+        if (componentType == null) {
+            throw new IllegalArgumentException("Component type cannot be null");
+        }
+        MapToExistingElement wrapData = new MapToExistingElement(element,
+                mapComponent);
+
+        try {
+            Component.elementToMapTo.set(wrapData);
+            UI ui = UI.getCurrentOrThrow();
+            Instantiator instantiator = Instantiator.get(ui);
+            return instantiator.createComponent(componentType);
+        } finally {
+            // This should always be cleared, normally it's cleared in Component
+            // but in case of exception it might be not cleared
+            Component.elementToMapTo.remove();
+        }
+
+    }
+
+    /**
+     * Gets the synchronized property infos of the properties that are defined
+     * declaratively for the given class with their RPC update mode.
+     *
+     * @param componentClass
+     *            the component class to check
+     * @return the synchronized property infos of the properties defined
+     *         declaratively for the class
+     */
+    public static Collection<SynchronizedPropertyInfo> getSynchronizedProperties(
+            Class<? extends Component> componentClass) {
+        return componentMetaDataCache.get(componentClass)
+                .getSynchronizedProperties();
+    }
+
+    /**
+     * Gets the name of the synchronized property event defined declaratively
+     * for the given class.
+     *
+     * @param componentClass
+     *            the component class to check
+     * @return the synchronized property events defined declaratively for the
+     *         class
+     */
+    public static Stream<String> getSynchronizedPropertyEvents(
+            Class<? extends Component> componentClass) {
+        Collection<SynchronizedPropertyInfo> infos = componentMetaDataCache
+                .get(componentClass).getSynchronizedProperties();
+        return infos.stream().flatMap(SynchronizedPropertyInfo::getEventNames)
+                .distinct();
+    }
+
+    /**
+     * Gets the dependencies for the given class, defined using annotations (
+     * {@link JavaScript}, {@link StyleSheet} and {@link Uses}).
+     *
+     * @param service
+     *            the service to use for resolving dependencies
+     * @param componentClass
+     *            the component class to check
+     * @return the dependencies for the given class
+     */
+    public static DependencyInfo getDependencies(VaadinService service,
+            Class<? extends Component> componentClass) {
+        return componentMetaDataCache.get(componentClass)
+                .getDependencyInfo(service);
+    }
+
+    private static <T, U> void setData(Component component,
+            SerializableTriConsumer<Attributes, T, U> setter, T key, U value) {
+        Attributes attributes = component.attributes;
+        if (attributes == null) {
+            if (value == null) {
+                return;
+            }
+            attributes = new Attributes();
+            component.attributes = attributes;
+        }
+
+        setter.accept(attributes, key, value);
+
+        if (attributes.isEmpty()) {
+            component.attributes = null;
+        }
+    }
+
+    /**
+     * Stores a arbitrary value for the given component.
+     *
+     * @see #setData(Component, Class, Object)
+     * @see #getData(Component, String)
+     *
+     * @param component
+     *            the component for which to set the data
+     * @param key
+     *            the key with which the instance can be retrieved, not
+     *            <code>null</code>
+     * @param value
+     *            the data to set, or <code>null</code> to remove data
+     *            previously set with the same key
+     */
+    public static void setData(Component component, String key, Object value) {
+        setData(component, Attributes::setAttribute, key, value);
+    }
+
+    /**
+     * Stores an instance of a specific type for the given component.
+     *
+     * @see #setData(Component, String, Object)
+     * @see #getData(Component, Class)
+     *
+     * @param <T>
+     *            the data instance type
+     * @param component
+     *            the component for which to set the data
+     * @param type
+     *            the type of the data to set, not <code>null</code>
+     * @param value
+     *            the data instance to set, or <code>null</code> to remove data
+     *            previously set with the same type
+     */
+    public static <T> void setData(Component component, Class<T> type,
+            T value) {
+        setData(component, Attributes::setAttribute, type, value);
+    }
+
+    private static <T, U> U getData(Component component,
+            BiFunction<Attributes, T, U> getter, T key) {
+        Attributes attributes = component.attributes;
+        if (attributes == null) {
+            return null;
+        }
+        return getter.apply(attributes, key);
+    }
+
+    /**
+     * Gets a data instance with the given key, or <code>null</code> if no data
+     * has been set for that key.
+     *
+     * @see #setData(Component, String, Object)
+     *
+     * @param component
+     *            the component from which to get the data
+     * @param key
+     *            the data key
+     * @return the data instance, or <code>null</code> if no instance has been
+     *         set using the given key
+     */
+    public static Object getData(Component component, String key) {
+        return getData(component, Attributes::getAttribute, key);
+    }
+
+    /**
+     * Gets a data instance with the given type, or <code>null</code> if there
+     * is no such instance.
+     *
+     * @see #setData(Component, Class, Object)
+     *
+     * @param <T>
+     *            the data instance type
+     * @param component
+     *            the component from which to get the data
+     * @param type
+     *            the data type
+     * @return the data instance, or <code>null</code> if no instance has been
+     *         set using the given type
+     */
+    public static <T> T getData(Component component, Class<T> type) {
+        return getData(component,
+                (attributes, ignore) -> attributes.getAttribute(type), type);
+    }
+
+    /**
+     * Gets the router instance for the given component.
+     *
+     * Falls back to the router for the currently active VaadinService if the
+     * component is not attached.
+     *
+     * @param component
+     *            component for which the requested router instance serves
+     *            navigation
+     * @return a router instance
+     * @throws IllegalStateException
+     *             if no router instance is available
+     * @since 23.2
+     */
+    public static Router getRouter(HasElement component) {
+        Router router = null;
+        if (component.getElement().getNode().isAttached()) {
+            StateTree tree = (StateTree) component.getElement().getNode()
+                    .getOwner();
+            router = tree.getUI().getInternals().getRouter();
+        }
+        if (router == null) {
+            router = VaadinService.getCurrentOrThrow().getRouter();
+        }
+        if (router == null) {
+            throw new IllegalStateException(
+                    "Implicit router instance is not available.");
+        }
+        return router;
+    }
+
+    /**
+     * Walk up from given component until a Component with a Route annotation is
+     * found or empty if no Route is present in parents.
+     *
+     * @param component
+     *            Component to find current route component for
+     * @return Optional containing Route component if found
+     * @since 24.4.9
+     */
+    public static Optional<Component> getRouteComponent(Component component) {
+        if (component.getClass().isAnnotationPresent(Route.class)) {
+            return Optional.of(component);
+        }
+        if (component.getParent().isPresent()) {
+            return getRouteComponent(component.getParent().get());
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Gets the child components of assumed parent component.
+     * <p>
+     * The default implementation finds child components by traversing each
+     * child {@link Element} tree.
+     * <p>
+     * If the component is injected to a PolymerTemplate using the
+     * <code>@Id</code> annotation the getChildren method will only return
+     * children added from the server side and will not return any children
+     * declared in the template file.
+     *
+     * @param parent
+     *            the parent component from which to get the child components
+     *
+     * @return the child components of the given parent component
+     * @since 25.1
+     */
+    public static Stream<Component> getChildren(Component parent) {
+        // This should not ever be called for a Composite as it will return
+        // wrong results
+        assert !(parent instanceof Composite);
+
+        if (!parent.getElement().getComponent().isPresent()) {
+            throw new IllegalStateException(
+                    "You cannot use getChildren() on a wrapped component. Use Component.wrapAndMap to include the component in the hierarchy");
+        }
+
+        Builder<Component> childComponents = Stream.builder();
+        parent.getElement().getChildren().forEach(childElement -> ComponentUtil
+                .findComponents(childElement, childComponents::add));
+        return childComponents.build();
+    }
+
+    /**
+     * Gets the child components of the given parent that are instances of the
+     * given type, in child order.
+     * <p>
+     * Useful for components whose children have a known structure, such as the
+     * rows of a table or the items of a list, where the child of interest is
+     * identified by its type rather than by its position.
+     *
+     * @param <T>
+     *            the child component type
+     * @param parent
+     *            the parent component from which to get the child components
+     * @param type
+     *            the type the children must be instances of
+     * @return the children of the given type, in child order
+     * @since 25.3
+     */
+    public static <T extends Component> Stream<T> getChildrenOfType(
+            Component parent, Class<T> type) {
+        return parent.getChildren().filter(type::isInstance).map(type::cast);
+    }
+
+    /**
+     * Gets the first child component of the given parent that is an instance of
+     * the given type.
+     *
+     * @param <T>
+     *            the child component type
+     * @param parent
+     *            the parent component from which to get the child component
+     * @param type
+     *            the type the child must be an instance of
+     * @return the first child of the given type, or an empty optional if the
+     *         parent has no such child
+     * @since 25.3
+     */
+    public static <T extends Component> Optional<T> getFirstChildOfType(
+            Component parent, Class<T> type) {
+        return getChildrenOfType(parent, type).findFirst();
+    }
+
+    /**
+     * Resolves the id of {@code targetComponent} lazily, as described in
+     * {@link #resolveOrGenerateIdLater(Element, Component, String, SerializableSupplier, SerializableConsumer)},
+     * but without a getter for the current value, so the resolution cannot
+     * detect that it has been superseded, and with a consumer that is not
+     * necessarily serializable.
+     *
+     * @param sourceElement
+     *            the element whose attachment triggers the resolution, not
+     *            {@code null}
+     * @param targetComponent
+     *            the component whose id should be resolved, not {@code null}
+     * @param generatedIdPrefix
+     *            prefix used when an id needs to be generated, not {@code null}
+     * @param idConsumer
+     *            receives the resolved id at sync time, not {@code null}
+     * @since 25.2
+     * @deprecated use
+     *             {@link #resolveOrGenerateIdLater(Element, Component, String, SerializableSupplier, SerializableConsumer)}
+     *             instead. Without a getter, a value set after this call is
+     *             overwritten when the resolution runs, and the target of a
+     *             superseded resolution is still assigned a generated id. In
+     *             addition, the pending resolution is stored in the state tree,
+     *             or as an attach listener while {@code sourceElement} is
+     *             detached, so a consumer that is not serializable makes the
+     *             session fail to serialize.
+     */
+    @Deprecated(since = "25.3", forRemoval = true)
+    public static void resolveOrGenerateIdLater(Element sourceElement,
+            Component targetComponent, String generatedIdPrefix,
+            Consumer<String> idConsumer) {
+        sourceElement.getNode().runWhenAttached(
+                ui -> ui.getInternals().getStateTree().beforeClientResponse(
+                        sourceElement.getNode(), context -> idConsumer.accept(
+                                targetComponent.getId().orElseGet(() -> {
+                                    String generated = generatedIdPrefix
+                                            + UUID.randomUUID();
+                                    targetComponent.setId(generated);
+                                    return generated;
+                                }))));
+    }
+
+    /**
+     * References {@code targetComponent} by id, generating an id for it if
+     * needed, so that components can accept a {@link Component} for references
+     * such as {@code for} or {@code aria-labelledby} instead of requiring the
+     * caller to assign an id first.
+     * <p>
+     * The id that the target is going to have is passed to {@code idConsumer}
+     * immediately: either the target's current id, or one generated from
+     * {@code generatedIdPrefix} followed by a random UUID. A generated id is
+     * only assigned to the target before the next client response after
+     * {@code sourceElement} is attached, so the target's own id can still be
+     * set after this call, in which case {@code idConsumer} receives that id
+     * instead.
+     * <p>
+     * The value read by {@code idGetter} tells the pending resolution whether
+     * it is still the one in effect. If the value differs from what was passed
+     * to {@code idConsumer}, because the caller has set an explicit value,
+     * cleared it, or referenced another component in the meantime, the pending
+     * resolution does nothing and the target keeps its original, possibly
+     * absent, id.
+     * <p>
+     * Since the value can still change before the next client response, callers
+     * should not cache the value read through {@code idGetter} within the same
+     * request.
+     *
+     * @param sourceElement
+     *            the element whose attachment triggers the resolution, not
+     *            {@code null}
+     * @param targetComponent
+     *            the component whose id should be resolved, not {@code null}
+     * @param generatedIdPrefix
+     *            prefix used when an id needs to be generated, not {@code null}
+     * @param idGetter
+     *            reads the current value written through {@code idConsumer},
+     *            not {@code null}
+     * @param idConsumer
+     *            receives the id referencing the target, not {@code null}
+     * @since 25.3
+     */
+    public static void resolveOrGenerateIdLater(Element sourceElement,
+            Component targetComponent, String generatedIdPrefix,
+            SerializableSupplier<Optional<String>> idGetter,
+            SerializableConsumer<String> idConsumer) {
+        // Written right away so that a value set later, including a cleared
+        // one, is recognized as superseding this resolution
+        String pendingId = targetComponent.getId()
+                .orElseGet(() -> generatedIdPrefix + UUID.randomUUID());
+        idConsumer.accept(pendingId);
+
+        sourceElement.getNode()
+                .runWhenAttached(ui -> ui.getInternals().getStateTree()
+                        .beforeClientResponse(sourceElement.getNode(),
+                                context -> {
+                                    if (!Optional.of(pendingId)
+                                            .equals(idGetter.get())) {
+                                        return;
+                                    }
+                                    String id = targetComponent.getId()
+                                            .orElseGet(() -> {
+                                                targetComponent
+                                                        .setId(pendingId);
+                                                return pendingId;
+                                            });
+                                    if (!pendingId.equals(id)) {
+                                        idConsumer.accept(id);
+                                    }
+                                }));
+    }
+
+    /**
+     * Gets the child components of the given parent component, including
+     * components attached as virtual children.
+     * <p>
+     * Like {@link #getChildren(Component)}, this finds child components by
+     * traversing each child {@link Element} tree. In addition, it also descends
+     * into elements attached via
+     * {@link Element#appendVirtualChild(Element...)}, which covers e.g. slotted
+     * components added through helpers like {@code addToFooter} on web
+     * component wrappers, overlays attached to the {@link UI}, and the
+     * client-side routing wrapper.
+     * <p>
+     * Children injected into a template via {@code @Id} are still excluded:
+     * shadow root contents are not traversed.
+     * <p>
+     * The order is regular DOM children first (in DOM order), followed by
+     * virtual children in their attachment order.
+     *
+     * @param parent
+     *            the parent component from which to get the child components
+     * @return the child components of the given parent component, including
+     *         virtual children
+     * @since 25.2
+     */
+    public static Stream<Component> getAllChildren(Component parent) {
+        if (parent instanceof Composite) {
+            return parent.getChildren();
+        }
+        if (!parent.getElement().getComponent().isPresent()) {
+            throw new IllegalStateException(
+                    "You cannot use getAllChildren() on a wrapped component. Use Component.from(Element, Class) to include the component in the hierarchy");
+        }
+
+        Builder<Component> childComponents = Stream.builder();
+        forEachChildElement(parent.getElement(),
+                childElement -> findComponentsIncludingVirtual(childElement,
+                        childComponents::add));
+        return childComponents.build();
+    }
+
+    /**
+     * Streams all descendant components of the given parent component in
+     * pre-order (each component before its own descendants). The parent itself
+     * is not included.
+     * <p>
+     * Traversal uses {@link #getAllChildren(Component)} at every level, so
+     * virtual children (slotted components, overlays, the routing wrapper) are
+     * included. Shadow root contents are not traversed.
+     *
+     * @param parent
+     *            the parent component to start the traversal from
+     * @return a stream of all descendant components in pre-order
+     * @since 25.2
+     */
+    public static Stream<Component> streamDescendants(Component parent) {
+        Builder<Component> descendants = Stream.builder();
+        collectDescendants(parent, descendants);
+        return descendants.build();
+    }
+
+    private static void collectDescendants(Component parent,
+            Builder<Component> descendants) {
+        getAllChildren(parent).forEach(child -> {
+            descendants.add(child);
+            collectDescendants(child, descendants);
+        });
+    }
+
+    private static void findComponentsIncludingVirtual(Element element,
+            Consumer<Component> componentConsumer) {
+        Optional<Component> maybeComponent = element.getComponent();
+        if (maybeComponent.isPresent()) {
+            componentConsumer.accept(maybeComponent.get());
+            return;
+        }
+        forEachChildElement(element,
+                child -> findComponentsIncludingVirtual(child,
+                        componentConsumer));
+    }
+
+    private static void forEachChildElement(Element parent,
+            Consumer<Element> action) {
+        parent.getChildren().forEach(action);
+        // VirtualChildrenList is not configured on every node type
+        // (text nodes don't have it), so guard with hasFeature first —
+        // getFeatureIfInitialized throws if the feature isn't configured.
+        if (parent.getNode().hasFeature(VirtualChildrenList.class)) {
+            parent.getNode().getFeatureIfInitialized(VirtualChildrenList.class)
+                    .ifPresent(list -> list.forEachChild(node -> {
+                        if (!ShadowRoot.isShadowRoot(node)) {
+                            action.accept(Element.get(node));
+                        }
+                    }));
+        }
+    }
+
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@vaadin/flow-polymer2lit",
+  "version": "0.0.1",
+  "description": "A migration tool for Polymer to Lit for selected cases",
+  "author": "Vaadin Ltd",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/vaadin/flow/issues"
+  },
+  "main": "convert.ts",
+  "files": [
+    "src/main/frontend"
+  ],
+  "scripts": {
+    "compile": "esbuild convert.ts --bundle --platform=node --outdir=src/main/resources/META-INF/frontend/generated/"
+  },
+  "dependencies": {
+    "esbuild": "0.28.1",
+    "a-node-html-parser": "^6.0.0-4",
+    "acorn": "^7.1.0",
+    "acorn-walk": "^8.2.0",
+    "magic-string": "^0.26.3",
+    "patch-package": "^6.4.7",
+    "prettier": "^2.1.2",
+    "typescript": "^6.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^13.7.4"
+  }
+}

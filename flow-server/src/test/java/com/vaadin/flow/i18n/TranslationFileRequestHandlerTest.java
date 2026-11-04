@@ -1,0 +1,470 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.i18n;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.ResourceBundle;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Isolated;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
+
+import com.vaadin.flow.di.Instantiator;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.server.HandlerHelper;
+import com.vaadin.flow.server.HttpStatusCode;
+import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.flow.server.VaadinResponse;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.shared.ApplicationConstants;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@Isolated
+class TranslationFileRequestHandlerTest {
+
+    private final VaadinService service = mock(VaadinService.class);
+
+    private final VaadinRequest request = mock(VaadinRequest.class);
+
+    private VaadinResponse response;
+    @TempDir
+    Path temporaryFolder;
+    private ClassLoader urlClassLoader;
+
+    private TranslationFileRequestHandler handler;
+
+    private StringWriter out;
+
+    private PrintWriter writer;
+
+    private File translationsFolder;
+
+    private ArgumentCaptor<String> retrievedLocaleCapture;
+
+    private final List<Locale> providedLocales = new ArrayList<>();
+
+    private I18NProvider i18NProvider;
+
+    @BeforeEach
+    void configure() throws IOException {
+        initTranslationsFolder();
+    }
+
+    @AfterEach
+    void cleanup() {
+        ResourceBundle.clearCache(urlClassLoader);
+    }
+
+    @Test
+    void pathDoesNotMatch_requestNotHandled() throws IOException {
+        configure(true);
+        setRequestParams(null, "other", null, null);
+        assertFalse(handler.handleRequest(request, response));
+    }
+
+    @Test
+    void withRootBundle_languageTagIsNull_responseIsRootBundle()
+            throws IOException {
+        configure(true);
+        testResponseContent(null, "{\"title\":\"Root bundle lang\"}", "und");
+        verify(response).setStatus(HttpStatusCode.OK.getCode());
+    }
+
+    @Test
+    void withoutRootBundle_languageTagIsNull_responseIsEmpty()
+            throws IOException {
+        configure(false);
+        testResponseContent(null, "", null);
+        verify(response).setStatus(HttpStatusCode.NOT_FOUND.getCode());
+    }
+
+    @Test
+    void withRootBundle_languageTagIsEmpty_responseIsRootBundle()
+            throws IOException {
+        configure(true);
+        testResponseContent("", "{\"title\":\"Root bundle lang\"}", "und");
+        verify(response).setStatus(HttpStatusCode.OK.getCode());
+    }
+
+    @Test
+    void withoutRootBundle_languageTagIsEmpty_responseIsEmpty()
+            throws IOException {
+        configure(false);
+        testResponseContent("", "", null);
+        verify(response).setStatus(HttpStatusCode.NOT_FOUND.getCode());
+    }
+
+    @Test
+    void languageTagWithoutCountryAvailable_responseIsCorrect()
+            throws IOException {
+        configure(true);
+        testResponseContent("fi", "{\"title\":\"Suomi\"}", "fi");
+        verify(response).setStatus(HttpStatusCode.OK.getCode());
+    }
+
+    @Test
+    void tagContainsOnlyLanguage_languageOnlyAvailableWithCountry_responseIsEmpty()
+            throws IOException {
+        configure(false);
+        testResponseContent("es", "", null);
+        verify(response).setStatus(HttpStatusCode.NOT_FOUND.getCode());
+    }
+
+    @Test
+    void languageTagWithCountryAvailable_responseIsCorrect()
+            throws IOException {
+        configure(false);
+        testResponseContent("es-ES", "{\"title\":\"Espanol (Spain)\"}",
+                "es-ES");
+        verify(response).setStatus(HttpStatusCode.OK.getCode());
+    }
+
+    @Test
+    void withRootBundle_requestedLocaleBundleNotAvailable_responseIsRootBundle()
+            throws IOException {
+        configure(true);
+        testResponseContent("en-US", "{\"title\":\"Root bundle lang\"}",
+                "en-US");
+        verify(response).setStatus(HttpStatusCode.OK.getCode());
+    }
+
+    @Test
+    void withoutRootBundle_requestedLocaleBundleNotAvailable_responseIsEmpty()
+            throws IOException {
+        configure(false);
+        testResponseContent("en-US", "", null);
+        verify(response).setStatus(HttpStatusCode.NOT_FOUND.getCode());
+    }
+
+    @Test
+    void languageTagWithUnderscoresAvailable_responseIsCorrect()
+            throws IOException {
+        configure(false);
+        testResponseContent("es_ES", "{\"title\":\"Espanol (Spain)\"}",
+                "es-ES");
+        verify(response).setStatus(HttpStatusCode.OK.getCode());
+    }
+
+    @Test
+    void withRootBundle_languageTagWithUnderscoresNotAvailable_responseIsRootBundle()
+            throws IOException {
+        configure(true);
+        testResponseContent("it_IT", "{\"title\":\"Root bundle lang\"}",
+                "it-IT");
+        verify(response).setStatus(HttpStatusCode.OK.getCode());
+    }
+
+    @Test
+    void withoutRootBundle_languageTagWithUnderscoresNotAvailable_responseIsEmpty()
+            throws IOException {
+        configure(false);
+        testResponseContent("it_IT", "", null);
+        verify(response).setStatus(HttpStatusCode.NOT_FOUND.getCode());
+    }
+
+    @Test
+    void withCustomizedDefaultI18nProvider_requestedLocaleBundleAvailable_responseIsRootBundle()
+            throws IOException {
+        configure(true, CustomI18NProvider.class, false);
+        testResponseContent("fi", "{\"title\":\"title-fi\"}", "fi");
+        verify(response).setStatus(HttpStatusCode.OK.getCode());
+    }
+
+    @Test
+    void productionMode_withCustomizedDefaultI18nProvider_requestedLocaleBundleAvailable_responseIsRootBundle()
+            throws IOException {
+        configure(true, CustomI18NProvider.class, true);
+        testResponseContent("fi", "{\"title\":\"title-fi\"}", "fi");
+        verify(response).setStatus(HttpStatusCode.OK.getCode());
+    }
+
+    private void setUpChunkedTest() throws IOException {
+        createTranslationFile("""
+                title=Root bundle lang
+                key1=Value1
+                key2=Value2
+                """.stripIndent(), "");
+        createTranslationFile("""
+                title=Suomi
+                key1=SuomiValue1
+                key2=SuomiValue2
+                """.stripIndent(), "_fi");
+        createTranslationFile("""
+                title=Espanol (Spain)
+                key1=EspanolValue1
+                key2=EspanolValue2
+                """.stripIndent(), "_es_ES");
+        var i18nJson = new File(translationsFolder, "i18n.json");
+        var json = """
+                {
+                    "chunks": {
+                        "indexhtml": {
+                            "keys": [
+                                "title"
+                            ]
+                        },
+                        "other": {
+                            "keys": [
+                                "key1",
+                                "key2"
+                            ]
+                        }
+                    }
+                }
+                """.stripIndent();
+        Files.writeString(i18nJson.toPath(), json, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE);
+        mockI18nProvider(DefaultI18NProvider.class);
+        mockService(true);
+        handler = new TranslationFileRequestHandler(i18NProvider,
+                urlClassLoader);
+        mockResponse();
+    }
+
+    @Test
+    void productionMode_withChunks_filtersKeys() throws IOException {
+        setUpChunkedTest();
+        testResponseContent("", new String[] { "indexhtml" }, null,
+                "{\"title\":\"Root bundle lang\"}", "und");
+    }
+
+    @Test
+    void productionMode_withKeys_onlyReturnsThose() throws IOException {
+        setUpChunkedTest();
+        testResponseContent("", null, new String[] { "title" },
+                "{\"title\":\"Root bundle lang\"}", "und");
+    }
+
+    private void testResponseContent(String requestedLanguageTag,
+            String expectedResponseContent, String expectedResponseLanguageTag)
+            throws IOException {
+        testResponseContent(requestedLanguageTag, null, null,
+                expectedResponseContent, expectedResponseLanguageTag);
+    }
+
+    private void testResponseContent(String requestedLanguageTag,
+            String[] requestedChunks, String[] requestedKeys,
+            String expectedResponseContent, String expectedResponseLanguageTag)
+            throws IOException {
+        setRequestParams(requestedLanguageTag,
+                HandlerHelper.RequestType.TRANSLATION_FILE.getIdentifier(),
+                requestedChunks, requestedKeys);
+        assertTrue(handler.handleRequest(request, response),
+                "The request was not handled by the handler.");
+        assertEquals(expectedResponseContent, getResponseContent(),
+                "The expected response content does not match the actual response content.");
+        if (expectedResponseLanguageTag == null) {
+            assertEquals(0, retrievedLocaleCapture.getAllValues().size(),
+                    "The response language tag was not found.");
+        } else {
+            assertEquals(expectedResponseLanguageTag,
+                    retrievedLocaleCapture.getValue(),
+                    "The expected response language tag does not match the actual response language tag.");
+        }
+    }
+
+    private String getResponseContent() {
+        writer.flush();
+        return out.toString();
+    }
+
+    private void setRequestParams(String langtag, String requestTypeId,
+            String[] chunks, String[] keys) {
+        when(request.getParameter(
+                TranslationFileRequestHandler.LANGUAGE_TAG_PARAMETER_NAME))
+                .thenReturn(langtag);
+        when(request.getParameter(ApplicationConstants.REQUEST_TYPE_PARAMETER))
+                .thenReturn(requestTypeId);
+        // The parameter map is incomplete, but it is enough for the tests
+        var paramMap = new HashMap<String, String[]>();
+        if (chunks != null) {
+            paramMap.put(TranslationFileRequestHandler.CHUNK_PARAMETER_NAME,
+                    chunks);
+        }
+        if (keys != null) {
+            paramMap.put(TranslationFileRequestHandler.KEYS_PARAMETER_NAME,
+                    keys);
+        }
+        when(request.getParameterMap()).thenReturn(paramMap);
+    }
+
+    private void createTranslationFiles(boolean withRootBundleFile)
+            throws IOException {
+        if (withRootBundleFile) {
+            createTranslationFile("title=Root bundle lang", "");
+        }
+        providedLocales.add(Locale.forLanguageTag("fi"));
+        createTranslationFile("title=Suomi", "_fi");
+        providedLocales.add(Locale.forLanguageTag("es-ES"));
+        createTranslationFile("title=Espanol (Spain)", "_es_ES");
+    }
+
+    private void createTranslationFile(String content, String fileNameSuffix)
+            throws IOException {
+        File file = new File(translationsFolder,
+                DefaultI18NProvider.BUNDLE_FILENAME + fileNameSuffix
+                        + ".properties");
+        Files.writeString(file.toPath(), content, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE);
+    }
+
+    private void configure(boolean withRootBundle) throws IOException {
+        configure(withRootBundle, DefaultI18NProvider.class, false);
+    }
+
+    private void configure(boolean withRootBundle,
+            Class<? extends I18NProvider> i18NProviderClass,
+            boolean isProductionMode) throws IOException {
+        createTranslationFiles(withRootBundle);
+        mockI18nProvider(i18NProviderClass);
+        mockService(isProductionMode);
+        handler = new TranslationFileRequestHandler(i18NProvider,
+                urlClassLoader);
+        mockResponse();
+    }
+
+    private void initTranslationsFolder() throws IOException {
+        File resources = Files.createTempDirectory(temporaryFolder, "temp")
+                .toFile();
+        translationsFolder = new File(resources,
+                DefaultI18NProvider.BUNDLE_FOLDER);
+        translationsFolder.mkdirs();
+        urlClassLoader = new URLClassLoader(
+                new URL[] { resources.toURI().toURL() });
+    }
+
+    private void mockI18nProvider(
+            Class<? extends I18NProvider> i18NProviderClass) {
+        if (i18NProviderClass.equals(DefaultI18NProvider.class)) {
+            i18NProvider = spy(
+                    new DefaultI18NProvider(providedLocales, urlClassLoader));
+        } else {
+            i18NProvider = mock(i18NProviderClass, Mockito.CALLS_REAL_METHODS);
+            when(i18NProvider.getProvidedLocales()).thenReturn(providedLocales);
+        }
+    }
+
+    private void mockResponse() throws IOException {
+        response = mock(VaadinResponse.class);
+        out = new StringWriter();
+        writer = new PrintWriter(out);
+        when(response.getWriter()).thenReturn(writer);
+        retrievedLocaleCapture = ArgumentCaptor.forClass(String.class);
+        doNothing().when(response).setHeader(
+                eq(TranslationFileRequestHandler.RETRIEVED_LOCALE_HEADER_NAME),
+                retrievedLocaleCapture.capture());
+    }
+
+    private void mockService(boolean isProductionMode) {
+        Instantiator instantiator = mock(Instantiator.class);
+        when(instantiator.getI18NProvider()).thenReturn(i18NProvider);
+        when(service.getInstantiator()).thenReturn(instantiator);
+        DeploymentConfiguration configuration = mock(
+                DeploymentConfiguration.class);
+        when(configuration.isProductionMode()).thenReturn(isProductionMode);
+        when(service.getDeploymentConfiguration()).thenReturn(configuration);
+        when(request.getService()).thenReturn(service);
+    }
+
+    @Test
+    void noI18nProvider_returnsError() throws IOException {
+        // Create handler without I18NProvider
+        createTranslationFiles(true);
+        mockResponse();
+        mockService(false);
+        handler = new TranslationFileRequestHandler(null, urlClassLoader);
+
+        setRequestParams("fi",
+                HandlerHelper.RequestType.TRANSLATION_FILE.getIdentifier(),
+                null, null);
+
+        assertTrue(handler.handleRequest(request, response));
+
+        // In dev mode, should return 501 Not Implemented error
+        verify(response).sendError(HttpStatusCode.NOT_IMPLEMENTED.getCode(),
+                "Missing I18nProvider implementation, loading translations is not supported.");
+    }
+
+    @Test
+    void noI18nProvider_productionMode_returnsNotFound() throws IOException {
+        // Create handler without I18NProvider
+        createTranslationFiles(true);
+        mockResponse();
+        mockService(true);
+        handler = new TranslationFileRequestHandler(null, urlClassLoader);
+
+        setRequestParams("fi",
+                HandlerHelper.RequestType.TRANSLATION_FILE.getIdentifier(),
+                null, null);
+
+        assertTrue(handler.handleRequest(request, response));
+
+        // In production mode, should return 404 Not Found
+        verify(response).setStatus(HttpStatusCode.NOT_FOUND.getCode());
+    }
+
+    private static class CustomI18NProvider implements I18NProvider {
+
+        private final List<Locale> providedLocales;
+
+        private CustomI18NProvider(List<Locale> providedLocales) {
+            this.providedLocales = providedLocales;
+        }
+
+        @Override
+        public List<Locale> getProvidedLocales() {
+            return providedLocales;
+        }
+
+        @Override
+        public String getTranslation(String key, Locale locale,
+                Object... params) {
+            return key + '-' + locale;
+        }
+
+        @Override
+        public Map<String, String> getAllTranslations(Locale locale) {
+            return Map.of("title", getTranslation("title", locale));
+        }
+    }
+}

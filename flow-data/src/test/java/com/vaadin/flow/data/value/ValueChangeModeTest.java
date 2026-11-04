@@ -1,0 +1,169 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.data.value;
+
+import java.util.EnumSet;
+
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.component.AbstractSinglePropertyField;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.dom.DebouncePhase;
+import com.vaadin.flow.dom.DisabledUpdateMode;
+import com.vaadin.flow.dom.DomListenerRegistration;
+import com.vaadin.flow.internal.nodefeature.ElementListenerMap;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+
+class ValueChangeModeTest {
+
+    @Tag("tag")
+    private static class ValueChangeModeField
+            extends AbstractSinglePropertyField<ValueChangeModeField, String>
+            implements HasValueChangeMode {
+        private ValueChangeMode valueChangeMode;
+        private int valueChangeTimeout;
+
+        public ValueChangeModeField() {
+            super("value", "", false);
+        }
+
+        @Override
+        public void setValueChangeMode(ValueChangeMode valueChangeMode) {
+            this.valueChangeMode = valueChangeMode;
+
+            setSynchronizedEvent(ValueChangeMode.eventForMode(valueChangeMode,
+                    "value-changed"));
+            setValueChangeTimeout(valueChangeTimeout);
+        }
+
+        @Override
+        public ValueChangeMode getValueChangeMode() {
+            return valueChangeMode;
+        }
+
+        @Override
+        public void setValueChangeTimeout(int valueChangeTimeout) {
+            this.valueChangeTimeout = valueChangeTimeout;
+            ValueChangeMode.applyChangeTimeout(valueChangeMode,
+                    this.valueChangeTimeout, getSynchronizationRegistration());
+        }
+
+        @Override
+        public int getValueChangeTimeout() {
+            return valueChangeTimeout;
+        }
+
+        // Exposed as public for testing purposes
+        @Override
+        public DomListenerRegistration getSynchronizationRegistration() {
+            return super.getSynchronizationRegistration();
+        }
+    }
+
+    @Test
+    void field_setMode() {
+        ValueChangeModeField field = new ValueChangeModeField();
+
+        field.setValueChangeMode(ValueChangeMode.ON_BLUR);
+        assertValueSynchronizedWithEvent(field, "blur");
+
+        field.setValueChangeMode(null);
+        assertNull(getDisabledUpdateMode(field),
+                "value should not be a synchronized property");
+        assertNull(field.getSynchronizationRegistration());
+
+        field.setValueChangeMode(ValueChangeMode.EAGER);
+        assertValueSynchronizedWithEvent(field, "value-changed");
+
+        field.setValueChangeMode(ValueChangeMode.ON_CHANGE);
+        assertValueSynchronizedWithEvent(field, "change");
+
+        field.setValueChangeMode(ValueChangeMode.LAZY);
+        assertValueSynchronizedWithEvent(field, "value-changed");
+
+        field.setValueChangeMode(ValueChangeMode.TIMEOUT);
+        assertValueSynchronizedWithEvent(field, "value-changed");
+    }
+
+    @Test
+    void field_setValueChangeTimeout_applied() {
+        ValueChangeModeField field = new ValueChangeModeField();
+        assertDebounceDisabled(field);
+
+        field.setValueChangeMode(ValueChangeMode.LAZY);
+        assertDebounceDisabled(field);
+
+        field.setValueChangeTimeout(123);
+        assertDebounceEquals(field, EnumSet.of(DebouncePhase.TRAILING), 123);
+
+        field.setValueChangeMode(ValueChangeMode.TIMEOUT);
+        assertDebounceEquals(field,
+                EnumSet.of(DebouncePhase.LEADING, DebouncePhase.INTERMEDIATE),
+                123);
+
+        field.setValueChangeTimeout(456);
+        assertDebounceEquals(field,
+                EnumSet.of(DebouncePhase.LEADING, DebouncePhase.INTERMEDIATE),
+                456);
+    }
+
+    @Test
+    void field_setValueChangeTimeout_ignored() {
+        assertNoTimeoutApplied(ValueChangeMode.EAGER);
+        assertNoTimeoutApplied(ValueChangeMode.ON_CHANGE);
+        assertNoTimeoutApplied(ValueChangeMode.ON_BLUR);
+    }
+
+    private void assertNoTimeoutApplied(ValueChangeMode valueChangeMode) {
+        ValueChangeModeField field = new ValueChangeModeField();
+        field.setValueChangeMode(valueChangeMode);
+        assertDebounceDisabled(field);
+    }
+
+    private void assertDebounceEquals(ValueChangeModeField field,
+            EnumSet<DebouncePhase> phases, int timeout) {
+        DomListenerRegistration reg = field.getSynchronizationRegistration();
+        assertEquals(timeout, reg.getDebounceTimeout());
+        assertEquals(phases, reg.getDebouncePhases());
+    }
+
+    private void assertDebounceDisabled(ValueChangeModeField field) {
+        assertEquals(0,
+                field.getSynchronizationRegistration().getDebounceTimeout());
+    }
+
+    private void assertValueSynchronizedWithEvent(ValueChangeModeField field,
+            String eventName) {
+
+        assertNotNull(getDisabledUpdateMode(field),
+                "value should be a synchronized property");
+
+        DomListenerRegistration reg = field.getSynchronizationRegistration();
+
+        assertEquals(eventName, reg.getEventType(),
+                eventName + " should be the synchronized property-event");
+    }
+
+    private DisabledUpdateMode getDisabledUpdateMode(
+            ValueChangeModeField field) {
+        return field.getElement().getNode().getFeature(ElementListenerMap.class)
+                .getPropertySynchronizationMode("value");
+    }
+
+}

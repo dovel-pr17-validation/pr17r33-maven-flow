@@ -1,0 +1,153 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.router;
+
+import java.util.List;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.UI;
+
+/**
+ * Event created before navigation happens.
+ *
+ * @author Vaadin Ltd
+ * @since 1.0
+ */
+public class BeforeEnterEvent extends BeforeEvent {
+
+    private final boolean errorEvent;
+
+    /**
+     * Constructs event from a NavigationEvent.
+     *
+     * @param event
+     *            NavigationEvent that is on-going, not <code>null</code>
+     * @param navigationTarget
+     *            navigation target, not <code>null</code>
+     * @param layouts
+     *            navigation layout chain, not <code>null</code>
+     * @since 2.0
+     */
+    public BeforeEnterEvent(NavigationEvent event,
+            Class<? extends Component> navigationTarget,
+            List<Class<? extends RouterLayout>> layouts) {
+        super(event, navigationTarget, layouts);
+        errorEvent = event instanceof ErrorNavigationEvent;
+    }
+
+    /**
+     * Constructs event from a NavigationEvent.
+     *
+     * @param event
+     *            NavigationEvent that is on-going, not <code>null</code>
+     * @param navigationTarget
+     *            navigation target, not <code>null</code>
+     * @param parameters
+     *            route parameters, not <code>null</code>
+     * @param layouts
+     *            navigation layout chain, not <code>null</code>
+     * @since 4.0
+     */
+    public BeforeEnterEvent(NavigationEvent event,
+            Class<? extends Component> navigationTarget,
+            RouteParameters parameters,
+            List<Class<? extends RouterLayout>> layouts) {
+        super(event, navigationTarget, parameters, layouts);
+        errorEvent = event instanceof ErrorNavigationEvent;
+    }
+
+    /**
+     * Constructs a new BeforeEnterEvent.
+     *
+     * @param router
+     *            the router that triggered the change, not <code>null</code>
+     * @param trigger
+     *            the type of user action that triggered this location change,
+     *            not <code>null</code>
+     * @param location
+     *            the new location, not <code>null</code>
+     * @param navigationTarget
+     *            navigation target class, not <code>null</code>
+     * @param ui
+     *            the UI related to the navigation, not <code>null</code>
+     * @param layouts
+     *            the layout chain for the navigation target, not
+     *            <code>null</code>
+     * @since 2.0
+     */
+    public BeforeEnterEvent(Router router, NavigationTrigger trigger,
+            Location location, Class<? extends Component> navigationTarget,
+            UI ui, List<Class<? extends RouterLayout>> layouts) {
+        super(router, trigger, location, navigationTarget, ui, layouts);
+        errorEvent = false;
+    }
+
+    /**
+     * Constructs a new BeforeEnterEvent.
+     *
+     * @param router
+     *            the router that triggered the change, not <code>null</code>
+     * @param trigger
+     *            the type of user action that triggered this location change,
+     *            not <code>null</code>
+     * @param location
+     *            the new location, not <code>null</code>
+     * @param navigationTarget
+     *            navigation target class, not <code>null</code>
+     * @param parameters
+     *            route parameters, not <code>null</code>
+     * @param ui
+     *            the UI related to the navigation, not <code>null</code>
+     * @param layouts
+     *            the layout chain for the navigation target, not
+     *            <code>null</code>
+     * @since 4.0
+     */
+    public BeforeEnterEvent(Router router, NavigationTrigger trigger,
+            Location location, Class<? extends Component> navigationTarget,
+            RouteParameters parameters, UI ui,
+            List<Class<? extends RouterLayout>> layouts) {
+        super(router, trigger, location, navigationTarget, parameters, ui,
+                layouts);
+        errorEvent = false;
+    }
+
+    /**
+     * Check if event is for a refresh of a preserveOnRefresh view.
+     * <p>
+     * This is {@code true} only when the browser page is reloaded and the
+     * preserved view is reused, also when the reload reaches the view through a
+     * forward or reroute. Other navigations that reuse a preserved view, e.g. a
+     * router link, browser history or {@code UI.navigate} navigation that only
+     * changes the query parameters, are not refresh events.
+     *
+     * @return true if refresh of a preserve on refresh view
+     * @since 23.2.8
+     */
+    public boolean isRefreshEvent() {
+        return getTrigger().equals(NavigationTrigger.REFRESH);
+    }
+
+    /**
+     * Check if the event is fired by an error handler.
+     *
+     * @return {@literal true} if the event is fired by an error handler.
+     * @since 24.3
+     */
+    public boolean isErrorEvent() {
+        return errorEvent;
+    }
+}

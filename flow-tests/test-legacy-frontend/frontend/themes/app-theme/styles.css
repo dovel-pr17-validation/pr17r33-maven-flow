@@ -1,0 +1,8 @@
+html,
+:host {
+  color: rgba(0, 0, 0, 1); /* black */
+}
+
+.text-primary {
+  color: rgba(0, 128, 0, 1); /* green */
+}

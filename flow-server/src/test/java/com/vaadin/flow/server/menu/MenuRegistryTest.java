@@ -1,0 +1,1004 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.menu;
+
+import jakarta.servlet.ServletContext;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.Principal;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Isolated;
+import org.mockito.Mock;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.mockito.MockitoAnnotations;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ArrayNode;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.di.DefaultInstantiator;
+import com.vaadin.flow.di.Instantiator;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.internal.CurrentInstance;
+import com.vaadin.flow.internal.FrontendUtils;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.internal.menu.MenuRegistry;
+import com.vaadin.flow.router.DynamicPageTitle;
+import com.vaadin.flow.router.Menu;
+import com.vaadin.flow.router.PageTitle;
+import com.vaadin.flow.router.PageTitleContext;
+import com.vaadin.flow.router.PageTitleGenerator;
+import com.vaadin.flow.router.Route;
+import com.vaadin.flow.router.RouteConfiguration;
+import com.vaadin.flow.router.RouteParameters;
+import com.vaadin.flow.router.Router;
+import com.vaadin.flow.router.internal.RouteUtil;
+import com.vaadin.flow.server.InvalidRouteConfigurationException;
+import com.vaadin.flow.server.MockServletContext;
+import com.vaadin.flow.server.MockVaadinContext;
+import com.vaadin.flow.server.MockVaadinSession;
+import com.vaadin.flow.server.RouteRegistry;
+import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.server.VaadinServletContext;
+import com.vaadin.flow.server.VaadinServletService;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.flow.server.startup.ApplicationRouteRegistry;
+
+import static com.vaadin.flow.internal.FrontendUtils.GENERATED;
+import static com.vaadin.flow.internal.menu.MenuRegistry.FILE_ROUTES_JSON_NAME;
+import static com.vaadin.flow.internal.menu.MenuRegistry.FILE_ROUTES_JSON_PROD_PATH;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
+
+@Isolated
+class MenuRegistryTest {
+    @TempDir
+    Path tmpDir;
+    private ApplicationRouteRegistry registry;
+    @Mock
+    private MockService vaadinService;
+    private VaadinSession session;
+    private ServletContext servletContext;
+    private VaadinServletContext vaadinContext;
+    @Mock
+    private DeploymentConfiguration deploymentConfiguration;
+    @Mock
+    private VaadinRequest request;
+
+    private AutoCloseable closeable;
+
+    private MockedStatic<FrontendUtils> frontendUtils;
+
+    @BeforeEach
+    void init() {
+        closeable = MockitoAnnotations.openMocks(this);
+        servletContext = new MockServletContext();
+        vaadinContext = new MockVaadinContext(servletContext);
+
+        registry = ApplicationRouteRegistry.getInstance(vaadinContext);
+
+        when(vaadinService.getRouteRegistry()).thenReturn(registry);
+        when(vaadinService.getContext()).thenReturn(vaadinContext);
+        when(vaadinService.getRouter()).thenReturn(new Router(registry));
+        when(vaadinService.getInstantiator())
+                .thenReturn(new DefaultInstantiator(vaadinService));
+
+        when(vaadinService.getDeploymentConfiguration())
+                .thenReturn(deploymentConfiguration);
+
+        when(deploymentConfiguration.getFrontendFolder())
+                .thenReturn(tmpDir.toFile());
+        when(deploymentConfiguration.getProjectFolder())
+                .thenReturn(tmpDir.toFile());
+        when(deploymentConfiguration.getBuildFolder()).thenReturn("build");
+
+        frontendUtils = mockStatic(FrontendUtils.class);
+        frontendUtils.when(() -> FrontendUtils.isHillaUsed(any()))
+                .thenReturn(true);
+
+        VaadinService.setCurrent(vaadinService);
+
+        session = new MockVaadinSession(vaadinService) {
+            @Override
+            public VaadinService getService() {
+                return vaadinService;
+            }
+        };
+
+        VaadinSession.setCurrent(session);
+
+        when(request.getService()).thenReturn(vaadinService);
+        CurrentInstance.set(VaadinRequest.class, request);
+    }
+
+    @AfterEach
+    void cleanup() throws Exception {
+        frontendUtils.close();
+        closeable.close();
+        CurrentInstance.clearAll();
+    }
+
+    @Test
+    void getTitle_staticPageTitle_returnsValue() {
+        assertEquals("Static Title",
+                MenuRegistry.getTitle(StaticTitleRoute.class));
+    }
+
+    @Test
+    void getTitle_noPageTitle_returnsSimpleName() {
+        assertEquals("MyRoute", MenuRegistry.getTitle(MyRoute.class));
+    }
+
+    @Test
+    void getTitle_generator_resolvedWithoutInstance() {
+        GeneratedTitleRoute.instantiated = false;
+
+        String title = MenuRegistry.getTitle(GeneratedTitleRoute.class,
+                new RouteParameters("productId", "7"));
+
+        assertEquals("Product 7", title);
+        assertFalse(GeneratedTitleRoute.instantiated,
+                "Generator-based title resolution must not instantiate the route");
+    }
+
+    @Test
+    void getTitle_generatorWithoutParameters_usesEmptyParameters() {
+        assertEquals("Product ",
+                MenuRegistry.getTitle(GeneratedTitleRoute.class));
+    }
+
+    @Test
+    void getTitle_generatorReceivesAnnotationValue() {
+        assertEquals("resolved:orders.title",
+                MenuRegistry.getTitle(KeyedTitleRoute.class));
+    }
+
+    @Test
+    void getTitle_defaultGenerator_usedWhenNoRouteGenerator() {
+        PageTitleGenerator defaultGenerator = context -> "default:"
+                + context.navigationTarget().getSimpleName() + ":"
+                + context.value();
+        when(vaadinService.getInstantiator())
+                .thenReturn(new DefaultInstantiator(vaadinService) {
+                    @Override
+                    public PageTitleGenerator getPageTitleGenerator() {
+                        return defaultGenerator;
+                    }
+                });
+
+        // no @PageTitle: the default generator replaces the simple-name
+        // fallback
+        assertEquals("default:MyRoute:", MenuRegistry.getTitle(MyRoute.class));
+        // static @PageTitle value is handed to the default generator
+        assertEquals("default:StaticTitleRoute:Static Title",
+                MenuRegistry.getTitle(StaticTitleRoute.class));
+        // a per-route generator still takes precedence
+        assertEquals("Product 7",
+                MenuRegistry.getTitle(GeneratedTitleRoute.class,
+                        new RouteParameters("productId", "7")));
+    }
+
+    @Test
+    void getMenuItemsContainsExpectedClientPaths() throws IOException {
+        File generated = Files.createDirectories(tmpDir.resolve(GENERATED))
+                .toFile();
+        File clientFiles = new File(generated, FILE_ROUTES_JSON_NAME);
+        Files.writeString(clientFiles.toPath(), testClientRouteFile);
+
+        Map<String, AvailableViewInfo> menuItems = MenuRegistry
+                .getMenuItems(true);
+
+        assertEquals(10, menuItems.size());
+        assertClientRoutes(menuItems);
+    }
+
+    @Test
+    void getMenuItemsWithNestedFiltering_doesNotThrow() throws IOException {
+        File generated = Files.createDirectories(tmpDir.resolve(GENERATED))
+                .toFile();
+        File clientFiles = new File(generated, FILE_ROUTES_JSON_NAME);
+        Files.writeString(clientFiles.toPath(), nestedLoginRequiredRouteFile);
+
+        Map<String, AvailableViewInfo> menuItems = MenuRegistry
+                .getMenuItems(true);
+
+        assertEquals(0, menuItems.size());
+    }
+
+    @Test
+    void getMenuItemsNoFilteringContainsAllClientPaths() throws IOException {
+        File generated = Files.createDirectories(tmpDir.resolve(GENERATED))
+                .toFile();
+        File clientFiles = new File(generated, FILE_ROUTES_JSON_NAME);
+        Files.writeString(clientFiles.toPath(), testClientRouteFile);
+
+        Map<String, AvailableViewInfo> menuItems = MenuRegistry
+                .getMenuItems(false);
+
+        assertEquals(13, menuItems.size());
+        // Validate as if logged in as all routes should be available
+        assertClientRoutes(menuItems, true, true, false);
+    }
+
+    @Test
+    void testNonCollidingServerAndClientRoutesDoesNotThrow()
+            throws IOException {
+        File generated = Files.createDirectories(tmpDir.resolve(GENERATED))
+                .toFile();
+        File clientFiles = new File(generated, FILE_ROUTES_JSON_NAME);
+        Files.writeString(clientFiles.toPath(), testClientRouteFile);
+
+        RouteConfiguration routeConfiguration = RouteConfiguration
+                .forRegistry(registry);
+        Arrays.asList(MyRoute.class, MyInfo.class)
+                .forEach(routeConfiguration::setAnnotatedRoute);
+
+        Map<String, AvailableViewInfo> menuItems = MenuRegistry
+                .getMenuItems(false);
+        assertEquals(15, menuItems.size());
+
+        RouteUtil.checkForClientRouteCollisions(vaadinService,
+                routeConfiguration.getAvailableRoutes());
+    }
+
+    @Test
+    void testCollidingServerAndClientRouteDoesThrow() throws IOException {
+        assertThrows(InvalidRouteConfigurationException.class, () -> {
+            File generated = Files.createDirectories(tmpDir.resolve(GENERATED))
+                    .toFile();
+            File clientFiles = new File(generated, FILE_ROUTES_JSON_NAME);
+            Files.writeString(clientFiles.toPath(), testClientRouteFile);
+
+            RouteConfiguration routeConfiguration = RouteConfiguration
+                    .forRegistry(registry);
+            Arrays.asList(MyRoute.class, MyInfo.class)
+                    .forEach(routeConfiguration::setAnnotatedRoute);
+            routeConfiguration.setAnnotatedRoute(ConflictRoute.class);
+        });
+    }
+
+    @Test
+    void productionMode_getMenuItemsContainsExpectedClientPaths()
+            throws IOException {
+        when(deploymentConfiguration.isProductionMode()).thenReturn(true);
+        // Clear any production mode execution route contents
+        MenuRegistry.clearFileRoutesCache();
+
+        Files.createDirectories(tmpDir.resolve("META-INF/VAADIN"));
+        File clientFiles = new File(tmpDir.toFile(),
+                FILE_ROUTES_JSON_PROD_PATH);
+        Files.writeString(clientFiles.toPath(), testClientRouteFile);
+
+        ClassLoader mockClassLoader = mock(ClassLoader.class);
+        when(mockClassLoader.getResource(FILE_ROUTES_JSON_PROD_PATH))
+                .thenReturn(clientFiles.toURI().toURL());
+        try (MockedStatic<MenuRegistry> menuRegistry = mockStatic(
+                MenuRegistry.class, Mockito.CALLS_REAL_METHODS)) {
+            menuRegistry.when(() -> MenuRegistry.getClassLoader())
+                    .thenReturn(mockClassLoader);
+
+            Map<String, AvailableViewInfo> menuItems = MenuRegistry
+                    .getMenuItems(true);
+
+            assertEquals(10, menuItems.size());
+            assertClientRoutes(menuItems);
+        } finally {
+            // Clear our routes from production mode cache
+            MenuRegistry.clearFileRoutesCache();
+        }
+    }
+
+    @Test
+    void getMenuItemsContainsExpectedServerPaths() {
+        RouteConfiguration routeConfiguration = RouteConfiguration
+                .forRegistry(registry);
+        Arrays.asList(MyRoute.class, MyInfo.class)
+                .forEach(routeConfiguration::setAnnotatedRoute);
+
+        Map<String, AvailableViewInfo> menuItems = MenuRegistry
+                .getMenuItems(true);
+
+        assertEquals(2, menuItems.size());
+        assertServerRoutes(menuItems);
+    }
+
+    @Test
+    void getMenuItemsContainBothClientAndServerPaths() throws IOException {
+        File generated = Files.createDirectories(tmpDir.resolve(GENERATED))
+                .toFile();
+        File clientFiles = new File(generated, FILE_ROUTES_JSON_NAME);
+        Files.writeString(clientFiles.toPath(), testClientRouteFile);
+
+        RouteConfiguration routeConfiguration = RouteConfiguration
+                .forRegistry(registry);
+        Arrays.asList(MyRoute.class, MyInfo.class)
+                .forEach(routeConfiguration::setAnnotatedRoute);
+
+        Map<String, AvailableViewInfo> menuItems = MenuRegistry
+                .getMenuItems(true);
+
+        assertEquals(12, menuItems.size());
+        assertClientRoutes(menuItems);
+        assertServerRoutes(menuItems);
+    }
+
+    @Test
+    void collectMenuItems_returnsCorrectPaths() throws IOException {
+        File generated = Files.createDirectories(tmpDir.resolve(GENERATED))
+                .toFile();
+        File clientFiles = new File(generated, FILE_ROUTES_JSON_NAME);
+        Files.writeString(clientFiles.toPath(), testClientRouteFile);
+
+        RouteConfiguration routeConfiguration = RouteConfiguration
+                .forRegistry(registry);
+        Arrays.asList(MyRoute.class, MyInfo.class, MyRequiredParamRoute.class,
+                MyRequiredAndOptionalParamRoute.class,
+                MyOptionalParamRoute.class, MyVarargsParamRoute.class)
+                .forEach(routeConfiguration::setAnnotatedRoute);
+
+        Map<String, AvailableViewInfo> menuItems = MenuRegistry
+                .collectMenuItems();
+
+        assertEquals(8, menuItems.size());
+        assertClientRoutes(menuItems, false, false, true);
+        assertServerRoutes(menuItems);
+        assertServerRoutesWithParameters(menuItems, true);
+    }
+
+    @Test
+    void testWithLoggedInUser_userHasRoles() throws IOException {
+        when(request.getUserPrincipal()).thenReturn(mock(Principal.class));
+        when(request.isUserInRole(anyString())).thenReturn(true);
+
+        File generated = Files.createDirectories(tmpDir.resolve(GENERATED))
+                .toFile();
+        File clientFiles = new File(generated, FILE_ROUTES_JSON_NAME);
+        Files.writeString(clientFiles.toPath(), testClientRouteFile);
+
+        Map<String, AvailableViewInfo> menuItems = MenuRegistry
+                .getMenuItems(true);
+
+        assertEquals(13, menuItems.size());
+        assertClientRoutes(menuItems, true, true, false);
+
+        // Verify that getMenuItemsList returns the same data
+        List<AvailableViewInfo> menuItemsList = MenuRegistry
+                .collectMenuItemsList();
+        assertEquals(7, menuItemsList.size(),
+                "List of menu items has incorrect size. Excluded menu item like /login is not expected.");
+        assertOrder(menuItemsList,
+                new String[] { "/", "/about", "/hilla", "/hilla/sub",
+                        "/opt_params", "/params_with_opt_children",
+                        "/wc_params" });
+    }
+
+    @Test
+    void testWithLoggedInUser_noMatchingRoles() throws IOException {
+        when(request.getUserPrincipal()).thenReturn(mock(Principal.class));
+        when(request.isUserInRole(anyString())).thenReturn(false);
+
+        File generated = Files.createDirectories(tmpDir.resolve(GENERATED))
+                .toFile();
+        File clientFiles = new File(generated, FILE_ROUTES_JSON_NAME);
+        Files.writeString(clientFiles.toPath(), testClientRouteFile);
+
+        Map<String, AvailableViewInfo> menuItems = MenuRegistry
+                .getMenuItems(true);
+
+        assertEquals(11, menuItems.size());
+        assertClientRoutes(menuItems, true, false, false);
+    }
+
+    @Test
+    void getMenuItemsList_returnsCorrectPaths() throws IOException {
+        File generated = Files.createDirectories(tmpDir.resolve(GENERATED))
+                .toFile();
+        File clientFiles = new File(generated, FILE_ROUTES_JSON_NAME);
+        Files.writeString(clientFiles.toPath(), testClientRouteFile);
+
+        RouteConfiguration routeConfiguration = RouteConfiguration
+                .forRegistry(registry);
+        Arrays.asList(MyRoute.class, MyInfo.class, MyRequiredParamRoute.class,
+                MyRequiredAndOptionalParamRoute.class,
+                MyOptionalParamRoute.class, MyVarargsParamRoute.class)
+                .forEach(routeConfiguration::setAnnotatedRoute);
+
+        List<AvailableViewInfo> menuItems = MenuRegistry.collectMenuItemsList();
+        assertEquals(8, menuItems.size());
+        assertOrder(menuItems,
+                new String[] { "/", "/home", "/info", "/opt_params", "/param",
+                        "/param/varargs", "/params_with_opt_children",
+                        "/wc_params" });
+        // verifying that data is same as with collectMenuItems
+        Map<String, AvailableViewInfo> mapMenuItems = menuItems.stream()
+                .collect(Collectors.toMap(AvailableViewInfo::route,
+                        item -> item));
+        assertClientRoutes(mapMenuItems, false, false, true, "/");
+        assertServerRoutes(mapMenuItems);
+        assertServerRoutesWithParameters(mapMenuItems, true);
+    }
+
+    @Test
+    void getMenuItemsList_assertOrder() {
+        RouteConfiguration routeConfiguration = RouteConfiguration
+                .forRegistry(registry);
+        Arrays.asList(TestRouteA.class, TestRouteB.class, TestRouteC.class,
+                TestRouteD.class, TestRouteDA.class, TestRouteDB.class)
+                .forEach(routeConfiguration::setAnnotatedRoute);
+
+        List<AvailableViewInfo> menuItems = MenuRegistry.collectMenuItemsList();
+        assertEquals(4, menuItems.size());
+        assertOrder(menuItems,
+                new String[] { "/d", "/c", "/a", "/b", "/d/a", "/d/b" });
+    }
+
+    @Test
+    void hasHillaAutoLayout_fileRoutesHasSingleRootLayout_true()
+            throws IOException {
+        ArrayNode fileRoutes = (ArrayNode) JacksonUtils.getMapper()
+                .readTree(testClientRouteFile);
+        JsonNode layout = fileRoutes.get(0);
+        ArrayNode children = (ArrayNode) layout.get("children");
+        assertNotNull(children);
+
+        assertHasHillaMainLayout(testClientRouteFile, true);
+    }
+
+    @Test
+    void hasHillaAutoLayout_fileRoutesHasEmptyChildren_true()
+            throws IOException {
+        ArrayNode fileRoutes = (ArrayNode) JacksonUtils.getMapper()
+                .readTree(emptyChildren);
+        JsonNode layout = fileRoutes.get(0);
+        ArrayNode children = (ArrayNode) layout.get("children");
+        assertNotNull(children);
+        assertEquals(0, children.size());
+
+        assertHasHillaMainLayout(emptyChildren, true);
+    }
+
+    @Test
+    void hasHillaAutoLayout_fileRoutesHasSingleRootRoute_false()
+            throws IOException {
+        assertFalse(singleRoute.contains("\"children\""));
+
+        assertHasHillaMainLayout(singleRoute, false);
+    }
+
+    @Test
+    void hasHillaAutoLayout_fileRoutesHasMultipleRootRoutes_false()
+            throws IOException {
+        assertHasHillaMainLayout(multipleRootRoutes, false);
+    }
+
+    @Test
+    void hasHillaAutoLayout_fileRoutesHasNonEmptyRoute_false()
+            throws IOException {
+        assertHasHillaMainLayout(nonEmptyRoute, false);
+    }
+
+    private void assertHasHillaMainLayout(String fileRoutes, boolean expected)
+            throws IOException {
+        File generated = Files.createDirectories(tmpDir.resolve(GENERATED))
+                .toFile();
+        File clientFiles = new File(generated, FILE_ROUTES_JSON_NAME);
+        Files.writeString(clientFiles.toPath(), fileRoutes);
+
+        boolean hasHillaMainLayout = MenuRegistry
+                .hasHillaMainLayout(vaadinService.getDeploymentConfiguration());
+        assertEquals(expected, hasHillaMainLayout);
+    }
+
+    private void assertOrder(List<AvailableViewInfo> menuItems,
+            String[] expectedOrder) {
+        for (int i = 0; i < menuItems.size(); i++) {
+            assertEquals(expectedOrder[i], menuItems.get(i).route());
+        }
+    }
+
+    private void assertClientRoutes(Map<String, AvailableViewInfo> menuItems) {
+        assertClientRoutes(menuItems, false, false, false);
+    }
+
+    private void assertClientRoutes(Map<String, AvailableViewInfo> menuItems,
+            boolean authenticated, boolean hasRole, boolean excludeExpected) {
+        assertClientRoutes(menuItems, authenticated, hasRole, excludeExpected,
+                "");
+    }
+
+    private void assertClientRoutes(Map<String, AvailableViewInfo> menuItems,
+            boolean authenticated, boolean hasRole, boolean excludeExpected,
+            String expectedRootPath) {
+        assertTrue(menuItems.containsKey(expectedRootPath),
+                "Client route '" + expectedRootPath + "' missing");
+        assertEquals("Public", menuItems.get(expectedRootPath).title());
+        assertNotNull(menuItems.get(expectedRootPath).menu(),
+                "Public should contain default menu data");
+
+        if (authenticated) {
+            assertTrue(menuItems.containsKey("/about"),
+                    "Client route 'about' missing");
+            assertEquals("About", menuItems.get("/about").title());
+            assertTrue(menuItems.get("/about").loginRequired(),
+                    "Login should be required");
+            assertNotNull(menuItems.get("/about").menu(),
+                    "About should contain default menu data");
+
+            if (hasRole) {
+                assertTrue(menuItems.containsKey("/hilla"),
+                        "Client route 'hilla' missing");
+                assertEquals("Hilla", menuItems.get("/hilla").title());
+                assertTrue(menuItems.get("/hilla").loginRequired(),
+                        "Login should be required");
+                assertArrayEquals(new String[] { "ROLE_USER" },
+                        menuItems.get("/hilla").rolesAllowed(),
+                        "Faulty roles fo hilla");
+                assertNotNull(menuItems.get("/hilla").menu(),
+                        "Hilla should contain default menu data");
+
+                assertTrue(menuItems.containsKey("/hilla/sub"),
+                        "Client child route 'hilla/sub' missing");
+                assertEquals("Hilla Sub", menuItems.get("/hilla/sub").title());
+            } else {
+                assertFalse(menuItems.containsKey("/hilla"),
+                        "Roles do not match no hilla should be available");
+            }
+        } else {
+            assertFalse(menuItems.containsKey("/about"),
+                    "Not authenticated about view should not be available");
+            assertFalse(menuItems.containsKey("/hilla"),
+                    "Not authenticated hilla view should not be available");
+        }
+
+        if (excludeExpected) {
+            assertFalse(menuItems.containsKey("/login"),
+                    "Client route 'login' should be excluded");
+        } else {
+            assertTrue(menuItems.containsKey("/login"),
+                    "Client route 'login' missing");
+            assertEquals("Login", menuItems.get("/login").title());
+            assertNull(menuItems.get("/login").menu().title());
+            assertTrue(menuItems.get("/login").menu().exclude(),
+                    "Login view should be excluded");
+        }
+    }
+
+    private void assertServerRoutes(Map<String, AvailableViewInfo> menuItems) {
+        assertTrue(menuItems.containsKey("/home"),
+                "Server route 'home' missing");
+        assertEquals("MyRoute", menuItems.get("/home").title());
+        assertEquals("Home", menuItems.get("/home").menu().title());
+
+        assertTrue(menuItems.containsKey("/info"),
+                "Server route 'info' missing");
+        assertEquals("MyInfo", menuItems.get("/info").title());
+        assertEquals("MyInfo", menuItems.get("/info").menu().title());
+    }
+
+    private void assertServerRoutesWithParameters(
+            Map<String, AvailableViewInfo> menuItems) {
+        assertServerRoutesWithParameters(menuItems, false);
+    }
+
+    private void assertServerRoutesWithParameters(
+            Map<String, AvailableViewInfo> menuItems, boolean excludeExpected) {
+        if (excludeExpected) {
+            assertFalse(menuItems.containsKey("/param/:param"),
+                    "Server route '/param/:param' should be excluded");
+            assertFalse(menuItems.containsKey("/param/:param1"),
+                    "Server route '/param/:param1' should be excluded");
+        } else {
+            assertTrue(menuItems.containsKey("/param/:param"),
+                    "Server route '/param/:param' missing");
+            assertTrue(menuItems.get("/param/:param").menu().exclude(),
+                    "Server route '/param/:param' should be excluded from menu");
+
+            assertTrue(menuItems.containsKey("/param/:param1"),
+                    "Server route '/param/:param1' missing");
+            assertTrue(menuItems.get("/param/:param1").menu().exclude(),
+                    "Server route '/param/:param1' should be excluded from menu");
+        }
+
+        assertTrue(menuItems.containsKey("/param"),
+                "Server route with optional parameters '/param' missing");
+        assertFalse(menuItems.get("/param").menu().exclude(),
+                "Server route '/param' should be included in the menu");
+
+        assertTrue(menuItems.containsKey("/param/varargs"),
+                "Server route with optional parameters '/param/varargs' missing");
+        assertFalse(menuItems.get("/param/varargs").menu().exclude(),
+                "Server route '/param/varargs' should be included in the menu");
+    }
+
+    @Tag("div")
+    @Route("home")
+    @Menu(title = "Home")
+    public static class MyRoute extends Component {
+    }
+
+    @Tag("div")
+    @Route("static")
+    @PageTitle("Static Title")
+    public static class StaticTitleRoute extends Component {
+    }
+
+    public static class ProductTitleGenerator implements PageTitleGenerator {
+        @Override
+        public String generatePageTitle(PageTitleContext context) {
+            return "Product "
+                    + context.routeParameters().get("productId").orElse("");
+        }
+    }
+
+    @Tag("div")
+    @Route("product/:productId")
+    @DynamicPageTitle(ProductTitleGenerator.class)
+    public static class GeneratedTitleRoute extends Component {
+        static boolean instantiated = false;
+
+        public GeneratedTitleRoute() {
+            instantiated = true;
+        }
+    }
+
+    public static class ValueEchoTitleGenerator implements PageTitleGenerator {
+        @Override
+        public String generatePageTitle(PageTitleContext context) {
+            return "resolved:" + context.value();
+        }
+    }
+
+    @Tag("div")
+    @Route("keyed")
+    @PageTitle("orders.title")
+    @DynamicPageTitle(ValueEchoTitleGenerator.class)
+    public static class KeyedTitleRoute extends Component {
+    }
+
+    @Tag("div")
+    @Route("info")
+    @Menu
+    public static class MyInfo extends Component {
+    }
+
+    @Tag("div")
+    @Route("about")
+    @Menu(title = "about")
+    public static class ConflictRoute extends Component {
+    }
+
+    @Tag("div")
+    @Route("param/:param")
+    @Menu
+    public static class MyRequiredParamRoute extends Component {
+    }
+
+    @Tag("div")
+    @Route("param/:param1/:param2?")
+    @Menu
+    public static class MyRequiredAndOptionalParamRoute extends Component {
+    }
+
+    @Tag("div")
+    @Route("param/:param1?/:param2?(edit)")
+    @Menu
+    public static class MyOptionalParamRoute extends Component {
+    }
+
+    @Tag("div")
+    @Route("param/varargs/:param*")
+    @Menu
+    public static class MyVarargsParamRoute extends Component {
+    }
+
+    @Tag("div")
+    @Route("a")
+    @Menu(order = 1.1)
+    public static class TestRouteA extends Component {
+    }
+
+    @Tag("div")
+    @Route("b")
+    @Menu(order = 1.2)
+    public static class TestRouteB extends Component {
+    }
+
+    @Tag("div")
+    @Route("c")
+    @Menu(order = 0.1)
+    public static class TestRouteC extends Component {
+    }
+
+    @Tag("div")
+    @Route("d")
+    @Menu(order = 0)
+    public static class TestRouteD extends Component {
+    }
+
+    @Tag("div")
+    @Route("d/b")
+    public static class TestRouteDB extends Component {
+
+    }
+
+    @Tag("div")
+    @Route("d/a")
+    public static class TestRouteDA extends Component {
+    }
+
+    /**
+     * Extending class to let us mock the getRouteRegistry method for testing.
+     */
+    public static class MockService extends VaadinServletService {
+
+        @Override
+        public RouteRegistry getRouteRegistry() {
+            return super.getRouteRegistry();
+        }
+
+        @Override
+        public Instantiator getInstantiator() {
+            return new DefaultInstantiator(this);
+        }
+    }
+
+    public static String testClientRouteFile = """
+            [
+              {
+                "route": "",
+                "params": {},
+                "title": "Layout",
+                "children": [
+                  {
+                    "route": "",
+                    "params": {},
+                    "title": "Public"
+                  },
+                  {
+                    "route": "about",
+                    "loginRequired": true,
+                    "params": {},
+                    "title": "About"
+                  },
+                  {
+                    "route": "hilla",
+                    "loginRequired": true,
+                    "rolesAllowed": [
+                      "ROLE_USER"
+                    ],
+                    "params": {},
+                    "title": "Hilla",
+                    "children": [
+                      {
+                        "route": "sub",
+                        "params": {},
+                        "title": "Hilla Sub"
+                      }
+                    ]
+                  },
+                  {
+                    "route": "wc_params/:param?",
+                    "loginRequired": false,
+                    "params": {
+                       ":param": "*"
+                    },
+                    "title": "wc_params path is included in menu"
+                  },
+                  {
+                    "route": "opt_params/:param?",
+                    "loginRequired": false,
+                    "params": {
+                       ":param": "opt"
+                    },
+                    "title": "opt_params path is included in menu"
+                  },
+                  {
+                    "route": "params_with_opt_children",
+                    "loginRequired": false,
+                    "children": [
+                        {
+                            "route": ":param?",
+                            "loginRequired": false,
+                            "params": {
+                               ":param": "opt"
+                            },
+                            "title": "params_with_opt_children/:param? path is included in menu"
+                        }
+                    ]
+                  },
+                  {
+                    "route": "req_params/:param",
+                    "loginRequired": false,
+                    "params": {
+                       ":param": "req"
+                    },
+                    "title": "req_params path is excluded from menu"
+                  },
+                  {
+                    "route": "params",
+                    "loginRequired": false,
+                    "title": null,
+                    "children": [
+                      {
+                        "route": ":param",
+                        "loginRequired": false,
+                        "params": {
+                           ":param": "req"
+                        },
+                        "title": "params/:param path is excluded from menu",
+                        "children": [
+                          {
+                            "route": "sub",
+                            "loginRequired": false,
+                            "title": "params/:param/sub path is excluded from menu"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "route": "login",
+                    "menu": {
+                      "exclude": true
+                    },
+                    "params": {},
+                    "title": "Login"
+                  }
+                ]
+              }
+            ]
+            """;
+
+    String nestedLoginRequiredRouteFile = """
+            [
+              {
+                "route": "",
+                "params": {},
+                "title": "current Title",
+                "children": [
+                  {
+                    "route": "",
+                    "loginRequired": true,
+                    "params": {},
+                    "title": "navigate"
+                  },
+                  {
+                    "route": "admin",
+                    "loginRequired": true,
+                    "title": "Admin",
+                    "params": {},
+                    "children": [
+                      {
+                        "route": "planets",
+                        "loginRequired": true,
+                        "title": "Planets",
+                        "params": {},
+                        "children": [
+                          {
+                            "route": "",
+                            "loginRequired": true,
+                            "title": "Planets",
+                            "params": {}
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+            """;
+
+    String emptyChildren = """
+            [
+              {
+                "route": "",
+                "title": "Main Layout",
+                "children": []
+              }
+            ]
+            """;
+
+    String nonEmptyRoute = """
+            [
+              {
+                "route": "foo",
+                "title": "Main Layout",
+                "children": [
+                  {
+                    "route": "hilla",
+                    "flowLayout": false,
+                    "params": {},
+                    "title": "Hilla view"
+                  }
+                ]
+              }
+            ]
+            """;
+
+    String singleRoute = """
+            [
+              {
+                "route": "",
+                "menu": {
+                  "title": "Public page",
+                  "icon": "vaadin:group"
+                },
+                "flowLayout": false,
+                "params": {},
+                "title": "Public"
+              }
+            ]
+            """;
+
+    String multipleRootRoutes = """
+            [
+              {
+                "route": "hilla",
+                "flowLayout": false,
+                "params": {},
+                "children": [
+                  {
+                    "route": "",
+                    "flowLayout": false,
+                    "params": {},
+                    "title": "Layout"
+                  }
+                ]
+              },
+              {
+                "route": "",
+                "flowLayout": false,
+                "params": {},
+                "title": "Layout",
+                "children": [
+                  {
+                    "route": "components",
+                    "menu": {
+                      "title": "React Components"
+                    },
+                    "flowLayout": false,
+                    "params": {},
+                    "title": "Components"
+                  }
+                ]
+              }
+            ]
+            """;
+}

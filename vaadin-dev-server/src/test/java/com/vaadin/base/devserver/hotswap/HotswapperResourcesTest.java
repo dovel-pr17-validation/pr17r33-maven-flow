@@ -1,0 +1,192 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.base.devserver.hotswap;
+
+import java.io.IOException;
+import java.net.URI;
+import java.util.List;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.internal.BrowserLiveReload;
+import com.vaadin.flow.internal.BrowserLiveReloadAccessor;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.server.MockVaadinServletService;
+import com.vaadin.flow.server.ServiceException;
+import com.vaadin.flow.server.SessionInitEvent;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.flow.server.startup.ApplicationConfiguration;
+import com.vaadin.flow.server.startup.ApplicationConfigurationFactory;
+
+import static com.vaadin.base.devserver.hotswap.HotswapperTest.createMockVaadinSession;
+import static com.vaadin.base.devserver.hotswap.HotswapperTest.initUIAndNavigateTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class HotswapperResourcesTest {
+
+    private MockVaadinServletService service;
+    private BrowserLiveReload liveReload;
+    private Hotswapper hotswapper;
+    private VaadinHotswapper flowHotswapper;
+    private VaadinHotswapper hillaHotswapper;
+
+    @BeforeEach
+    void setUp() throws IOException {
+        service = new MockVaadinServletService();
+
+        // Wire BrowserLiveReload into Lookup via BrowserLiveReloadAccessor
+        liveReload = mock(BrowserLiveReload.class);
+        when(service.getLookup().lookup(BrowserLiveReloadAccessor.class))
+                .thenReturn(context -> liveReload);
+        flowHotswapper = mock(VaadinHotswapper.class);
+        hillaHotswapper = mock(VaadinHotswapper.class);
+        when(service.getLookup().lookupAll(VaadinHotswapper.class))
+                .thenReturn(List.of(flowHotswapper, hillaHotswapper));
+
+        ApplicationConfiguration appConfig = mock(
+                ApplicationConfiguration.class);
+        when(appConfig.isProductionMode()).thenAnswer(
+                i -> service.getDeploymentConfiguration().isProductionMode());
+        when(service.getLookup().lookup(ApplicationConfigurationFactory.class))
+                .thenReturn(context -> appConfig);
+
+        hotswapper = new Hotswapper(service);
+    }
+
+    protected BrowserLiveReload getLiveReload() {
+        return liveReload;
+    }
+
+    @Test
+    void resourceChange_noLiveReloadAvailable_noCrash() throws IOException {
+        // Simulate no live reload
+        liveReload = null;
+        hotswapper = new Hotswapper(service);
+
+        doAnswer(i -> {
+            i.getArgument(0, HotswapResourceEvent.class)
+                    .sendHmrEvent("my-event", JacksonUtils.createObjectNode());
+            return null;
+        }).when(flowHotswapper)
+                .onResourcesChange(any(HotswapResourceEvent.class));
+
+        // Should not throw even though live reload is not available; just logs
+        hotswapper.onHotswap(new URI[0],
+                new URI[] { URI.create("/some/resources/somewhere.txt") },
+                new URI[0]);
+
+    }
+
+    @Test
+    void onResourceHotswap_hotswapperRequestsReload_liveReloadTriggered()
+            throws ServiceException {
+        doAnswer(i -> {
+            i.getArgument(0, HotswapResourceEvent.class)
+                    .triggerUpdate(UIUpdateStrategy.REFRESH);
+            return null;
+        }).when(flowHotswapper)
+                .onResourcesChange(any(HotswapResourceEvent.class));
+        doAnswer(i -> {
+            i.getArgument(0, HotswapResourceEvent.class)
+                    .triggerUpdate(UIUpdateStrategy.RELOAD);
+            return null;
+        }).when(hillaHotswapper)
+                .onResourcesChange(any(HotswapResourceEvent.class));
+        VaadinSession session = createMockVaadinSession(service);
+        hotswapper.sessionInit(new SessionInitEvent(service, session, null));
+        HotswapperTest.RefreshTestingUI ui = initUIAndNavigateTo(service,
+                session, HotswapperTest.MyRoute.class);
+
+        hotswapper.onHotswap(new URI[0],
+                new URI[] { URI.create("some-file.txt") }, new URI[0]);
+        verify(liveReload).reload();
+        verify(liveReload, never()).refresh(anyBoolean());
+    }
+
+    @Test
+    void onResourceHotswap_hotswapperRequestsRefresh_refreshTriggered()
+            throws ServiceException {
+        doAnswer(i -> {
+            i.getArgument(0, HotswapResourceEvent.class)
+                    .triggerUpdate(UIUpdateStrategy.REFRESH);
+            return null;
+        }).when(flowHotswapper)
+                .onResourcesChange(any(HotswapResourceEvent.class));
+        VaadinSession session = createMockVaadinSession(service);
+        hotswapper.sessionInit(new SessionInitEvent(service, session, null));
+        HotswapperTest.RefreshTestingUI ui = initUIAndNavigateTo(service,
+                session, HotswapperTest.MyRoute.class);
+
+        hotswapper.onHotswap(new URI[0],
+                new URI[] { URI.create("some-file.txt") }, new URI[0]);
+        verify(liveReload, never()).reload();
+        verify(liveReload).refresh(true);
+    }
+
+    @Test
+    void onHotswap_pushDisabled_hotswapperRequestsRefresh_UINotRefreshedButLiveReloadTriggered()
+            throws ServiceException {
+        VaadinSession session = createMockVaadinSession(service);
+        hotswapper.sessionInit(new SessionInitEvent(service, session, null));
+        HotswapperTest.RefreshTestingUI ui = initUIAndNavigateTo(service,
+                session, HotswapperTest.MyRoute.class);
+
+        doAnswer(i -> {
+            i.getArgument(0, HotswapResourceEvent.class)
+                    .triggerUpdate(UIUpdateStrategy.REFRESH);
+            return null;
+        }).when(flowHotswapper)
+                .onResourcesChange(any(HotswapResourceEvent.class));
+
+        hotswapper.onHotswap(new URI[0],
+                new URI[] { URI.create("some-file.txt") }, new URI[0]);
+        ui.assertNotRefreshed();
+        verify(liveReload).refresh(true);
+        verify(liveReload, never()).reload();
+    }
+
+    @Test
+    void onHotswap_pushEnabled_hotswapperRequestRefresh_allUIsRefreshed()
+            throws ServiceException {
+        VaadinSession session = createMockVaadinSession(service);
+        hotswapper.sessionInit(new SessionInitEvent(service, session, null));
+        doAnswer(i -> {
+            i.getArgument(0, HotswapResourceEvent.class)
+                    .triggerUpdate(UIUpdateStrategy.REFRESH);
+            return null;
+        }).when(flowHotswapper)
+                .onResourcesChange(any(HotswapResourceEvent.class));
+
+        HotswapperTest.RefreshTestingUI ui = initUIAndNavigateTo(service,
+                session, HotswapperTest.MyRouteWithModal.class);
+        ui.enablePush();
+
+        hotswapper.onHotswap(new URI[0],
+                new URI[] { URI.create("some-file.txt") }, new URI[0]);
+
+        ui.assertChainRefreshed();
+        verify(liveReload, never()).reload();
+        verify(liveReload, never()).refresh(anyBoolean());
+    }
+
+}

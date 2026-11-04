@@ -1,0 +1,162 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server;
+
+import java.util.Collections;
+import java.util.Optional;
+import java.util.function.Function;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.page.Push;
+import com.vaadin.flow.router.ParentLayout;
+import com.vaadin.flow.router.RouteNotFoundError;
+import com.vaadin.flow.router.RouterLayout;
+import com.vaadin.flow.server.BootstrapHandler.BootstrapContext;
+import com.vaadin.flow.server.communication.JavaScriptBootstrapHandler.JavaScriptBootstrapContext;
+import com.vaadin.flow.server.startup.ApplicationRouteRegistry;
+import com.vaadin.flow.shared.ApplicationConstants;
+import com.vaadin.flow.shared.communication.PushMode;
+import com.vaadin.flow.shared.ui.Transport;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class BootstrapContextTest {
+
+    private MockVaadinSession session;
+    private UI ui;
+    private VaadinRequest request = mock(VaadinRequest.class);
+
+    private Function<VaadinRequest, String> callback = request -> "";;
+
+    @Tag(Tag.A)
+    @Push(value = PushMode.MANUAL, transport = Transport.LONG_POLLING)
+    private static class MainView extends Component implements RouterLayout {
+
+    }
+
+    @Tag(Tag.A)
+    private static class OtherView extends Component {
+
+    }
+
+    @Push(value = PushMode.AUTOMATIC, transport = Transport.WEBSOCKET)
+    private static class CustomRouteNotFound extends RouteNotFoundError {
+
+    }
+
+    @ParentLayout(MainView.class)
+    private static class AnotherCustomRouteNotFound extends RouteNotFoundError {
+
+    }
+
+    @BeforeEach
+    void setUp() throws ServiceException {
+        MockVaadinSession session = new MockVaadinSession();
+        session.lock();
+        ui = new UI();
+        ui.getInternals().setSession(session);
+    }
+
+    @Test
+    void getPushAnnotation_routeTargetPresents_pushFromTheClassDefinitionIsUsed() {
+        ui.getInternals().getRouter().getRegistry().setRoute("foo",
+                MainView.class, Collections.emptyList());
+        when(request
+                .getParameter(ApplicationConstants.REQUEST_LOCATION_PARAMETER))
+                .thenReturn("foo");
+
+        BootstrapContext context = new JavaScriptBootstrapContext(request,
+                mock(VaadinResponse.class), ui, callback);
+
+        Optional<Push> push = context
+                .getPageConfigurationAnnotation(Push.class);
+        assertTrue(push.isPresent());
+        Push pushAnnotation = push.get();
+        assertEquals(PushMode.MANUAL, pushAnnotation.value());
+        assertEquals(Transport.LONG_POLLING, pushAnnotation.transport());
+    }
+
+    @Test
+    void getPushAnnotation_routeTargetPresents_pushDefinedOnParentLayout_pushFromTheClassDefinitionIsUsed() {
+        ui.getInternals().getRouter().getRegistry().setRoute("foo",
+                OtherView.class, Collections.singletonList(MainView.class));
+        when(request
+                .getParameter(ApplicationConstants.REQUEST_LOCATION_PARAMETER))
+                .thenReturn("foo");
+
+        BootstrapContext context = new JavaScriptBootstrapContext(request,
+                mock(VaadinResponse.class), ui, callback);
+
+        Optional<Push> push = context
+                .getPageConfigurationAnnotation(Push.class);
+        assertTrue(push.isPresent());
+        Push pushAnnotation = push.get();
+        assertEquals(PushMode.MANUAL, pushAnnotation.value());
+        assertEquals(Transport.LONG_POLLING, pushAnnotation.transport());
+    }
+
+    @Test
+    void getPushAnnotation_routeTargetIsAbsent_pushFromTheErrorNavigationTargetIsUsed() {
+        when(request
+                .getParameter(ApplicationConstants.REQUEST_LOCATION_PARAMETER))
+                .thenReturn("bar");
+
+        ApplicationRouteRegistry registry = ApplicationRouteRegistry
+                .getInstance(ui.getSession().getService().getContext());
+        registry.setErrorNavigationTargets(
+                Collections.singleton(CustomRouteNotFound.class));
+
+        BootstrapContext context = new BootstrapContext(request,
+                mock(VaadinResponse.class), session, ui, request -> "");
+
+        Optional<Push> push = context
+                .getPageConfigurationAnnotation(Push.class);
+        assertTrue(push.isPresent());
+        Push pushAnnotation = push.get();
+        assertEquals(PushMode.AUTOMATIC, pushAnnotation.value());
+        assertEquals(Transport.WEBSOCKET, pushAnnotation.transport());
+    }
+
+    @Test
+    void getPushAnnotation_routeTargetIsAbsent_pushIsDefinedOnParentLayout_pushFromTheErrorNavigationTargetParentLayoutIsUsed() {
+        when(request
+                .getParameter(ApplicationConstants.REQUEST_LOCATION_PARAMETER))
+                .thenReturn("bar");
+
+        ApplicationRouteRegistry registry = ApplicationRouteRegistry
+                .getInstance(ui.getSession().getService().getContext());
+        registry.setErrorNavigationTargets(
+                Collections.singleton(AnotherCustomRouteNotFound.class));
+
+        BootstrapContext context = new BootstrapContext(request,
+                mock(VaadinResponse.class), session, ui, request -> "");
+
+        Optional<Push> push = context
+                .getPageConfigurationAnnotation(Push.class);
+        assertTrue(push.isPresent());
+        Push pushAnnotation = push.get();
+        assertEquals(PushMode.MANUAL, pushAnnotation.value());
+        assertEquals(Transport.LONG_POLLING, pushAnnotation.transport());
+    }
+}

@@ -1,0 +1,1139 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.component.page;
+
+import java.io.Serializable;
+import java.net.MalformedURLException;
+import java.net.URI;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Objects;
+import java.util.UUID;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.vaadin.flow.component.Direction;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.dependency.JavaScript;
+import com.vaadin.flow.component.dependency.JsModule;
+import com.vaadin.flow.component.dependency.StyleSheet;
+import com.vaadin.flow.component.internal.DependencyList;
+import com.vaadin.flow.component.internal.UIInternals.JavaScriptInvocation;
+import com.vaadin.flow.dom.DomListenerRegistration;
+import com.vaadin.flow.dom.Element;
+import com.vaadin.flow.dom.JsFunction;
+import com.vaadin.flow.function.SerializableConsumer;
+import com.vaadin.flow.internal.CspViolationReporter;
+import com.vaadin.flow.internal.CssBundler;
+import com.vaadin.flow.internal.UrlUtil;
+import com.vaadin.flow.js.JsDefinition;
+import com.vaadin.flow.js.JsDefinitionProxy;
+import com.vaadin.flow.js.JsExpression;
+import com.vaadin.flow.js.JsSnippets;
+import com.vaadin.flow.server.CspMode;
+import com.vaadin.flow.server.CspViolationException;
+import com.vaadin.flow.server.InitParameters;
+import com.vaadin.flow.shared.Registration;
+import com.vaadin.flow.shared.ui.Dependency;
+import com.vaadin.flow.shared.ui.Dependency.Type;
+import com.vaadin.flow.shared.ui.LoadMode;
+import com.vaadin.flow.signals.Signal;
+import com.vaadin.flow.signals.local.ValueSignal;
+
+/**
+ * Represents the web page open in the browser, containing the UI it is
+ * connected to.
+ *
+ * @author Vaadin Ltd
+ * @since 1.0
+ */
+public class Page implements Serializable {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(Page.class);
+
+    private final UI ui;
+    private final History history;
+    private DomListenerRegistration resizeReceiver;
+    private ArrayList<BrowserWindowResizeListener> resizeListeners;
+    private ValueSignal<WindowSize> windowSizeSignal;
+    private final ValueSignal<PageVisibility> pageVisibilitySignal = new ValueSignal<>(
+            PageVisibility.UNKNOWN);
+    private final Signal<PageVisibility> pageVisibilityReadOnly = pageVisibilitySignal
+            .asReadonly();
+
+    /**
+     * Creates a page instance for the given UI.
+     *
+     * @param ui
+     *            the UI that this page instance is connected to
+     */
+    public Page(UI ui) {
+        this.ui = ui;
+        history = new History(ui);
+        ui.getElement()
+                .addEventListener("vaadin-page-visibility-change",
+                        e -> setPageVisibility(e.getEventDetail(String.class)))
+                .addEventDetail().debounce(100).allowInert();
+    }
+
+    /**
+     * Sets the page title. The title is displayed by the browser e.g. as the
+     * title of the browser window or tab.
+     * <p>
+     * To clear the page title, use an empty string.
+     *
+     * @param title
+     *            the page title to set, not <code>null</code>
+     */
+    public void setTitle(String title) {
+        if (title == null) {
+            throw new IllegalArgumentException("Cannot set a null page title.");
+        }
+
+        ui.getInternals().setTitle(title);
+    }
+
+    /**
+     * Sets the color scheme for the page.
+     * <p>
+     * The color scheme is applied via both a theme attribute and the
+     * color-scheme CSS property on the html element. The theme attribute allows
+     * CSS to target different color schemes (e.g.,
+     * {@code html[theme~="dark"]}), while the color-scheme property ensures
+     * browser UI adaptation works even for custom themes that don't define
+     * their own color-scheme CSS rules.
+     *
+     * @param colorScheme
+     *            the color scheme to set (e.g., ColorScheme.Value.DARK,
+     *            ColorScheme.Value.LIGHT), or {@code null} to reset to NORMAL
+     * @since 25.0
+     */
+    public void setColorScheme(ColorScheme.Value colorScheme) {
+        if (colorScheme == null || colorScheme == ColorScheme.Value.NORMAL) {
+            executeJs(PageJs.class).resetColorScheme();
+            getExtendedClientDetails().setColorScheme(ColorScheme.Value.NORMAL);
+        } else {
+            executeJs(PageJs.class).setColorScheme(colorScheme.getThemeValue(),
+                    colorScheme.getValue());
+            getExtendedClientDetails().setColorScheme(colorScheme);
+        }
+    }
+
+    /**
+     * Gets the color scheme for the page.
+     * <p>
+     * Note that this method returns the server-side cached value and will not
+     * detect color scheme changes made directly via JavaScript or browser
+     * developer tools.
+     *
+     * @return the color scheme value, never {@code null}
+     * @since 25.0
+     */
+    public ColorScheme.Value getColorScheme() {
+        return getExtendedClientDetails().getColorScheme();
+    }
+
+    /**
+     * Adds the given style sheet to the page and ensures that it is loaded
+     * successfully.
+     * <p>
+     * Relative URLs are resolved against the page's base URI, which is the
+     * Vaadin servlet mapping path. So if the {@code url} value is
+     * {@code "some.js"}, the servlet is mapped to the context root and
+     * {@code src/main/webapp} is used as a location for static web resources
+     * (which is the default location), then the file system path for the
+     * resource should be {@code src/main/webapp/some.js}.
+     * <p>
+     * You can prefix the URL with {@code context://} to make it relative to the
+     * context path or use an absolute URL to refer to files outside the
+     * frontend directory. The {@code context://} and {@code base://} rules of
+     * {@link StyleSheet#value()} apply here as well.
+     * <p>
+     * For component related style sheet dependencies, you should use the
+     * {@link StyleSheet @StyleSheet} annotation.
+     * <p>
+     * Is is guaranteed that style sheet will be loaded before the first page
+     * load. For more options, refer to {@link #addStyleSheet(String, LoadMode)}
+     *
+     * @param url
+     *            the URL to load the style sheet from, not <code>null</code>
+     * @return a registration object that can be used to remove the style sheet
+     */
+    public Registration addStyleSheet(String url) {
+        return addStyleSheet(url, LoadMode.EAGER);
+    }
+
+    /**
+     * Adds the given style sheet to the page and ensures that it is loaded
+     * successfully.
+     * <p>
+     * Relative URLs are resolved against the page's base URI, which is the
+     * Vaadin servlet mapping path. So if the {@code url} value is
+     * {@code "some.js"}, the servlet is mapped to the context root and
+     * {@code src/main/webapp} is used as a location for static web resources
+     * (which is the default location), then the file system path for the
+     * resource should be {@code src/main/webapp/some.js}.
+     * <p>
+     * You can prefix the URL with {@code context://} to make it relative to the
+     * context path or use an absolute URL to refer to files outside the
+     * frontend directory. The {@code context://} and {@code base://} rules of
+     * {@link StyleSheet#value()} apply here as well.
+     * <p>
+     * For component related style sheet dependencies, you should use the
+     * {@link StyleSheet @StyleSheet} annotation.
+     *
+     * @param url
+     *            the URL to load the style sheet from, not <code>null</code>
+     * @param loadMode
+     *            determines dependency load mode, refer to {@link LoadMode} for
+     *            details
+     * @return a registration object that can be used to remove the style sheet
+     * @see #addStyleSheet(String, LoadMode, String)
+     */
+    public Registration addStyleSheet(String url, LoadMode loadMode) {
+        return addStyleSheet(url, loadMode, null);
+    }
+
+    /**
+     * Adds the given style sheet to the page into a CSS cascade layer and
+     * ensures that it is loaded successfully.
+     * <p>
+     * Styles in a layer have lower priority than styles outside of any layer,
+     * regardless of selector specificity.
+     * <p>
+     * Relative URLs and the {@code context://} prefix are handled as in
+     * {@link #addStyleSheet(String, LoadMode)}.
+     * <p>
+     * A style sheet is loaded only once per URL. Adding a URL that is already
+     * on the page keeps it in the layer it was first added to, and logs a
+     * warning if the layers differ.
+     * <p>
+     * For component related style sheet dependencies, you should use the
+     * {@link StyleSheet#layer() layer} attribute of the
+     * {@link StyleSheet @StyleSheet} annotation.
+     *
+     * @param url
+     *            the URL to load the style sheet from, not <code>null</code>
+     * @param loadMode
+     *            determines dependency load mode, refer to {@link LoadMode} for
+     *            details
+     * @param layer
+     *            the name of the cascade layer, such as {@code theme} or
+     *            {@code theme.base}, or {@code null} to not use a layer
+     * @return a registration object that can be used to remove the style sheet
+     * @throws IllegalArgumentException
+     *             if {@code layer} is not a valid cascade layer name
+     * @since 25.4
+     */
+    public Registration addStyleSheet(String url, LoadMode loadMode,
+            String layer) {
+        if (layer != null) {
+            CssBundler.validateLayerName(layer);
+        }
+        DependencyList dependencyList = ui.getInternals().getDependencyList();
+
+        // Check if dependency already exists with this URL
+        Dependency existing = dependencyList.getDependencyByUrl(url,
+                Type.STYLESHEET);
+        if (existing != null && !Objects.equals(existing.getLayer(), layer)
+                && LOGGER.isWarnEnabled()) {
+            // The browser has already loaded the URL and keeps it as it is
+            LOGGER.warn(
+                    "Style sheet {} is already added {}, so it is not added"
+                            + " again {}",
+                    url, describeLayer(existing.getLayer()),
+                    describeLayer(layer));
+        }
+        String dependencyId;
+
+        if (existing != null && existing.getId() != null) {
+            // Reuse the existing dependency's ID for duplicates
+            dependencyId = existing.getId();
+        } else {
+            // Create new ID for new dependencies
+            dependencyId = UUID.randomUUID().toString();
+        }
+
+        Dependency dependency = new Dependency(Type.STYLESHEET, url, loadMode,
+                dependencyId, layer);
+        dependencyList.add(dependency);
+
+        // Return Registration for removal
+        return () -> ui.getInternals().removeStyleSheet(dependencyId);
+    }
+
+    private static String describeLayer(String layer) {
+        return layer == null ? "without a layer" : ("to layer '" + layer + "'");
+    }
+
+    /**
+     * Adds the given JavaScript to the page and ensures that it is loaded
+     * successfully.
+     * <p>
+     * Relative URLs are resolved against the page's base URI, which is the
+     * Vaadin servlet mapping path. So if the {@code url} value is
+     * {@code "some.js"}, the servlet is mapped to the context root and
+     * {@code src/main/webapp} is used as a location for static web resources
+     * (which is the default location), then the file system path for the
+     * resource should be {@code src/main/webapp/some.js}.
+     * <p>
+     * You can prefix the URL with {@code context://} to make it relative to the
+     * context path or use an absolute URL to refer to files outside the
+     * frontend directory. The {@code context://} and {@code base://} rules of
+     * {@link JavaScript#value()} apply here as well.
+     * <p>
+     * For component related JavaScript dependencies, you should use the
+     * {@link JavaScript @JavaScript} annotation.
+     * <p>
+     * Is is guaranteed that script will be loaded before the first page load.
+     * For more options, refer to {@link #addJavaScript(String, LoadMode)}
+     *
+     * @param url
+     *            the URL to load the JavaScript from, not <code>null</code>
+     */
+    public void addJavaScript(String url) {
+        addJavaScript(url, LoadMode.EAGER);
+    }
+
+    /**
+     * Adds the given JavaScript to the page and ensures that it is loaded
+     * successfully.
+     * <p>
+     * Relative URLs are resolved against the page's base URI, which is the
+     * Vaadin servlet mapping path. So if the {@code url} value is
+     * {@code "some.js"}, the servlet is mapped to the context root and
+     * {@code src/main/webapp} is used as a location for static web resources
+     * (which is the default location), then the file system path for the
+     * resource should be {@code src/main/webapp/some.js}.
+     * <p>
+     * You can prefix the URL with {@code context://} to make it relative to the
+     * context path or use an absolute URL to refer to files outside the
+     * frontend directory. The {@code context://} and {@code base://} rules of
+     * {@link JavaScript#value()} apply here as well.
+     * <p>
+     * For component related JavaScript dependencies, you should use the
+     * {@link JavaScript @JavaScript} annotation.
+     *
+     * @param url
+     *            the URL to load the JavaScript from, not <code>null</code>
+     * @param loadMode
+     *            determines dependency load mode, refer to {@link LoadMode} for
+     *            details
+     */
+    public void addJavaScript(String url, LoadMode loadMode) {
+        addJavaScript(url, loadMode, JavaScript.Type.SCRIPT);
+    }
+
+    /**
+     * Adds the given JavaScript to the page and ensures that it is loaded
+     * successfully.
+     * <p>
+     * Relative URLs are resolved against the page's base URI, which is the
+     * Vaadin servlet mapping path. You can prefix the URL with
+     * {@code context://} to make it relative to the context path or use an
+     * absolute URL to refer to files outside the frontend directory. The
+     * {@code context://} and {@code base://} rules of
+     * {@link JavaScript#value()} apply here as well.
+     * <p>
+     * The {@code type} parameter selects the kind of {@code <script>} tag the
+     * browser receives: {@link JavaScript.Type#SCRIPT} renders a classic
+     * {@code <script>} element (the default of {@link #addJavaScript(String)});
+     * {@link JavaScript.Type#MODULE} renders a {@code <script type="module">}
+     * element, which is the recommended way to load runtime ES modules
+     * (replaces the deprecated {@link #addJsModule(String)}).
+     * <p>
+     * {@link JavaScript.Type#MODULE} supports {@link LoadMode#EAGER} and
+     * {@link LoadMode#LAZY}, but not {@link LoadMode#INLINE}: the browser
+     * cannot be given the contents of a module without also losing the module's
+     * identity, so use {@link JavaScript.Type#SCRIPT} if the contents must be
+     * inlined into the page.
+     * <p>
+     * For component related JavaScript dependencies, you should use the
+     * {@link JavaScript @JavaScript} annotation.
+     *
+     * @param url
+     *            the URL to load the JavaScript from, not <code>null</code>
+     * @param loadMode
+     *            determines dependency load mode, refer to {@link LoadMode} for
+     *            details
+     * @param type
+     *            the kind of {@code <script>} tag to render; {@code null} is
+     *            treated as {@link JavaScript.Type#SCRIPT}
+     * @throws IllegalArgumentException
+     *             if {@code type} is {@link JavaScript.Type#MODULE} and
+     *             {@code loadMode} is {@link LoadMode#INLINE}
+     * @since 25.4
+     */
+    public void addJavaScript(String url, LoadMode loadMode,
+            JavaScript.Type type) {
+        if (type == JavaScript.Type.MODULE && loadMode == LoadMode.INLINE) {
+            throw new IllegalArgumentException(
+                    "Inline load mode is not supported for JavaScript.Type.MODULE ("
+                            + url
+                            + "). Use LoadMode.EAGER or LoadMode.LAZY, or JavaScript.Type.SCRIPT if the contents must be inlined into the page.");
+        }
+        Type dependencyType = type == JavaScript.Type.MODULE ? Type.JS_MODULE
+                : Type.JAVASCRIPT;
+        addDependency(new Dependency(dependencyType, url, loadMode));
+    }
+
+    /**
+     * Adds the given external JavaScript module to the page and ensures that it
+     * is loaded successfully.
+     * <p>
+     * If the JavaScript modules do not need to be added dynamically, you should
+     * use the {@link JsModule @JsModule} annotation instead.
+     *
+     * @param url
+     *            the URL to load the JavaScript module from, not
+     *            <code>null</code>
+     * @deprecated use {@link #addJavaScript(String, LoadMode, JavaScript.Type)}
+     *             with {@link JavaScript.Type#MODULE} instead. The new overload
+     *             also accepts a {@link LoadMode}.
+     * @since 2.0
+     */
+    @Deprecated(since = "25.4")
+    public void addJsModule(String url) {
+        if (UrlUtil.isExternal(url) || url.startsWith("/")) {
+            addDependency(new Dependency(Type.JS_MODULE, url, LoadMode.EAGER));
+        } else {
+            throw new IllegalArgumentException(
+                    "url argument must contains either a protocol (eg. starts with \"http://\" or \"//\"), or starts with \"/\".");
+        }
+    }
+
+    /**
+     * Adds a dynamic import using a JavaScript {@code expression} which is
+     * supposed to return a JavaScript {@code Promise}.
+     * <p>
+     * No change will be applied on the client side until resulting
+     * {@code Promise} of the {@code expression} is completed. It behaves like
+     * other dependencies ({@link #addJavaScript(String)},
+     * {@link #addJsModule(String)}, etc.)
+     * <p>
+     * The browser compiles the expression from a string, which a Content
+     * Security Policy without {@code unsafe-eval} blocks. Use
+     * {@link #addDynamicImport(JsFunction)} with a function declared by a
+     * {@link JsDefinition} interface to keep the JavaScript in the bundle.
+     *
+     * @param expression
+     *            the JavaScript expression which return a Promise
+     * @since 2.1
+     * @throws CspViolationException
+     *             in the {@link CspMode#STRICT} Content Security Policy mode
+     */
+    public void addDynamicImport(String expression) {
+        CspViolationReporter.reportStringJavaScript();
+        addDependency(new Dependency(Type.DYNAMIC_IMPORT, expression));
+    }
+
+    /**
+     * Adds a dynamic import that calls the given function, which is supposed to
+     * return a JavaScript {@code Promise}.
+     * <p>
+     * No change will be applied on the client side until the resulting
+     * {@code Promise} is completed, as with {@link #addDynamicImport(String)}.
+     * Unlike that method, which sends an expression that the browser compiles,
+     * this one sends a function value, so a function declared by a
+     * {@link JsDefinition} interface and obtained from
+     * {@link JsSnippets#of(Class)} loads without anything being compiled in the
+     * browser:
+     *
+     * <pre>
+     * &#64;JsDefinition
+     * public interface ReportEditorJs extends Serializable {
+     *     &#64;JsExpression("return import('Frontend/report-editor/report-editor.js');")
+     *     JsFunction loadEditor();
+     * }
+     *
+     * page.addDynamicImport(JsSnippets.of(ReportEditorJs.class).loadEditor());
+     * // Defined by the time it is attached, as the import blocks later changes
+     * layout.add(new ReportEditor());
+     * </pre>
+     *
+     * The build puts the expression into the bundle, where the bundler can
+     * split a module imported with a literal path into a file of its own that
+     * is loaded only when the import runs.
+     * <p>
+     * A function that is added again with the same captured values is loaded
+     * only once. The function cannot capture an element or a component,
+     * attached or not, as the browser loads dependencies before it applies the
+     * changes of the same round trip, and a detached element cannot be
+     * referenced. This is checked for a capture itself and for what a
+     * collection, a map, an array or a captured function holds. Bean properties
+     * are only checked for attached elements; a detached one in a bean is sent
+     * as {@code null}, as it is for any other value sent to the browser.
+     *
+     * @param dynamicImport
+     *            the function that returns a Promise, not {@code null}
+     * @throws IllegalArgumentException
+     *             if the function captures an element or a component, as
+     *             described above
+     */
+    public void addDynamicImport(JsFunction dynamicImport) {
+        addDependency(new Dependency(dynamicImport));
+    }
+
+    /**
+     * Asynchronously runs the JavaScript that the given interface declares in
+     * the browser, through an implementation of the interface that this method
+     * answers with: calling a method of the implementation runs the JavaScript
+     * that the method declares, with the arguments of the call as its
+     * parameters.
+     * <p>
+     * The interface is annotated with {@link JsDefinition}, and each of its
+     * methods declares the JavaScript it runs with {@link JsExpression}:
+     *
+     * <pre>
+     * &#64;JsDefinition
+     * public interface ClipboardJs extends Serializable {
+     *     &#64;JsExpression("return navigator.clipboard.readText()")
+     *     PendingJavaScriptResult readText();
+     * }
+     *
+     * page.executeJs(ClipboardJs.class).readText().then(String.class,
+     *         text -&gt; ...);
+     * </pre>
+     *
+     * The declared JavaScript runs the way an expression given to
+     * {@link #executeJs(String, Object...)} does: in an <code>async</code>
+     * JavaScript method, with the arguments of the call as <code>$0</code>,
+     * <code>$1</code>, and so on, and a method that returns
+     * {@link PendingJavaScriptResult} can be used to retrieve the
+     * <code>return</code> value the same way. It runs on nothing in particular
+     * - page JavaScript works on globals - where the JavaScript of
+     * {@link Element#executeJs(Class)} runs on the element it was obtained
+     * from.
+     * <p>
+     * What differs from an expression is that nothing about the JavaScript is
+     * decided at the call site: the build collects the declarations of every
+     * JavaScript definition into the bundle, and the client runs the collected
+     * function after looking it up by an identifier of the JavaScript itself.
+     * No expression is sent and none is compiled in the browser, so the call
+     * works under a content security policy without <code>unsafe-eval</code>,
+     * and what declared the JavaScript in Java is not sent to a production
+     * browser either.
+     *
+     * @param <T>
+     *            the JavaScript definition type
+     * @param definitionType
+     *            the JavaScript definition, not <code>null</code>
+     * @return an implementation of the interface, to call the declared
+     *         JavaScript through, not <code>null</code>
+     * @throws IllegalArgumentException
+     *             if the type is not an interface, is not annotated with
+     *             {@link JsDefinition}, or has a method that can not be
+     *             answered
+     * @since 25.4
+     */
+    public <T> T executeJs(Class<T> definitionType) {
+        // Queued the way an expression given to the page is, so that the two
+        // reach the client in the order they were made
+        return JsDefinitionProxy.create(definitionType,
+                ui.getInternals()::addJavaScriptInvocation);
+    }
+
+    // When updating JavaDocs here, keep in sync with Element.executeJavaScript
+    /**
+     * Asynchronously runs the given JavaScript expression in the browser.
+     * <p>
+     * The expression is executed in an <code>async</code> JavaScript method, so
+     * you can utilize <code>await</code> syntax when consuming JavaScript API
+     * returning a <code>Promise</code>. The returned
+     * <code>PendingJavaScriptResult</code> can be used to retrieve the
+     * <code>return</code> value from the JavaScript expression. If a
+     * <code>Promise</code> is returned in the JavaScript expression,
+     * <code>PendingJavaScriptResult</code> will report the resolved value once
+     * it becomes available. If no return value handler is registered, the
+     * return value will be ignored.
+     * <p>
+     * Return values from JavaScript can be automatically deserialized into Java
+     * objects. All types supported by Jackson for JSON deserialization are
+     * supported as return values, including custom bean classes.
+     * <p>
+     * The given parameters will be available to the expression as variables
+     * named <code>$0</code>, <code>$1</code>, and so on. All types supported by
+     * Jackson for JSON serialization are supported as parameters. Special
+     * cases:
+     * <ul>
+     * <li>{@link Element} (will be sent as a DOM element reference to the
+     * browser if the server-side element instance is attached when the
+     * invocation is sent to the client, or as <code>null</code> if not
+     * attached)
+     * <li>{@link tools.jackson.databind.node.BaseJsonNode} (sent as-is without
+     * additional wrapping)
+     * <li>{@link JsFunction} (manifested as a callable JavaScript function with
+     * its captured parameters pre-bound)
+     * </ul>
+     * Note that the parameter variables can only be used in contexts where a
+     * JavaScript variable can be used. You should for instance do
+     * <code>'prefix' + $0</code> instead of <code>'prefix$0'</code> and
+     * <code>value[$0]</code> instead of <code>value.$0</code> since JavaScript
+     * variables aren't evaluated inside strings or property names.
+     *
+     * @param expression
+     *            the JavaScript expression to invoke
+     * @param parameters
+     *            parameters to pass to the expression
+     * @return a pending result that can be used to get a value returned from
+     *         the expression
+     * @since 25.0
+     * @throws CspViolationException
+     *             in the {@link CspMode#STRICT} Content Security Policy mode
+     */
+    public PendingJavaScriptResult executeJs(String expression,
+            Object... parameters) {
+        CspViolationReporter.reportStringJavaScript();
+        return ui.getInternals().addJavaScriptInvocation(
+                new JavaScriptInvocation(expression, parameters));
+    }
+
+    /**
+     * Executes the given JavaScript expression in the browser.
+     *
+     * @deprecated Use {@link #executeJs(String, Object...)} instead. This
+     *             method exists only for binary compatibility.
+     * @param expression
+     *            the JavaScript expression to execute
+     * @param parameters
+     *            parameters to pass to the expression
+     * @return a pending result that can be used to get a value returned from
+     *         the expression
+     * @since 2.0
+     */
+    @Deprecated
+    public PendingJavaScriptResult executeJs(String expression,
+            Serializable[] parameters) {
+        return executeJs(expression, (Object[]) parameters);
+    }
+
+    /**
+     * Gets a representation of <code>window.history</code> for this page.
+     *
+     * @return the history representation
+     */
+    public History getHistory() {
+        return history;
+    }
+
+    /**
+     * Reloads the page in the browser.
+     */
+    public void reload() {
+        executeJs(PageJs.class).reload();
+    }
+
+    /**
+     * Returns a signal that tracks the current browser window size.
+     * <p>
+     * The signal is lazily initialized on first access and automatically
+     * updates when the browser window is resized. The initial value uses
+     * dimensions from {@link ExtendedClientDetails} if available, otherwise
+     * defaults to 0x0.
+     * <p>
+     * The returned signal is read-only.
+     *
+     * @return a read-only signal with the current window size
+     * @since 25.1
+     */
+    public Signal<WindowSize> windowSizeSignal() {
+        ensureWindowSizeSignal();
+        return windowSizeSignal.asReadonly();
+    }
+
+    /**
+     * Sets the window size in the signal. Used by {@link ExtendedClientDetails}
+     * to feed bootstrap data into the signal.
+     *
+     * @param width
+     *            the window inner width
+     * @param height
+     *            the window inner height
+     */
+    void setWindowSize(int width, int height) {
+        ensureWindowSizeSignal();
+        windowSizeSignal
+                .set(new WindowSize(Math.max(width, 0), Math.max(height, 0)));
+    }
+
+    private void ensureWindowSizeSignal() {
+        if (windowSizeSignal == null) {
+            windowSizeSignal = new ValueSignal<>(new WindowSize(0, 0));
+        }
+        ensureResizeListener();
+    }
+
+    /**
+     * Adds a new {@link BrowserWindowResizeListener} to this UI. The listener
+     * will be notified whenever the browser window within which this UI resides
+     * is resized.
+     *
+     * @param resizeListener
+     *            the listener to add, not {@code null}
+     * @return a registration object for removing the listener
+     *
+     * @see BrowserWindowResizeListener#browserWindowResized(BrowserWindowResizeEvent)
+     * @see Registration
+     * @since 1.2
+     */
+    public Registration addBrowserWindowResizeListener(
+            BrowserWindowResizeListener resizeListener) {
+        Objects.requireNonNull(resizeListener);
+        ensureResizeListener();
+        if (resizeListeners == null) {
+            resizeListeners = new ArrayList<>(1);
+        }
+        resizeListeners.add(resizeListener);
+        return () -> resizeListeners.remove(resizeListener);
+    }
+
+    private void ensureResizeListener() {
+        if (resizeReceiver == null) {
+            // "republish" on the UI element, so can be listened with core APIs
+            ui.getElement().executeJs("""
+                        const el = this;
+                        window.addEventListener('resize', evt => {
+                            const event = new Event("window-resize");
+                            event.w = document.documentElement.clientWidth;
+                            event.h = document.documentElement.clientHeight;
+                            el.dispatchEvent(event);
+                        });
+                    """);
+            resizeReceiver = ui.getElement()
+                    .addEventListener("window-resize", e -> {
+                        int w = e.getEventData().get("event.w").intValue();
+                        int h = e.getEventData().get("event.h").intValue();
+                        if (windowSizeSignal != null) {
+                            windowSizeSignal.set(new WindowSize(w, h));
+                        }
+                        if (resizeListeners != null) {
+                            var evt = new BrowserWindowResizeEvent(this, w, h);
+                            new ArrayList<>(resizeListeners)
+                                    .forEach(l -> l.browserWindowResized(evt));
+                        }
+                    }).addEventData("event.w").addEventData("event.h")
+                    .debounce(300).allowInert();
+        }
+    }
+
+    /**
+     * Returns a read-only signal that tracks the browser tab's visibility and
+     * focus state.
+     * <p>
+     * The signal distinguishes between {@link PageVisibility#VISIBLE VISIBLE}
+     * (tab shown and focused), {@link PageVisibility#VISIBLE_NOT_FOCUSED
+     * VISIBLE_NOT_FOCUSED} (tab shown but behind another window or another
+     * application has focus), {@link PageVisibility#HIDDEN HIDDEN} (tab in
+     * background, minimized, or on a different virtual desktop), and
+     * {@link PageVisibility#UNKNOWN UNKNOWN} (the initial value, replaced with
+     * a real one before any user code observes the signal).
+     * <p>
+     * The signal value is seeded from the initial client bootstrap, so user
+     * code always sees a real value. Subscribe with
+     * {@code Signal.effect(owner, ...)} to react to changes; call
+     * {@code pageVisibilitySignal().peek()} for a snapshot outside a reactive
+     * context, and {@code .get()} inside one.
+     * <p>
+     * <b>Reliability caveats.</b> The value is best-effort:
+     * <ul>
+     * <li>Firefox defers the {@code visibilitychange} event while the window is
+     * blurred, so transitions from {@link PageVisibility#VISIBLE VISIBLE} to
+     * {@link PageVisibility#HIDDEN HIDDEN} may take up to half a second longer
+     * than on Chromium or Safari.</li>
+     * <li>The {@link PageVisibility#VISIBLE_NOT_FOCUSED VISIBLE_NOT_FOCUSED}
+     * distinction relies on {@code document.hasFocus()}, which is accurate in
+     * all supported browsers but depends on the OS reporting focus changes
+     * promptly — some window-manager configurations can delay it briefly.</li>
+     * <li>Rapid focus/blur bursts are intentionally coalesced
+     * ({@code debounce(100)}) so the signal settles once the sequence ends
+     * instead of firing on each intermediate state.</li>
+     * </ul>
+     *
+     * @return the read-only visibility signal
+     * @since 25.2
+     */
+    public Signal<PageVisibility> pageVisibilitySignal() {
+        return pageVisibilityReadOnly;
+    }
+
+    /**
+     * Sets the page visibility from a raw client-side value (e.g. from the
+     * bootstrap parameters or from a {@code vaadin-page-visibility-change} DOM
+     * event). {@code null} and unknown values are ignored — the latter is
+     * logged at debug level so a forward-compatible client value does not
+     * silently disappear.
+     *
+     * @param value
+     *            the raw value, or {@code null}
+     */
+    void setPageVisibility(String value) {
+        if (value == null) {
+            return;
+        }
+        try {
+            pageVisibilitySignal.set(PageVisibility.valueOf(value));
+        } catch (IllegalArgumentException e) {
+            LOGGER.debug("Unknown page visibility value from client: {}",
+                    value);
+        }
+    }
+
+    /**
+     * Opens the given url in a new tab.
+     *
+     * @param url
+     *            the URL to open.
+     * @throws IllegalArgumentException
+     *             if {@code url} is {@code null}, or if the URL uses a scheme
+     *             that is not considered safe; see {@link #openUnsafe(String)}
+     *             and the {@value InitParameters#URL_SAFE_SCHEMES}
+     *             configuration property
+     * @since 2.0
+     */
+    public void open(String url) {
+        open(url, "_blank");
+    }
+
+    /**
+     * Opens the given URL in a window with the given name.
+     * <p>
+     * The supplied {@code windowName} is used as the target name in a
+     * window.open call in the client. This means that special values such as
+     * "_blank", "_self", "_top", "_parent" have special meaning. An empty or
+     * <code>null</code> window name is also a special case.
+     * <p>
+     * "", null and "_self" as {@code windowName} all causes the URL to be
+     * opened in the current window, replacing any old contents. For
+     * downloadable content you should avoid "_self" as "_self" causes the
+     * client to skip rendering of any other changes as it considers them
+     * irrelevant (the page will be replaced by the response from the URL). This
+     * can speed up the opening of a URL, but it might also put the client side
+     * into an inconsistent state if the window content is not completely
+     * replaced e.g., if the URL is downloaded instead of displayed in the
+     * browser.
+     * <p>
+     * "_blank" as {@code windowName} causes the URL to always be opened in a
+     * new window or tab (depends on the browser and browser settings).
+     * <p>
+     * "_top" and "_parent" as {@code windowName} works as specified by the HTML
+     * standard.
+     * <p>
+     * Any other {@code windowName} will open the URL in a window with that
+     * name, either by opening a new window/tab in the browser or by replacing
+     * the contents of an existing window with that name.
+     *
+     * @param url
+     *            the URL to open.
+     * @param windowName
+     *            the name of the window.
+     * @throws IllegalArgumentException
+     *             if {@code url} is {@code null}, or if the URL uses a scheme
+     *             that is not considered safe; see
+     *             {@link #openUnsafe(String, String)} and the
+     *             {@value InitParameters#URL_SAFE_SCHEMES} configuration
+     *             property
+     * @since 2.2
+     */
+    public void open(String url, String windowName) {
+        if (url == null) {
+            throw new IllegalArgumentException("URL must not be null");
+        }
+        UrlUtil.validateUrl(ui, "URL", url, "openUnsafe(String, String)");
+        openInternal(url, windowName);
+    }
+
+    /**
+     * Opens the given url in a new tab without validating its scheme.
+     * <p>
+     * Unlike {@link #open(String)}, this method does not reject URLs based on
+     * the {@value InitParameters#URL_SAFE_SCHEMES} configuration. Use it only
+     * for URLs that are fully under your control and known to be safe. Passing
+     * untrusted input here can expose the application to cross-site scripting
+     * (XSS) attacks.
+     *
+     * @see #open(String)
+     *
+     * @param url
+     *            the URL to open.
+     * @since 25.1.12
+     */
+    public void openUnsafe(String url) {
+        openInternal(url, "_blank");
+    }
+
+    /**
+     * Opens the given URL in a window with the given name without validating
+     * its scheme.
+     * <p>
+     * Unlike {@link #open(String, String)}, this method does not reject URLs
+     * based on the {@value InitParameters#URL_SAFE_SCHEMES} configuration. Use
+     * it only for URLs that are fully under your control and known to be safe.
+     * Passing untrusted input here can expose the application to cross-site
+     * scripting (XSS) attacks.
+     *
+     * @see #open(String, String)
+     *
+     * @param url
+     *            the URL to open.
+     * @param windowName
+     *            the name of the window.
+     * @since 25.1.12
+     */
+    public void openUnsafe(String url, String windowName) {
+        openInternal(url, windowName);
+    }
+
+    private void openInternal(String url, String windowName) {
+        // The vaadin-redirect-pending event might be useful to block other
+        // client side
+        // reload/redirection triggered by other components, for example Vite.
+        executeJs(
+                "window.dispatchEvent(new CustomEvent('vaadin-redirect-pending', {detail: {url: $0}})); "
+                        + "if ($1 == '_self') this.stopApplication(); window.open($0, $1)",
+                url, windowName);
+    }
+
+    /**
+     * Navigates this page to the given URI. The contents of this page in the
+     * browser is replaced with whatever is returned for the given URI.
+     *
+     * @param uri
+     *            the URI to show
+     * @throws IllegalArgumentException
+     *             if {@code uri} is {@code null}, or if the URI uses a scheme
+     *             that is not considered safe; call
+     *             {@code openUnsafe(uri, "_self")} to bypass scheme validation,
+     *             and see the {@value InitParameters#URL_SAFE_SCHEMES}
+     *             configuration property
+     * @since 2.0
+     */
+    public void setLocation(String uri) {
+        open(uri, "_self");
+    }
+
+    /**
+     * Navigates this page to the given URI. The contents of this page in the
+     * browser is replaced with whatever is returned for the given URI.
+     *
+     * @param uri
+     *            the URI to show
+     * @throws IllegalArgumentException
+     *             if {@code uri} is {@code null}, or if the URI uses a scheme
+     *             that is not considered safe; call
+     *             {@code openUnsafe(uri.toString(), "_self")} to bypass scheme
+     *             validation, and see the
+     *             {@value InitParameters#URL_SAFE_SCHEMES} configuration
+     *             property
+     * @since 2.0
+     */
+    public void setLocation(URI uri) {
+        setLocation(uri.toString());
+    }
+
+    private void addDependency(Dependency dependency) {
+        assert dependency != null;
+        ui.getInternals().getDependencyList().add(dependency);
+    }
+
+    /**
+     * Callback for receiving extended client-side details.
+     * 
+     * @since 2.0
+     */
+    @FunctionalInterface
+    public interface ExtendedClientDetailsReceiver extends Serializable {
+
+        /**
+         * Invoked when the client-side details are available.
+         *
+         * @param extendedClientDetails
+         *            object containing extended client details
+         */
+        void receiveDetails(ExtendedClientDetails extendedClientDetails);
+    }
+
+    /**
+     * Gets the extended client details, such as screen resolution and time zone
+     * information.
+     * <p>
+     * Browser details are automatically collected and sent during UI
+     * initialization, making them immediately available. In normal operation,
+     * this method returns complete details right after the UI is created.
+     * <p>
+     * If details are not yet available, this method returns a placeholder
+     * instance with default values (dimensions set to -1). If you need to fetch
+     * the actual values in such cases, use
+     * {@link ExtendedClientDetails#refresh(SerializableConsumer)} to explicitly
+     * retrieve updated values from the browser.
+     * <p>
+     * To refresh the cached values with updated data from the browser at any
+     * time, use {@link ExtendedClientDetails#refresh(SerializableConsumer)}.
+     *
+     * @return the extended client details (never {@code null})
+     * @since 25.0
+     */
+    public ExtendedClientDetails getExtendedClientDetails() {
+        return ui.getInternals().getExtendedClientDetails();
+    }
+
+    /**
+     * Obtain extended client side details, such as time screen and time zone
+     * information, via callback. If already obtained, the callback is called
+     * directly. Otherwise, a client-side roundtrip will be carried out.
+     *
+     * @param receiver
+     *            the callback to which the details are provided
+     * @deprecated Use {@link #getExtendedClientDetails()} to get the cached
+     *             details, or
+     *             {@link ExtendedClientDetails#refresh(SerializableConsumer)}
+     *             to refresh the cached values.
+     * @since 2.0
+     */
+    @Deprecated
+    public void retrieveExtendedClientDetails(
+            ExtendedClientDetailsReceiver receiver) {
+        ExtendedClientDetails details = getExtendedClientDetails();
+        if (details.getScreenWidth() != -1) {
+            // Already fetched and complete, call receiver immediately
+            receiver.receiveDetails(details);
+        } else {
+            // Placeholder with default values, trigger refresh
+            details.refresh(receiver::receiveDetails);
+        }
+    }
+
+    /**
+     * Retrieves the current url from the browser. The URL is fetched from the
+     * browser in another request asynchronously and passed to the callback. The
+     * URL is the full URL that the user sees in the browser (including hash #)
+     * and works even when client side routing is used or there is a reverse
+     * proxy between the client and the server.
+     * <p>
+     * In case you need more control over the execution you can use
+     * {@link #executeJs(String, Object...)} by passing
+     * {@code return window.location.href}.
+     * <p>
+     * <em>NOTE: </em> the URL is not escaped, use {@link URL#toURI()} to escape
+     * it.
+     *
+     * @param callback
+     *            to be notified when the url is resolved.
+     * @since 7.0
+     */
+    public void fetchCurrentURL(SerializableConsumer<URL> callback) {
+        Objects.requireNonNull(callback,
+                "Url consumer callback should not be null.");
+        executeJs(PageJs.class).getHref().then(String.class, urlString -> {
+            try {
+                callback.accept(new URL(urlString));
+            } catch (MalformedURLException e) {
+                throw new IllegalStateException(
+                        "Error while encoding the URL from client", e);
+            }
+        });
+    }
+
+    /**
+     * What this page asks of the browser, as a JavaScript definition for
+     * {@link #executeJs(Class)}: the build collects it into the bundle, so none
+     * of it needs an expression and all of it works under a content security
+     * policy without <code>unsafe-eval</code>.
+     * 
+     * @since 25.4
+     */
+    @JsDefinition
+    public interface PageJs extends Serializable {
+
+        /**
+         * The address the browser is at.
+         *
+         * @return the pending address
+         */
+        @JsExpression("return window.location.href")
+        PendingJavaScriptResult getHref();
+
+        /**
+         * Lets the document follow the color scheme the user asked the browser
+         * for.
+         */
+        @JsExpression("""
+                document.documentElement.removeAttribute('theme');
+                document.documentElement.style.colorScheme = '';
+                """)
+        void resetColorScheme();
+
+        /**
+         * Pins the document to a color scheme.
+         *
+         * @param theme
+         *            the theme to set on the document
+         * @param colorScheme
+         *            the color scheme to set on the document
+         */
+        @JsExpression("""
+                document.documentElement.setAttribute('theme', $0);
+                document.documentElement.style.colorScheme = $1;
+                """)
+        void setColorScheme(String theme, String colorScheme);
+
+        /**
+         * Loads the page again.
+         */
+        @JsExpression("window.location.reload();")
+        void reload();
+
+        /**
+         * Reads the direction the document is read in.
+         *
+         * @return the pending direction
+         */
+        @JsExpression("return document.dir")
+        PendingJavaScriptResult readDirection();
+    }
+
+    /**
+     * Retrieves {@code document.dir} of the current UI from the browser and
+     * passes it to the {@code callback} parameter. If the {@code document.dir}
+     * has not been set explicitly, then {@code Direction.LEFT_TO_RIGHT} will be
+     * the fallback value.
+     * <p>
+     * Note that direction is fetched from the browser in an asynchronous
+     * request and passed to the callback.
+     * <p>
+     * In case you need more control over the execution you can use
+     * {@link #executeJs(String, Object...)} by passing
+     * {@code return document.dir}.
+     *
+     * @param callback
+     *            to be notified when the direction is resolved.
+     * @since 24.0
+     */
+    public void fetchPageDirection(SerializableConsumer<Direction> callback) {
+        executeJs(PageJs.class).readDirection().then(String.class, dir -> {
+            Direction direction = getDirectionByClientName(dir);
+            callback.accept(direction);
+        });
+    }
+
+    private Direction getDirectionByClientName(String directionClientName) {
+        return Arrays.stream(Direction.values())
+                .filter(direction -> direction.getClientName()
+                        .equals(directionClientName))
+                .findFirst().orElse(Direction.LEFT_TO_RIGHT);
+    }
+}

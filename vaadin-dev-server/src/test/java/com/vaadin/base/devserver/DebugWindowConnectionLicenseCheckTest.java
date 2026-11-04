@@ -1,0 +1,405 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.base.devserver;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+
+import org.atmosphere.cpr.AtmosphereResource;
+import org.atmosphere.cpr.Broadcaster;
+import org.junit.jupiter.api.Test;
+import org.mockito.Answers;
+import org.mockito.MockedStatic;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.flow.di.Lookup;
+import com.vaadin.flow.server.MockVaadinContext;
+import com.vaadin.flow.server.VaadinContext;
+import com.vaadin.flow.server.startup.ApplicationConfiguration;
+import com.vaadin.pro.licensechecker.BuildType;
+import com.vaadin.pro.licensechecker.Capabilities;
+import com.vaadin.pro.licensechecker.LicenseChecker;
+import com.vaadin.pro.licensechecker.LicenseException;
+import com.vaadin.pro.licensechecker.PreTrial;
+import com.vaadin.pro.licensechecker.PreTrialCreationException;
+import com.vaadin.pro.licensechecker.PreTrialLicenseValidationException;
+import com.vaadin.pro.licensechecker.Product;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
+import static org.mockito.Mockito.anyInt;
+import static org.mockito.Mockito.isNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
+
+class DebugWindowConnectionLicenseCheckTest {
+
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final Product TEST_PRODUCT = new Product(
+            "commercial-component", "1.0.0");
+    public static final String INVALID_LICENSE_ERROR = "Invalid license";
+    public static final String MISSING_KEY_ERROR = "Pre trial not started yet.";
+    public static final PreTrial TEST_PRE_TRIAL = new PreTrial("Test trial",
+            PreTrial.PreTrialState.START_ALLOWED, 5, 22);
+
+    private final DebugWindowConnection reload = new DebugWindowConnection(
+            getMockContext());
+    private final ClientMessageReceiver receiver = new ClientMessageReceiver();
+
+    @Test
+    void checkLicense_validLicense_sendLicenseOk() {
+        DebugWindowMessage message = doLicenseCheck(LicenseCheckResult.VALID);
+        assertEquals("license-check-ok", message.getCommand());
+        assertTrue(message.getData() instanceof Product,
+                "Expected a Product object in response message");
+        assertEquals(TEST_PRODUCT.toString(), message.getData().toString());
+    }
+
+    @Test
+    void checkLicense_invalidLicense_sendLicenseCheckFailed() {
+        DebugWindowMessage message = doLicenseCheck(LicenseCheckResult.INVALID);
+        assertEquals("license-check-failed", message.getCommand());
+        assertTrue(message.getData() instanceof ProductAndMessage,
+                "Expected a ProductAndMessage object in response message");
+        ProductAndMessage productAndMessage = (ProductAndMessage) message
+                .getData();
+        assertEquals(INVALID_LICENSE_ERROR, productAndMessage.getMessage());
+        assertEquals(TEST_PRODUCT.toString(),
+                productAndMessage.getProduct().toString());
+        assertNull(productAndMessage.getPreTrial(),
+                "Expected pre-trial info to be absent");
+    }
+
+    @Test
+    void checkLicense_noLicenseKeys_sendLicenseCheckFailed() {
+        DebugWindowMessage message = doLicenseCheck(
+                LicenseCheckResult.MISSING_KEYS);
+
+        assertEquals("license-check-nokey", message.getCommand());
+        assertTrue(message.getData() instanceof ProductAndMessage,
+                "Expected a ProductAndMessage object in response message");
+        ProductAndMessage productAndMessage = (ProductAndMessage) message
+                .getData();
+        assertTrue(productAndMessage.getMessage().contains(MISSING_KEY_ERROR));
+        assertEquals(TEST_PRODUCT.toString(),
+                productAndMessage.getProduct().toString());
+        assertEquals(TEST_PRODUCT.toString(),
+                productAndMessage.getProduct().toString());
+        assertNotNull(productAndMessage.getPreTrial(),
+                "Expected pre-trial info to be present");
+        assertEquals(TEST_PRE_TRIAL.toString(),
+                productAndMessage.getPreTrial().toString());
+    }
+
+    @Test
+    void startPreTrial_preTrialAllowed_sendPreTrialInfo() {
+        DebugWindowMessage message = doStartPreTrial(
+                PreTrial.PreTrialState.START_ALLOWED);
+        assertEquals("license-pretrial-started", message.getCommand());
+        assertTrue(message.getData() instanceof PreTrial,
+                "Expected a PreTrial object in response message");
+        PreTrial preTrial = (PreTrial) message.getData();
+        assertEquals(TEST_PRE_TRIAL.toString(), preTrial.toString());
+    }
+
+    @Test
+    void startPreTrial_preTrialRunning_sendPreTrialInfo() {
+        DebugWindowMessage message = doStartPreTrial(
+                PreTrial.PreTrialState.RUNNING);
+        assertEquals("license-pretrial-started", message.getCommand());
+        assertTrue(message.getData() instanceof PreTrial,
+                "Expected a PreTrial object in response message");
+        PreTrial preTrial = (PreTrial) message.getData();
+        assertEquals(TEST_PRE_TRIAL.toString(), preTrial.toString());
+    }
+
+    @Test
+    void startPreTrial_preTrialExpired_sendPreTrialExpiredFailure() {
+        DebugWindowMessage message = doStartPreTrial(
+                PreTrial.PreTrialState.EXPIRED);
+        assertEquals("license-pretrial-expired", message.getCommand());
+    }
+
+    @Test
+    void startPreTrial_preTrialNotAllowed_sendPreTrialNotAllowedFailure() {
+        DebugWindowMessage message = doStartPreTrial(null);
+        assertEquals("license-pretrial-failed", message.getCommand());
+    }
+
+    @Test
+    void startPreTrial_genericError_sendPreTrialNotAllowedFailure() {
+        DebugWindowMessage message = doStartPreTrial(
+                PreTrial.PreTrialState.ACCESS_DENIED);
+        assertEquals("license-pretrial-failed", message.getCommand());
+    }
+
+    @Test
+    void downloadLicenseKey_licenseKeyAvailable_notifiesDownloadStartAndSuccess() {
+        AtomicReference<Runnable> callbackHolder = new AtomicReference<>();
+        DebugWindowMessage message = doDownloadKey(true, callbackHolder);
+        assertEquals("license-download-started", message.getCommand());
+        assertEquals(TEST_PRODUCT.toString(), message.getData().toString());
+        callbackHolder.get().run();
+        assertEquals(1, receiver.messages.size());
+        assertEquals("license-download-completed",
+                receiver.messages.get(0).getCommand());
+        assertEquals(TEST_PRODUCT.toString(),
+                receiver.messages.get(0).getData().toString());
+    }
+
+    @Test
+    void downloadLicenseKey_licenseKeyNotAvailable_notifiesDownloadStartAndFailure() {
+        AtomicReference<Runnable> callbackHolder = new AtomicReference<>();
+        DebugWindowMessage message = doDownloadKey(false, callbackHolder);
+        assertEquals("license-download-started", message.getCommand());
+        assertEquals(TEST_PRODUCT.toString(), message.getData().toString());
+        callbackHolder.get().run();
+        assertEquals(1, receiver.messages.size());
+        assertEquals("license-download-failed",
+                receiver.messages.get(0).getCommand());
+        assertEquals(TEST_PRODUCT.toString(),
+                receiver.messages.get(0).getData().toString());
+    }
+
+    @Test
+    void downloadLicenseKey_timeoutFromClient_passedToChecker() {
+        AtomicInteger usedTimeout = captureDownloadTimeout(
+                downloadCommand(600));
+        assertEquals(600, usedTimeout.get());
+    }
+
+    @Test
+    void downloadLicenseKey_noTimeout_usesCheckerDefault() {
+        ObjectNode command = OBJECT_MAPPER.createObjectNode();
+        command.put("command", "downloadLicense");
+        command.putPOJO("data", TEST_PRODUCT);
+        AtomicInteger usedTimeout = captureDownloadTimeout(command);
+        assertEquals(LicenseChecker.DEFAULT_KEY_URL_HANDLER_TIMEOUT_SECONDS,
+                usedTimeout.get());
+    }
+
+    private AtomicInteger captureDownloadTimeout(ObjectNode command) {
+        AtomicInteger usedTimeout = new AtomicInteger();
+        DebugWindowMessage message = sendAndReceive(command,
+                licenseChecker -> licenseChecker
+                        .when(() -> LicenseChecker.checkLicenseAsync(
+                                eq(TEST_PRODUCT.getName()),
+                                eq(TEST_PRODUCT.getVersion()),
+                                eq(BuildType.DEVELOPMENT),
+                                any(LicenseChecker.Callback.class), anyInt()))
+                        .then(i -> {
+                            usedTimeout.set(i.getArgument(4, Integer.class));
+                            return null;
+                        }));
+        assertEquals("license-download-started", message.getCommand());
+        return usedTimeout;
+    }
+
+    private static ObjectNode downloadCommand(int timeout) {
+        ObjectNode command = OBJECT_MAPPER.createObjectNode();
+        command.put("command", "downloadLicense");
+        ObjectNode data = command.putObject("data");
+        data.put("name", TEST_PRODUCT.getName());
+        data.put("version", TEST_PRODUCT.getVersion());
+        data.put("timeout", timeout);
+        return command;
+    }
+
+    private enum LicenseCheckResult {
+        VALID, INVALID, MISSING_KEYS
+    }
+
+    private DebugWindowMessage doLicenseCheck(
+            LicenseCheckResult licenseCheckResult) {
+        ObjectNode command = OBJECT_MAPPER.createObjectNode();
+        command.put("command", "checkLicense");
+        command.putPOJO("data", TEST_PRODUCT);
+        return sendAndReceive(command, mockCheckLicense(licenseCheckResult));
+    }
+
+    private DebugWindowMessage doStartPreTrial(
+            PreTrial.PreTrialState preTrialState) {
+        ObjectNode command = OBJECT_MAPPER.createObjectNode();
+        command.put("command", "startPreTrialLicense");
+        return sendAndReceive(command, licenseChecker -> licenseChecker
+                .when(LicenseChecker::startPreTrial).then(i -> {
+                    if (preTrialState == null) {
+                        throw new PreTrialCreationException("BOOM!!!!");
+                    }
+                    return switch (preTrialState) {
+                    case START_ALLOWED -> TEST_PRE_TRIAL;
+                    case RUNNING -> TEST_PRE_TRIAL;
+                    case EXPIRED -> throw new PreTrialCreationException.Expired(
+                            "Trial expired");
+                    case ACCESS_DENIED -> throw new PreTrialCreationException(
+                            "Pre trial not allowed");
+                    };
+                }));
+    }
+
+    private DebugWindowMessage doDownloadKey(boolean success,
+            AtomicReference<Runnable> callbackHolder) {
+        ObjectNode command = OBJECT_MAPPER.createObjectNode();
+        command.put("command", "downloadLicense");
+        command.putPOJO("data", TEST_PRODUCT);
+        return sendAndReceive(command,
+                licenseChecker -> licenseChecker
+                        .when(() -> LicenseChecker.checkLicenseAsync(
+                                eq(TEST_PRODUCT.getName()),
+                                eq(TEST_PRODUCT.getVersion()),
+                                eq(BuildType.DEVELOPMENT),
+                                any(LicenseChecker.Callback.class), anyInt()))
+                        .then(i -> {
+                            LicenseChecker.Callback callback = i.getArgument(3,
+                                    LicenseChecker.Callback.class);
+                            callbackHolder.set(() -> {
+                                if (success) {
+                                    callback.ok();
+                                } else {
+                                    callback.failed(
+                                            new LicenseException("BOOM"));
+                                }
+                            });
+                            return null;
+                        }));
+    }
+
+    private DebugWindowMessage sendAndReceive(ObjectNode command,
+            Consumer<MockedStatic<LicenseChecker>> instrumenter) {
+        receiver.messages.clear();
+        withMockedLicenseChecker(instrumenter,
+                () -> reload.onMessage(receiver.resource, command.toString()));
+        int responses = receiver.messages.size();
+        assertEquals(1, responses, "Expected messages");
+        DebugWindowMessage message = receiver.messages.get(0);
+        receiver.messages.clear();
+        return message;
+    }
+
+    private void withMockedLicenseChecker(
+            Consumer<MockedStatic<LicenseChecker>> instrumenter,
+            Runnable test) {
+        try (MockedStatic<LicenseChecker> licenseChecker = mockStatic(
+                LicenseChecker.class, Answers.RETURNS_MOCKS)) {
+            instrumenter.accept(licenseChecker);
+            test.run();
+        }
+    }
+
+    private Consumer<MockedStatic<LicenseChecker>> mockCheckLicense(
+            LicenseCheckResult licenseCheckResult) {
+        return licenseChecker -> {
+            licenseChecker.when(() -> LicenseChecker.checkLicense(anyString(),
+                    anyString(), any(BuildType.class), isNull(),
+                    any(Capabilities.class))).then(i -> {
+                        switch (licenseCheckResult) {
+                        case INVALID ->
+                            throw new LicenseException(INVALID_LICENSE_ERROR);
+                        case MISSING_KEYS -> {
+                            throw new PreTrialLicenseValidationException(
+                                    TEST_PRE_TRIAL);
+                        }
+                        default -> {
+                        }
+                        }
+                        return null;
+                    });
+        };
+    }
+
+    private VaadinContext getMockContext() {
+        VaadinContext context = new MockVaadinContext();
+        ApplicationConfiguration appConfig = mock(
+                ApplicationConfiguration.class);
+        when(appConfig.isProductionMode()).thenReturn(false);
+        context.setAttribute(ApplicationConfiguration.class, appConfig);
+        context.setAttribute(Lookup.class,
+                Lookup.of(appConfig, ApplicationConfiguration.class));
+        return context;
+    }
+
+    private static class ClientMessageReceiver {
+        private final List<DebugWindowMessage> messages = new ArrayList<>();
+        private final AtmosphereResource resource;
+
+        private ClientMessageReceiver() {
+            this.resource = mock(AtmosphereResource.class);
+            Broadcaster broadcaster = mock(Broadcaster.class);
+            when(resource.getBroadcaster()).thenReturn(broadcaster);
+            when(broadcaster.broadcast(anyString(), same(resource))).then(i -> {
+                messages.add(
+                        deserializeMessage(i.getArgument(0, String.class)));
+                return null;
+            });
+        }
+
+        private DebugWindowMessage deserializeMessage(String message)
+                throws JacksonException {
+            JsonNode json = OBJECT_MAPPER.readTree(message);
+            String command = json.get("command").textValue();
+            JsonNode data = json.get("data");
+            if (command.startsWith("license-check-")
+                    || command.startsWith("license-download-")) {
+                if (data.has("message") && data.has("product")) {
+                    PreTrial preTrial = null;
+                    if (data.hasNonNull("preTrial")) {
+                        preTrial = deserializePreTrial(data.get("preTrial"));
+                    }
+                    return new DebugWindowMessage(command,
+                            new ProductAndMessage(new Product(
+                                    data.get("product").get("name").textValue(),
+                                    data.get("product").get("version")
+                                            .textValue()),
+                                    preTrial, data.get("message").textValue()));
+                } else if (data.has("name") && data.has("version")) {
+                    return new DebugWindowMessage(command,
+                            new Product(data.get("name").textValue(),
+                                    data.get("version").textValue()));
+                }
+            } else if (command.startsWith("license-pretrial-")) {
+                PreTrial preTrial = deserializePreTrial(data);
+                return new DebugWindowMessage(command, preTrial);
+            }
+            throw new UnsupportedOperationException(
+                    "Unknown message: " + message);
+        }
+
+        private static PreTrial deserializePreTrial(JsonNode data) {
+            if (data.has("trialName")) {
+                return new PreTrial(data.get("trialName").textValue(),
+                        PreTrial.PreTrialState
+                                .valueOf(data.get("trialState").textValue()),
+                        data.get("daysRemaining").intValue(),
+                        data.get("daysRemainingUntilRenewal").intValue());
+            }
+            return null;
+        }
+    }
+
+}

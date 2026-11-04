@@ -1,0 +1,320 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.component;
+
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
+
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.component.page.ColorScheme;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class HasStyleTest {
+
+    @Tag("div")
+    public static class HasStyleComponent extends Component
+            implements HasStyle {
+
+    }
+
+    @Test
+    void addClassName() {
+        HasStyleComponent component = new HasStyleComponent();
+        component.addClassName("foo");
+        assertClasses(component, "foo");
+        component.addClassName("bar");
+        assertClasses(component, "foo", "bar");
+
+        // use ClassList
+
+        component.getClassNames().add("baz");
+        assertClasses(component, "foo", "bar", "baz");
+    }
+
+    @Test
+    void setClassName_useClassList() {
+        HasStyleComponent component = new HasStyleComponent();
+        component.setClassName("foo bar");
+
+        component.getClassNames().set("bar", false);
+        assertClasses(component, "foo");
+    }
+
+    @Test
+    void removeClassName() {
+        HasStyleComponent component = new HasStyleComponent();
+        component.setClassName("foo Bar baz");
+        component.removeClassName("foo");
+        assertClasses(component, "Bar", "baz");
+        component.removeClassName("bar");
+        assertClasses(component, "Bar", "baz");
+        component.removeClassName("Bar");
+        assertClasses(component, "baz");
+        component.removeClassName("baz");
+        assertClasses(component);
+
+        // use ClassList
+        component.setClassName("foo");
+
+        component.getClassNames().remove("foo");
+        assertClasses(component);
+    }
+
+    @Test
+    void setClassName() {
+        HasStyleComponent component = new HasStyleComponent();
+        component.setClassName("foo");
+        assertClasses(component, "foo");
+        component.setClassName("bar");
+        assertClasses(component, "bar");
+        component.setClassName("bar foo");
+        assertClasses(component, "bar", "foo");
+        component.setClassName(" ");
+        assertClasses(component);
+        component.setClassName("");
+        assertClasses(component);
+
+        component.setClassName("removeMe");
+        // setting null to classname should remove class name attribute
+        component.setClassName(null);
+        assertClasses(component);
+    }
+
+    @Test
+    void getClassName() {
+        HasStyleComponent component = new HasStyleComponent();
+        component.setClassName("foo");
+        assertEquals("foo", component.getClassName());
+        component.setClassName(" ");
+        assertNull(component.getClassName());
+    }
+
+    @Test
+    void setClassNameToggle() {
+        HasStyleComponent component = new HasStyleComponent();
+        component.setClassName("foo", false);
+        assertClasses(component);
+        component.setClassName("foo", true);
+        assertClasses(component, "foo");
+        component.setClassName("foo", false);
+        assertClasses(component);
+        component.setClassName("foo", true);
+        component.setClassName("bar", true);
+        component.setClassName("baz", true);
+        assertClasses(component, "foo", "bar", "baz");
+        component.setClassName("baz", false);
+        assertClasses(component, "foo", "bar");
+
+    }
+
+    @Test
+    void hasClassName() {
+        HasStyleComponent component = new HasStyleComponent();
+        assertFalse(component.hasClassName("foo"));
+        component.setClassName("foo");
+        assertTrue(component.hasClassName("foo"));
+        assertFalse(component.hasClassName("fo"));
+        component.setClassName("foo bar");
+        assertTrue(component.hasClassName("foo"));
+        assertTrue(component.hasClassName("bar"));
+
+    }
+
+    @Test
+    void getClassList_elementClassList() {
+        HasStyleComponent component = new HasStyleComponent();
+
+        assertEquals(component.getElement().getClassList(),
+                component.getClassNames());
+    }
+
+    @Test
+    void testAddClassNames() {
+        HasStyleComponent component = new HasStyleComponent();
+        component.addClassNames();
+        assertClasses(component);
+        component.addClassNames("foo", "bar");
+        assertClasses(component, "foo", "bar");
+
+        component.removeClassNames("foo bar");
+        assertClasses(component);
+
+        component.addClassNames("foo bar");
+        assertClasses(component, "foo", "bar");
+
+        component.addClassNames("baz1", "baz2");
+        assertClasses(component, "foo", "bar", "baz1", "baz2");
+    }
+
+    @Test
+    void testRemoveClassNames() {
+        HasStyleComponent component = new HasStyleComponent();
+        component.setClassName("foo bar baz1 baz2 foo2 bar1");
+
+        component.removeClassNames();
+        assertClasses(component, "foo", "bar", "baz1", "baz2", "foo2", "bar1");
+
+        component.removeClassNames("baz2");
+        assertClasses(component, "foo", "bar", "baz1", "foo2", "bar1");
+
+        component.removeClassNames("bar", "foo2", "foo");
+        assertClasses(component, "baz1", "bar1");
+    }
+
+    @Test
+    void addClassNames_extraSpacesBetweenAndAroundClassNames_validationPasses() {
+        HasStyleComponent component = new HasStyleComponent();
+        component.addClassNames("   foo  bar    baz");
+
+        assertEquals(3, component.getClassNames().size(),
+                "Unexpected component's class names count after adding 3 class names");
+
+        assertTrue(component.getClassNames().contains("foo"));
+        assertTrue(component.getClassNames().contains("bar"));
+        assertTrue(component.getClassNames().contains("baz"));
+    }
+
+    @Test
+    void removeClassNames_extraSpacesBetweenAndAroundClassNames_validationPasses() {
+        HasStyleComponent component = new HasStyleComponent();
+        component.addClassNames("foo", "bar", "baz");
+        component.removeClassNames("   foo  bar    baz");
+
+        assertEquals(0, component.getClassNames().size(),
+                "Unexpected component's class names count after removing all class names");
+    }
+
+    @Test
+    void addClassNames_addEmptyClassName_throws() {
+        HasStyleComponent component = new HasStyleComponent();
+        assertThrows(IllegalArgumentException.class,
+                () -> component.addClassNames(" "));
+    }
+
+    @Test
+    void addClassNames_addNullClassName_throws() {
+        HasStyleComponent component = new HasStyleComponent();
+        assertThrows(IllegalArgumentException.class,
+                () -> component.addClassNames(null, null));
+    }
+
+    @Test
+    void removeClassNames_removeEmptyClassName_throws() {
+        HasStyleComponent component = new HasStyleComponent();
+        assertThrows(IllegalArgumentException.class,
+                () -> component.removeClassNames(" "));
+    }
+
+    @Test
+    void removeClassNames_removeNullClassName_throws() {
+        HasStyleComponent component = new HasStyleComponent();
+        assertThrows(IllegalArgumentException.class,
+                () -> component.removeClassNames(null, null));
+    }
+
+    @Test
+    void setColorScheme_setsInlineStyleProperty() {
+        HasStyleComponent component = new HasStyleComponent();
+
+        component.getStyle().setColorScheme(ColorScheme.Value.DARK);
+        assertEquals("dark",
+                component.getElement().getStyle().get("color-scheme"));
+
+        component.getStyle().setColorScheme(ColorScheme.Value.LIGHT);
+        assertEquals("light",
+                component.getElement().getStyle().get("color-scheme"));
+
+        component.getStyle().setColorScheme(ColorScheme.Value.LIGHT_DARK);
+        assertEquals("light dark",
+                component.getElement().getStyle().get("color-scheme"));
+    }
+
+    @Test
+    void getColorScheme_retrievesSetValue() {
+        HasStyleComponent component = new HasStyleComponent();
+
+        component.getStyle().setColorScheme(ColorScheme.Value.DARK);
+        assertEquals(ColorScheme.Value.DARK,
+                component.getStyle().getColorScheme());
+
+        component.getStyle().setColorScheme(ColorScheme.Value.LIGHT);
+        assertEquals(ColorScheme.Value.LIGHT,
+                component.getStyle().getColorScheme());
+    }
+
+    @Test
+    void setColorScheme_nullClearsProperty() {
+        HasStyleComponent component = new HasStyleComponent();
+
+        component.getStyle().setColorScheme(ColorScheme.Value.DARK);
+        assertEquals("dark",
+                component.getElement().getStyle().get("color-scheme"));
+
+        component.getStyle().setColorScheme(null);
+        assertNull(component.getElement().getStyle().get("color-scheme"));
+        assertEquals(ColorScheme.Value.NORMAL,
+                component.getStyle().getColorScheme());
+    }
+
+    @Test
+    void setColorScheme_normalClearsProperty() {
+        HasStyleComponent component = new HasStyleComponent();
+
+        component.getStyle().setColorScheme(ColorScheme.Value.DARK);
+        assertEquals("dark",
+                component.getElement().getStyle().get("color-scheme"));
+
+        component.getStyle().setColorScheme(ColorScheme.Value.NORMAL);
+        assertNull(component.getElement().getStyle().get("color-scheme"));
+        assertEquals(ColorScheme.Value.NORMAL,
+                component.getStyle().getColorScheme());
+    }
+
+    @Test
+    void colorScheme_roundtripWorks() {
+        HasStyleComponent component = new HasStyleComponent();
+
+        for (ColorScheme.Value value : ColorScheme.Value.values()) {
+            if (value == ColorScheme.Value.NORMAL
+                    || value == ColorScheme.Value.SYSTEM) {
+                continue; // NORMAL clears the property, SYSTEM sets LIGHT_DARK
+            }
+            component.getStyle().setColorScheme(value);
+            assertEquals(value, component.getStyle().getColorScheme(),
+                    "Roundtrip failed for " + value);
+        }
+    }
+
+    @Test
+    void getColorScheme_notSet_returnsNormal() {
+        HasStyleComponent component = new HasStyleComponent();
+        assertEquals(ColorScheme.Value.NORMAL,
+                component.getStyle().getColorScheme());
+    }
+
+    private void assertClasses(HasStyleComponent c, String... expectedClasses) {
+        Set<String> actual = c.getClassNames();
+        Set<String> expected = new HashSet<>(Arrays.asList(expectedClasses));
+        assertEquals(expected, actual);
+    }
+}

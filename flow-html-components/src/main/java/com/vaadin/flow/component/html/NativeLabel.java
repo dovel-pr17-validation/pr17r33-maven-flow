@@ -1,0 +1,156 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.component.html;
+
+import java.util.Objects;
+import java.util.Optional;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.ComponentUtil;
+import com.vaadin.flow.component.Html;
+import com.vaadin.flow.component.HtmlContainer;
+import com.vaadin.flow.component.PropertyDescriptor;
+import com.vaadin.flow.component.PropertyDescriptors;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.signals.Signal;
+
+/**
+ * Component for a <code>&lt;label&gt;</code> element, which represents a
+ * caption for an input field in a user interface.
+ * <p>
+ * Note that Label components are not meant for loose text in the page - they
+ * should be coupled with another component by using the
+ * {@link #setFor(Component)} or by adding them to it with the
+ * {@link #add(Component...)} method.
+ * <p>
+ * Clicking on a label automatically transfers the focus to the associated
+ * component. This is especially helpful when building forms with
+ * {@link Input}s.
+ * <p>
+ * For adding texts to the page without linking them to other components,
+ * consider using a {@link Span} or a {@link Div} instead. If the text should be
+ * interpreted as HTML, use a {@link Html} (but remember to guard against
+ * cross-site scripting attacks).
+ *
+ * @author Vaadin Ltd
+ * @see <a href=
+ *      "https://developer.mozilla.org/en-US/docs/Web/HTML/Element/label">https://developer.mozilla.org/en-US/docs/Web/HTML/Element/label</a>
+ * @since 24.1
+ */
+@Tag(Tag.LABEL)
+public class NativeLabel extends HtmlContainer {
+    private static final PropertyDescriptor<String, Optional<String>> forDescriptor = PropertyDescriptors
+            .optionalAttributeWithDefault("for", "");
+
+    /**
+     * Creates a new empty label.
+     */
+    public NativeLabel() {
+        super();
+    }
+
+    /**
+     * Creates a new label with the given text content.
+     *
+     * @param text
+     *            the text content
+     */
+    public NativeLabel(String text) {
+        this();
+        setText(text);
+    }
+
+    /**
+     * Creates a new label with its text content bound to the given signal.
+     * <p>
+     * While a binding for the text content is active, any attempt to set the
+     * text manually throws
+     * {@link com.vaadin.flow.signals.BindingActiveException}. The same happens
+     * when trying to bind a new Signal while one is already bound.
+     * <p>
+     * Bindings are lifecycle-aware and only active while this component is in
+     * the attached state; they are deactivated while the component is in the
+     * detached state.
+     *
+     * @param textSignal
+     *            the signal to bind, not <code>null</code>
+     * @see #bindText(Signal)
+     *
+     * @since 25.1
+     */
+    public NativeLabel(Signal<String> textSignal) {
+        Objects.requireNonNull(textSignal, "textSignal must not be null");
+        bindText(textSignal);
+    }
+
+    /**
+     * Sets the component that this label describes. The component (or its id)
+     * should be defined in case the described component is not an ancestor of
+     * the label.
+     * <p>
+     * If the provided component does not have an id set, one will be
+     * automatically generated.
+     * <p>
+     * The {@code for} value is available right away, but a generated id is only
+     * assigned to the described component before the next client response after
+     * the label is attached. This means the component's id can be set after
+     * calling this method, in which case that id is referenced instead. For
+     * that reason the value read with {@link #getFor()} should not be cached
+     * within the same request.
+     * <p>
+     * Calling {@link #setFor(String)} or referencing another component cancels
+     * a pending resolution, leaving the previously described component's id
+     * untouched.
+     *
+     * @param forComponent
+     *            the component that this label describes, not <code>null</code>
+     */
+    public void setFor(Component forComponent) {
+        if (forComponent == null) {
+            throw new IllegalArgumentException(
+                    "The provided component cannot be null");
+        }
+        ComponentUtil.resolveOrGenerateIdLater(getElement(), forComponent,
+                "nativelabel-", this::getFor, this::setFor);
+    }
+
+    /**
+     * Sets the id of the component that this label describes. The id should be
+     * defined in case the described component is not an ancestor of the label.
+     * <p>
+     * Passing an empty string clears the <code>for</code> attribute, so that
+     * {@link #getFor()} returns an empty optional.
+     *
+     * @param forId
+     *            the id of the described component, or an empty string to clear
+     *            the <code>for</code> attribute, not <code>null</code>
+     */
+    public void setFor(String forId) {
+        set(forDescriptor, forId);
+    }
+
+    /**
+     * Gets the id of the component that this label describes.
+     *
+     * @see #setFor(String)
+     *
+     * @return an optional id of the described component, or an empty optional
+     *         if the attribute has not been set
+     */
+    public Optional<String> getFor() {
+        return get(forDescriptor);
+    }
+}

@@ -1,0 +1,1167 @@
+/**
+ * Copyright (C) 2022-2026 Vaadin Ltd
+ *
+ * This program is available under Vaadin Commercial License and Service Terms.
+ *
+ * See <https://vaadin.com/commercial-license-and-service-terms> for the full
+ * license.
+ */
+package com.vaadin.flow.component.polymertemplate;
+
+import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
+
+import org.jsoup.Jsoup;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+import org.mockito.MockedStatic;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ArrayNode;
+
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.dependency.Uses;
+import com.vaadin.flow.component.page.Page;
+import com.vaadin.flow.component.page.PendingJavaScriptResult;
+import com.vaadin.flow.component.polymertemplate.TemplateParser.TemplateData;
+import com.vaadin.flow.component.polymertemplate.TemplateParser.TemplateParserFactory;
+import com.vaadin.flow.component.template.Id;
+import com.vaadin.flow.di.DefaultInstantiator;
+import com.vaadin.flow.di.Instantiator;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.internal.StateNode;
+import com.vaadin.flow.internal.nodefeature.ElementData;
+import com.vaadin.flow.internal.nodefeature.ElementPropertyMap;
+import com.vaadin.flow.internal.nodefeature.NodeProperties;
+import com.vaadin.flow.internal.nodefeature.VirtualChildrenList;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.flow.templatemodel.AllowClientUpdates;
+import com.vaadin.flow.templatemodel.TemplateModel;
+import com.vaadin.pro.licensechecker.BuildType;
+import com.vaadin.pro.licensechecker.LicenseChecker;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
+
+@Isolated
+class PolymerTemplateTest extends HasCurrentService {
+    private static final String TAG = "FFS";
+
+    private DeploymentConfiguration configuration;
+
+    private List<Object> executionOrder = new ArrayList<>();
+    private List<Object[]> executionParams = new ArrayList<>();
+
+    // Field to prevent current instance from being garbage collected
+    private UI ui;
+
+    private static class TestTemplateParser implements TemplateParser {
+
+        private final Function<String, String> templateProducer;
+
+        private int callCount;
+
+        TestTemplateParser(Function<String, String> tagToTemplateContent) {
+            templateProducer = tagToTemplateContent;
+        }
+
+        @Override
+        public TemplateData getTemplateContent(
+                Class<? extends PolymerTemplate<?>> clazz, String tag,
+                VaadinService service) {
+            callCount++;
+            return new TemplateData("",
+                    Jsoup.parse(templateProducer.apply(tag)));
+        }
+    }
+
+    private static class SimpleTemplateParser extends TestTemplateParser {
+
+        SimpleTemplateParser() {
+            super(tag -> "<dom-module id='" + tag
+                    + "' someattrtibute></dom-module>");
+        }
+
+    }
+
+    public interface ModelClass extends TemplateModel {
+        void setMessage(String message);
+
+        void setTitle(String title);
+
+        @AllowClientUpdates
+        String getMessage();
+
+        @AllowClientUpdates
+        String getTitle();
+    }
+
+    public interface TestModel extends ModelClass {
+        @AllowClientUpdates
+        void setList(List<String> list);
+    }
+
+    @Tag(Tag.DIV)
+    public static class CustomComponent extends Component {
+
+        public CustomComponent() {
+            getElement().getNode()
+                    .runWhenAttached(ui -> ui.getPage().executeJs("foo"));
+        }
+
+    }
+
+    @Tag(TAG)
+    public static class TestPolymerTemplate
+            extends PolymerTemplate<ModelClass> {
+        public TestPolymerTemplate() {
+            super(new SimpleTemplateParser());
+        }
+
+        public TestPolymerTemplate(VaadinService service) {
+            super(new SimpleTemplateParser(), service);
+        }
+    }
+
+    @Tag(TAG)
+    private static class IdChildTemplate extends PolymerTemplate<ModelClass> {
+
+        @Id("child")
+        private CustomComponent child;
+
+        private final TestTemplateParser parser;
+
+        public IdChildTemplate() {
+            this(new TestTemplateParser(tag -> "<dom-module id='" + tag
+                    + "'><template><div id='child' someattrtibute></template></dom-module>"));
+        }
+
+        IdChildTemplate(TestTemplateParser parser) {
+            super(parser);
+            this.parser = parser;
+        }
+
+    }
+
+    @Tag(TAG)
+    private static class IdWithNoValueChildTemplate
+            extends PolymerTemplate<ModelClass> {
+
+        @Id
+        private CustomComponent child;
+
+        private final TestTemplateParser parser;
+
+        public IdWithNoValueChildTemplate() {
+            this(new TestTemplateParser(tag -> "<dom-module id='" + tag
+                    + "'><template><div id='child'></template></dom-module>"));
+        }
+
+        IdWithNoValueChildTemplate(TestTemplateParser parser) {
+            super(parser);
+            this.parser = parser;
+        }
+
+    }
+
+    @Tag("child-template")
+    public static class TemplateChild extends PolymerTemplate<ModelClass> {
+        public TemplateChild() {
+            super(new SimpleTemplateParser());
+        }
+    }
+
+    @Tag("parent-template")
+    @Uses(TestPolymerTemplate.class)
+    @Uses(TemplateChild.class)
+    private static class TemplateInTemplate
+            extends PolymerTemplate<ModelClass> {
+
+        private final TestTemplateParser parser;
+
+        public TemplateInTemplate() {
+            this(new TestTemplateParser(tag -> "<dom-module id='" + tag
+                    + "'><template><div><ffs></div><span></span><child-template someattrtibute></template></dom-module>"));
+        }
+
+        public TemplateInTemplate(TestTemplateParser parser) {
+            super(parser);
+            this.parser = parser;
+        }
+
+    }
+
+    @Tag("parent-inject-child")
+    @Uses(TestPolymerTemplate.class)
+    @Uses(TemplateChild.class)
+    private static class BundledTemplateInTemplate
+            extends PolymerTemplate<ModelClass> {
+
+        public BundledTemplateInTemplate() {
+            super((clazz, tag, service) -> new TemplateData("",
+                    Jsoup.parse("<dom-module id='child-template'>"
+                            + "<template><ffs></template></dom-module>"
+                            + "<dom-module id='ffs'><template></template></dom-module>"
+                            + "<dom-module id='" + tag
+                            + "'><template><div><ffs someattrtibute></div><span></span><child-template></template></dom-module>")));
+        }
+
+    }
+
+    @Tag("parent-inject-child")
+    private static class TemplateInjectTemplate
+            extends PolymerTemplate<ModelClass> {
+
+        @Id("child")
+        private TemplateChild child;
+
+        public TemplateInjectTemplate() {
+            super((clazz, tag, service) -> new TemplateData("",
+                    Jsoup.parse("<dom-module id='" + tag
+                            + "'><template><child-template id='child'></template></dom-module>")));
+        }
+
+    }
+
+    @Tag("parent-template")
+    @Uses(TemplateChild.class)
+    private static class TemplateWithChildInDomRepeat
+            extends PolymerTemplate<ModelClass> {
+
+        public TemplateWithChildInDomRepeat() {
+            super((clazz, tag, service) -> new TemplateData("",
+                    Jsoup.parse("<dom-module id='" + tag + "'><template><div>"
+                            + "<dom-repeat items='[[messages]]'><template><child-template someattrtibute></template></dom-repeat>"
+                            + "</div></template></dom-module>")));
+        }
+
+    }
+
+    @Tag("parent-template")
+    @Uses(TemplateChild.class)
+    private static class TemplateWithDomRepeat
+            extends PolymerTemplate<ModelClass> {
+
+        private final TestTemplateParser parser;
+
+        public TemplateWithDomRepeat() {
+            this(new TestTemplateParser(tag -> "<dom-module id='" + tag
+                    + "'><template><child-template>"
+                    + "<dom-repeat items='[[messages]]'><template><div></template></dom-repeat>"
+                    + "</template></dom-module>"));
+        }
+
+        TemplateWithDomRepeat(TestTemplateParser parser) {
+            super(parser);
+            this.parser = parser;
+        }
+
+    }
+
+    @Tag(TAG)
+    @Uses(TemplateChild.class)
+    private static class TextNodesInHtmlTemplate
+            extends PolymerTemplate<ModelClass> {
+
+        private final TestTemplateParser parser;
+
+        // @formatter:off
+        private static String HTML_TEMPLATE = "<dom-module id='"+TAG+"'><template>\n"+
+                "      <style>\n"+
+                "      </style>\n"+
+                "      <label></label>\n"+
+                "      <child-template someattrtibute></child-template>\n"+
+                "      \n"+
+                "      <div class='content-wrap'></div><dom-module>";
+        // @formatter:on
+
+        public TextNodesInHtmlTemplate() {
+            this(new TestTemplateParser(tag -> HTML_TEMPLATE));
+        }
+
+        public TextNodesInHtmlTemplate(TestTemplateParser parser) {
+            super(parser);
+            this.parser = parser;
+        }
+
+    }
+
+    @Tag(TAG)
+    private static class IdElementTemplate extends PolymerTemplate<ModelClass> {
+
+        @Id("labelId")
+        private com.vaadin.flow.dom.Element label;
+
+        public IdElementTemplate() {
+            this((clazz, tag, service) -> new TemplateData("",
+                    Jsoup.parse("<dom-module id='" + tag
+                            + "'><label id='labelId' someattribute property-binding='[[foo]]' "
+                            + "attribute-binding$='bar' another-binding='{{foo}}'"
+                            + "another-attribute='baz' hidden></dom-module>")));
+        }
+
+        IdElementTemplate(TemplateParser parser) {
+            super(parser);
+        }
+
+    }
+
+    @Tag(TAG)
+    private static class DisabledElementTemplate
+            extends PolymerTemplate<ModelClass> {
+
+        @Id("labelId")
+        private com.vaadin.flow.dom.Element label;
+
+        public DisabledElementTemplate() {
+            this((clazz, tag, service) -> new TemplateData("",
+                    Jsoup.parse("<dom-module id='" + tag
+                            + "'><label id='labelId' disabled></dom-module>")));
+        }
+
+        DisabledElementTemplate(TemplateParser parser) {
+            super(parser);
+        }
+    }
+
+    @Tag(TAG)
+    private static class ElementWithTextTemplate
+            extends PolymerTemplate<ModelClass> {
+
+        @Id("labelId")
+        private com.vaadin.flow.dom.Element label;
+
+        @Id("hasHierarchy")
+        private com.vaadin.flow.dom.Element div;
+
+        public ElementWithTextTemplate() {
+            this((clazz, tag, service) -> new TemplateData("",
+                    Jsoup.parse("<dom-module id='" + tag
+                            + "'><label id='labelId'>foo bar</label>"
+                            + "<div id='hasHierarchy'>baz <a>foo</a> bar</div></dom-module>")));
+        }
+
+        ElementWithTextTemplate(TemplateParser parser) {
+            super(parser);
+        }
+
+    }
+
+    private static class IdWrongElementTemplate extends IdElementTemplate {
+
+        public IdWrongElementTemplate() {
+            super((clazz, tag, service) -> new TemplateData("",
+                    Jsoup.parse("<dom-module id='" + tag
+                            + "'><div id='foo'></dom-module>")));
+        }
+
+    }
+
+    private static class IdWrongChildTemplate extends IdChildTemplate {
+
+        public IdWrongChildTemplate() {
+            super(new TestTemplateParser(tag -> "<dom-module id='" + tag
+                    + "'><div id='foo'></dom-module>"));
+        }
+
+    }
+
+    private static class IdWrongTagChildTemplate extends IdChildTemplate {
+
+        public IdWrongTagChildTemplate() {
+            super(new TestTemplateParser(tag -> "<dom-module id='" + tag
+                    + "'><label id='child'></dom-module>"));
+        }
+
+    }
+
+    private static class TemplateWithoutTagAnnotation
+            extends PolymerTemplate<ModelClass> {
+    }
+
+    @Tag(TAG)
+    @SuppressWarnings("rawtypes")
+    private static class NoModelTemplate extends PolymerTemplate {
+
+        NoModelTemplate() {
+            super(new SimpleTemplateParser());
+        }
+
+    }
+
+    @Tag("execution-child")
+    public static class ExecutionChild extends PolymerTemplate<ModelClass> {
+        public ExecutionChild() {
+            super(new SimpleTemplateParser());
+            getElement().getNode()
+                    .runWhenAttached(ui -> ui.getPage().executeJs("bar"));
+        }
+    }
+
+    @Tag("template-initializer-test")
+    @Uses(ExecutionChild.class)
+    public static class ExecutionOrder extends PolymerTemplate<TemplateModel> {
+        @Id("div")
+        public CustomComponent element;
+
+        public ExecutionOrder() {
+            super(new TestTemplateParser(tag -> "<dom-module id='" + tag
+                    + "'><template><div id='div'></div><execution-child someattrtibute></execution-child></template></dom-module>"));
+        }
+    }
+
+    @Tag("init-model-test")
+    public static class InitModelTemplate extends PolymerTemplate<TestModel> {
+
+        public InitModelTemplate() {
+            super(new SimpleTemplateParser());
+        }
+    }
+
+    @Tag("template-initialization")
+    @Uses(TestPolymerTemplate.class)
+    @Uses(TemplateChild.class)
+    public static class TemplateInitialization
+            extends PolymerTemplate<TestModel> {
+
+        @Id("foo")
+        private TestPolymerTemplate child;
+
+        public TemplateInitialization(TemplateParser parser) {
+            super(parser);
+        }
+    }
+
+    @Tag("another-template-initialization")
+    @Uses(TestPolymerTemplate.class)
+    @Uses(TemplateChild.class)
+    public static class AnotherTemplateInitialization
+            extends PolymerTemplate<TestModel> {
+
+        @Id("bar")
+        private TemplateChild child;
+
+        public AnotherTemplateInitialization(TemplateParser parser) {
+            super(parser);
+        }
+    }
+
+    @SuppressWarnings("serial")
+    @BeforeEach
+    void setUp() throws SecurityException, IllegalArgumentException {
+        executionOrder.clear();
+        executionParams.clear();
+
+        VaadinSession session = mock(VaadinSession.class);
+        ui = new UI() {
+            private Page page = new Page(this) {
+
+                @Override
+                public PendingJavaScriptResult executeJs(String expression,
+                        Object... parameters) {
+                    executionOrder.add(expression);
+                    executionParams.add(parameters);
+                    return null;
+                }
+            };
+
+            @Override
+            public VaadinSession getSession() {
+                return session;
+            }
+
+            @Override
+            public Page getPage() {
+                return page;
+            }
+        };
+        VaadinService service = mock(VaadinService.class);
+        when(session.getService()).thenReturn(service);
+        DefaultInstantiator instantiator = new DefaultInstantiator(service);
+        when(service.getInstantiator()).thenReturn(instantiator);
+        UI.setCurrent(ui);
+    }
+
+    @AfterEach
+    void tearDown() {
+        UI.setCurrent(null);
+    }
+
+    @Override
+    public VaadinService createService() {
+        configuration = mock(DeploymentConfiguration.class);
+        when(configuration.isProductionMode()).thenReturn(false);
+
+        VaadinService service = mock(VaadinService.class);
+        when(service.getDeploymentConfiguration()).thenReturn(configuration);
+
+        Instantiator instantiator = mock(Instantiator.class);
+        TemplateParser.TemplateParserFactory factory = mock(
+                TemplateParser.TemplateParserFactory.class);
+        when(instantiator.getOrCreate(TemplateParserFactory.class))
+                .thenReturn(factory);
+        when(factory.createParser())
+                .thenReturn(NpmTemplateParser.getInstance());
+        when(service.getInstantiator()).thenReturn(instantiator);
+        return service;
+    }
+
+    @Test
+    void tagIsCorrect() {
+        TestPolymerTemplate template = new TestPolymerTemplate();
+
+        assertEquals(TAG, template.getElement().getTag());
+    }
+
+    @Test
+    void stateNodeIsInitialised() {
+        TestPolymerTemplate template = new TestPolymerTemplate();
+        StateNode stateNode = template.getStateNode();
+
+        Map<String, Object> expectedState = new HashMap<>();
+        expectedState.put("message", null);
+        expectedState.put("title", null);
+
+        assertTrue(stateNode.hasFeature(ElementPropertyMap.class));
+        ElementPropertyMap modelMap = stateNode
+                .getFeature(ElementPropertyMap.class);
+        modelMap.getPropertyNames().forEach(key -> {
+            assertTrue(expectedState.containsKey(key));
+            assertEquals(expectedState.get(key), modelMap.getProperty(key));
+        });
+    }
+
+    @Test
+    void updateOneOfModelValues() {
+        String message = "message";
+        TestPolymerTemplate template = new TestPolymerTemplate();
+        ModelClass model = template.getModel();
+        StateNode stateNode = template.getStateNode();
+
+        model.setMessage(message);
+
+        assertEquals(message, model.getMessage());
+        assertNull(model.getTitle());
+
+        Map<String, Object> expectedState = new HashMap<>();
+        expectedState.put("message", message);
+        expectedState.put("title", null);
+
+        ElementPropertyMap modelMap = stateNode
+                .getFeature(ElementPropertyMap.class);
+        modelMap.getPropertyNames().forEach(key -> {
+            assertTrue(expectedState.containsKey(key));
+            assertEquals(expectedState.get(key), modelMap.getProperty(key));
+        });
+    }
+
+    @Test
+    void noAnnotationTemplate() {
+        assertThrows(IllegalStateException.class,
+                () -> new TemplateWithoutTagAnnotation());
+    }
+
+    @Test
+    void noModelTemplate() {
+        assertThrows(IllegalStateException.class, () -> new NoModelTemplate());
+    }
+
+    @Test
+    void parseTemplate_hasIdChild_childIsRegisteredInFeature() {
+        doParseTemplate_hasIdChild_childIsRegisteredInFeature(
+                new IdChildTemplate());
+    }
+
+    @Test
+    void parseCachedTemplate_hasIdChild_childIsRegisteredInFeature() {
+        when(configuration.isProductionMode()).thenReturn(true);
+
+        // run in the production mode (with caching enabled) for the first time
+        IdChildTemplate template = new IdChildTemplate();
+        TestTemplateParser parser = template.parser;
+        assertEquals(1, parser.callCount);
+        // check the result for the first run
+        doParseTemplate_hasIdChild_childIsRegisteredInFeature(template);
+
+        // run in the production mode (with caching enabled) for the second time
+        template = new IdChildTemplate(parser);
+        // parser shouldn't be called
+        assertEquals(1, parser.callCount);
+        // the result should be the same
+        doParseTemplate_hasIdChild_childIsRegisteredInFeature(template);
+    }
+
+    @Test
+    void parseCachedTemplate_twoTemplatesWithInjetions_injectionsAreRegisteredInFeature() {
+        when(configuration.isProductionMode()).thenReturn(true);
+
+        AtomicInteger parserCallCount = new AtomicInteger();
+
+        TemplateParser parser = new TemplateParser() {
+
+            @Override
+            public TemplateData getTemplateContent(
+                    Class<? extends PolymerTemplate<?>> clazz, String tag,
+                    VaadinService service) {
+                String content;
+                parserCallCount.incrementAndGet();
+                if (clazz.equals(TemplateInitialization.class)) {
+                    content = "<dom-module id='" + tag + "'><template>"
+                            + "<ffs id='foo' someattrtibute></ffs>"
+                            + "<child-template></child-template>"
+                            + "</template></dom-module>";
+                } else {
+                    content = "<dom-module id='" + tag + "'><template>"
+                            + "<child-template id='bar'></child-template> <ffs></ffs>"
+                            + "</template></dom-module>";
+                }
+                return new TemplateData("", Jsoup.parse(content));
+            }
+        };
+
+        // run in the production mode (with caching enabled) for the first time
+        TemplateInitialization template1 = new TemplateInitialization(parser);
+        assertEquals(1, parserCallCount.get());
+
+        assertTemplateInitialization(template1);
+
+        // run in the production mode (with caching enabled) for the second time
+        template1 = new TemplateInitialization(parser);
+        // parser shouldn't be called
+        assertEquals(1, parserCallCount.get());
+
+        assertTemplateInitialization(template1);
+
+        parserCallCount.set(0);
+
+        // Now initialize another template
+
+        // run in the production mode (with caching enabled) for the first time
+        AnotherTemplateInitialization template2 = new AnotherTemplateInitialization(
+                parser);
+        assertEquals(1, parserCallCount.get());
+
+        assertAnotherTemplateInitialization(template2);
+
+        // run in the production mode (with caching enabled) for the second time
+        template2 = new AnotherTemplateInitialization(parser);
+        // parser shouldn't be called
+        assertEquals(1, parserCallCount.get());
+
+        assertAnotherTemplateInitialization(template2);
+    }
+
+    @Test
+    void parseTemplate_hasWrongIdChild_exceptionIsThrown() {
+        assertThrows(IllegalStateException.class,
+                () -> new IdWrongChildTemplate());
+    }
+
+    @Test
+    void parseTemplate_hasWrongIdChildElement_exceptionIsThrown() {
+        assertThrows(IllegalStateException.class,
+                () -> new IdWrongElementTemplate());
+    }
+
+    @Test
+    void parseTemplate_hasChildTemplate_elementIsCreatedAndSetAsVirtualChild() {
+        doParseTemplate_hasChildTemplate_elementIsCreatedAndSetAsVirtualChild(
+                new TemplateInTemplate());
+    }
+
+    @Test
+    void parseBundledTemplate_hasChildTemplate_elementIsCreatedAndSetAsVirtualChild() {
+        doParseTemplate_hasChildTemplate_elementIsCreatedAndSetAsVirtualChild(
+                new BundledTemplateInTemplate());
+    }
+
+    @Test
+    void parseTemplate_hasChildTemplateAndTemplateHtmlStyle_elementIsCreatedAndSetAsVirtualChild() {
+        // Make a new HTML template which contains style on the top
+        TemplateInTemplate template = new TemplateInTemplate(
+                new TestTemplateParser(tag -> "<dom-module id='" + tag
+                        + "'><template><style> a { width:100%; } </style><div><ffs someattrtibute></div><span></span>"
+                        + "<child-template></template></dom-module>"));
+        // Nothing should be changed in the logic
+        doParseTemplate_hasChildTemplate_elementIsCreatedAndSetAsVirtualChild(
+                template);
+    }
+
+    @Test
+    void parseCachedTemplate_hasChildTemplate_elementIsCreatedAndSetAsVirtualChild() {
+        when(configuration.isProductionMode()).thenReturn(true);
+
+        // run in the production mode (with caching enabled) for the first time
+        TemplateInTemplate template = new TemplateInTemplate();
+        TestTemplateParser parser = template.parser;
+
+        assertEquals(1, parser.callCount);
+        // check the result for the first run
+        doParseTemplate_hasChildTemplate_elementIsCreatedAndSetAsVirtualChild(
+                template);
+
+        // run in the production mode (with caching enabled) for the second time
+        template = new TemplateInTemplate(parser);
+        // parser shouldn't be called
+        assertEquals(1, parser.callCount);
+        // the result should be the same
+        doParseTemplate_hasChildTemplate_elementIsCreatedAndSetAsVirtualChild(
+                template);
+    }
+
+    @Test
+    void parseTemplate_hasTextNodesInTemplate_correctRequestIsSent() {
+        doParseTemplate_hasTextNodesInTemplate_correctRequestIndicesPath(
+                new TextNodesInHtmlTemplate());
+    }
+
+    @Test
+    void parseCachedTemplate_hasTextNodesInTemmplate_correctRequestIsSent() {
+        when(configuration.isProductionMode()).thenReturn(true);
+
+        // run in the production mode (with caching enabled) for the first time
+        TextNodesInHtmlTemplate template = new TextNodesInHtmlTemplate();
+        TestTemplateParser parser = template.parser;
+        doParseTemplate_hasTextNodesInTemplate_correctRequestIndicesPath(
+                template);
+
+        // run in the production mode (with caching enabled) for the second time
+        template = new TextNodesInHtmlTemplate(parser);
+        // parser shouldn't be called
+        assertEquals(1, parser.callCount);
+        // the result should be the same
+        doParseTemplate_hasTextNodesInTemplate_correctRequestIndicesPath(
+                template);
+    }
+
+    @Test
+    void parseTemplate_hasChildTemplateInsideDomRepeat_cantParse() {
+        assertThrows(IllegalStateException.class,
+                () -> new TemplateWithChildInDomRepeat());
+    }
+
+    @Test
+    void parseTemplte_hasChildTemplateOutsideDomRepeat_elementIsCreated() {
+        doParseTemplate_hasChildTemplateOutsideDomRepeat_elementIsCreated(
+                new TemplateWithDomRepeat());
+    }
+
+    @Test
+    void parseCachedTemplte_hasChildTemplateOutsideDomRepeat_elementIsCreated() {
+        when(configuration.isProductionMode()).thenReturn(true);
+
+        // run in the production mode (with caching enabled) for the first time
+        TemplateWithDomRepeat template = new TemplateWithDomRepeat();
+        TestTemplateParser parser = template.parser;
+        doParseTemplate_hasChildTemplateOutsideDomRepeat_elementIsCreated(
+                new TemplateWithDomRepeat());
+
+        // run in the production mode (with caching enabled) for the second time
+        template = new TemplateWithDomRepeat(parser);
+        // parser shouldn't be called
+        assertEquals(1, parser.callCount);
+        // the result should be the same
+        doParseTemplate_hasChildTemplateOutsideDomRepeat_elementIsCreated(
+                template);
+    }
+
+    @Test
+    void injectIdComponent_wrongTag_throw() {
+        assertThrows(IllegalStateException.class,
+                () -> new IdWrongTagChildTemplate());
+    }
+
+    @Test
+    void injectIdElement_wrongTag_throw() {
+        assertThrows(IllegalStateException.class,
+                () -> new IdWrongElementTemplate());
+    }
+
+    @Test
+    void attachExistingElement_elementIsCreatedAndSetAsVirtualChild() {
+        IdElementTemplate template = new IdElementTemplate();
+
+        VirtualChildrenList feature = template.getStateNode()
+                .getFeature(VirtualChildrenList.class);
+        List<StateNode> templateNodes = new ArrayList<>();
+        feature.forEachChild(templateNodes::add);
+
+        assertEquals(1, templateNodes.size());
+
+        StateNode child = templateNodes.get(0);
+        String tag = child.getFeature(ElementData.class).getTag();
+        assertEquals("label", tag);
+
+        assertNotNull(template.label);
+        assertEquals(child, template.label.getNode());
+
+        assertElementData(child, NodeProperties.INJECT_BY_ID, "labelId");
+    }
+
+    @Test
+    void attachExistingElementWithAttributeValue_elementHasPropertyAndAttribute() {
+        IdElementTemplate template = new IdElementTemplate();
+
+        assertTrue(template.label.hasAttribute("id"));
+        assertEquals("labelId", template.label.getAttribute("id"));
+
+        assertTrue(template.label.hasProperty("someattribute"));
+        assertNotNull(template.label.getProperty("someattribute"));
+        assertEquals(Boolean.TRUE.toString(),
+                template.label.getProperty("someattribute"));
+
+        assertFalse(template.label.hasProperty("property-binding"));
+        assertFalse(template.label.hasProperty("propertyBinding"));
+
+        assertFalse(template.label.hasProperty("another-binding"));
+        assertFalse(template.label.hasProperty("anotherBinding"));
+
+        assertFalse(template.label.hasProperty("attribute-binding"));
+        assertFalse(template.label.hasProperty("attributeBinding"));
+        assertFalse(template.label.hasProperty("attribute-binding$"));
+        assertFalse(template.label.hasProperty("attributeBinding$"));
+
+        assertTrue(template.label.hasProperty("another-attribute"));
+        assertEquals("baz", template.label.getProperty("another-attribute"));
+
+        assertTrue(template.label.hasAttribute("hidden"));
+        assertEquals(Boolean.TRUE.toString(),
+                template.label.getAttribute("hidden"));
+    }
+
+    @Test
+    void attachExistingElementWithAttributeValue_elementIsDisabled() {
+        DisabledElementTemplate template = new DisabledElementTemplate();
+
+        assertTrue(template.label.hasAttribute("id"), "Element is missing id");
+        assertTrue(template.label.isEnabled(),
+                "Server side element should be enabled");
+        assertTrue(template.label.hasProperty("disabled"),
+                "Element should contain 'disabled' property");
+    }
+
+    @Test
+    void attachExistingElementWithoutChidlrenWithText_elementHasNoText() {
+        ElementWithTextTemplate template = new ElementWithTextTemplate();
+
+        // see #10106
+        assertEquals("", template.label.getText());
+    }
+
+    @Test
+    void attachExistingElementWithChidlrenWithText_elementHasNoText() {
+        ElementWithTextTemplate template = new ElementWithTextTemplate();
+
+        assertEquals("", template.div.getText());
+    }
+
+    @Test
+    void attachExistingElement_injectedByIDdChild_onlyOneElementIsCreated() {
+        TemplateInjectTemplate template = new TemplateInjectTemplate();
+
+        VirtualChildrenList feature = template.getStateNode()
+                .getFeature(VirtualChildrenList.class);
+
+        List<StateNode> templateNodes = new ArrayList<>();
+        feature.forEachChild(templateNodes::add);
+
+        assertEquals(1, templateNodes.size());
+        StateNode stateNode = templateNodes.get(0);
+
+        assertEquals(stateNode, template.child.getStateNode());
+
+        assertElementData(stateNode, NodeProperties.INJECT_BY_ID, "child");
+    }
+
+    @Test
+    void attachExistingComponent_elementIsCreatedAndSetAsVirtualChild() {
+        IdChildTemplate template = new IdChildTemplate();
+        attachComponentAndVerifyChild(template, template.child);
+    }
+
+    @Test
+    void attachExistingComponent_idWithNoValue_elementIsCreatedAndSetAsVirtualChild() {
+        IdWithNoValueChildTemplate template = new IdWithNoValueChildTemplate();
+        attachComponentAndVerifyChild(template, template.child);
+    }
+
+    private void attachComponentAndVerifyChild(PolymerTemplate<?> template,
+            CustomComponent templateChild) {
+        VirtualChildrenList feature = template.getStateNode()
+                .getFeature(VirtualChildrenList.class);
+        List<StateNode> templateNodes = new ArrayList<>();
+        feature.forEachChild(templateNodes::add);
+
+        assertEquals(1, templateNodes.size());
+
+        StateNode child = templateNodes.get(0);
+        String tag = child.getFeature(ElementData.class).getTag();
+        assertEquals("div", tag);
+
+        assertNotNull(templateChild);
+        assertEquals(child, templateChild.getElement().getNode());
+
+        assertTrue(templateChild.getElement().getComponent().isPresent());
+
+        assertTrue(templateChild.getElement().getComponent()
+                .get() instanceof CustomComponent);
+
+        assertEquals(templateChild,
+                templateChild.getElement().getComponent().get());
+        assertElementData(child, NodeProperties.INJECT_BY_ID, "child");
+    }
+
+    @Test
+    void initModel_onlyExplicitelySetPropertiesAreSet() {
+        InitModelTemplate template = new InitModelTemplate();
+
+        template.getModel().setMessage("foo");
+
+        ElementPropertyMap map = template.getElement().getNode()
+                .getFeature(ElementPropertyMap.class);
+
+        // message has been explicitly set
+        assertTrue(map.hasProperty("message"));
+        assertNotNull(map.getProperty("message"));
+        // "list" is represented by StateNode so it's considered as explicitly
+        // set
+        assertTrue(map.hasProperty("list"));
+        assertNotNull(map.getProperty("list"));
+
+        // title has not been
+        assertFalse(map.hasProperty("title"));
+    }
+
+    @Test
+    void initModel_requestPopulateModel_onlyUnsetPropertiesAreSent() {
+        UI ui = UI.getCurrent();
+        InitModelTemplate template = new InitModelTemplate();
+
+        template.getModel().setMessage("foo");
+
+        ui.add(template);
+
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        assertEquals(2, executionOrder.size());
+        assertEquals("this.populateModelProperties($0, $1)",
+                executionOrder.get(1));
+
+        Object[] params = executionParams.get(1);
+        ArrayNode properties = (ArrayNode) params[1];
+        assertEquals(1, properties.size());
+        assertEquals("title", properties.get(0).asString());
+    }
+
+    @Test
+    void initModel_sendUpdatableProperties() {
+        UI ui = UI.getCurrent();
+        InitModelTemplate template = new InitModelTemplate();
+
+        ui.add(template);
+
+        ui.getInternals().getStateTree().runExecutionsBeforeClientResponse();
+
+        assertEquals(2, executionOrder.size());
+        assertEquals("this.registerUpdatableModelProperties($0, $1)",
+                executionOrder.get(0));
+
+        Object[] params = executionParams.get(0);
+        ArrayNode properties = (ArrayNode) params[1];
+        assertEquals(2, properties.size());
+
+        Set<String> props = new HashSet<>();
+        props.add(properties.get(0).asString());
+        props.add(properties.get(1).asString());
+        // all model properties except 'list' which has no getter
+        assertTrue(props.contains("message"));
+        assertTrue(props.contains("title"));
+    }
+
+    @Test
+    void licenseCheck_devMode_licenseCheckedOnce()
+            throws NoSuchFieldException, IllegalAccessException {
+        Field licenseChecked = PolymerTemplate.class
+                .getDeclaredField("licenseChecked");
+        licenseChecked.setAccessible(true);
+        AtomicBoolean licenseCheckedHolder = (AtomicBoolean) licenseChecked
+                .get(null);
+        boolean licenseCheckedInitValue = licenseCheckedHolder.get();
+
+        try (MockedStatic<LicenseChecker> checker = mockStatic(
+                LicenseChecker.class)) {
+            AtomicInteger counter = new AtomicInteger(0);
+            checker.when(() -> LicenseChecker.checkLicense(anyString(),
+                    anyString(), eq(BuildType.DEVELOPMENT)))
+                    .then(ignore -> counter.incrementAndGet());
+
+            DeploymentConfiguration configuration = mock(
+                    DeploymentConfiguration.class);
+            when(configuration.isProductionMode()).thenReturn(false);
+
+            VaadinService service = mock(VaadinService.class);
+            when(service.getDeploymentConfiguration())
+                    .thenReturn(configuration);
+
+            licenseCheckedHolder.set(false);
+            new TestPolymerTemplate(service);
+            assertEquals(1, counter.get());
+            new TestPolymerTemplate(service);
+            assertEquals(1, counter.get());
+        } finally {
+            licenseCheckedHolder.compareAndSet(true, licenseCheckedInitValue);
+        }
+    }
+
+    @Test
+    void licenseCheck_prodMode_licenseNotChecked() {
+        try (MockedStatic<LicenseChecker> checker = mockStatic(
+                LicenseChecker.class)) {
+            AtomicInteger counter = new AtomicInteger(0);
+            checker.when(() -> LicenseChecker.checkLicense(anyString(),
+                    anyString(), eq(BuildType.DEVELOPMENT)))
+                    .then(ignore -> counter.incrementAndGet());
+
+            DeploymentConfiguration configuration = mock(
+                    DeploymentConfiguration.class);
+            when(configuration.isProductionMode()).thenReturn(true);
+
+            VaadinService service = mock(VaadinService.class);
+            when(service.getDeploymentConfiguration())
+                    .thenReturn(configuration);
+
+            new TestPolymerTemplate(service);
+            assertEquals(0, counter.get());
+        }
+    }
+
+    private void doParseTemplate_hasIdChild_childIsRegisteredInFeature(
+            IdChildTemplate template) {
+        VirtualChildrenList feature = template.getStateNode()
+                .getFeature(VirtualChildrenList.class);
+        assertEquals(1, feature.size());
+    }
+
+    private void doParseTemplate_hasChildTemplate_elementIsCreatedAndSetAsVirtualChild(
+            PolymerTemplate<?> template) {
+        VirtualChildrenList feature = template.getStateNode()
+                .getFeature(VirtualChildrenList.class);
+        List<StateNode> templateNodes = new ArrayList<>();
+        feature.forEachChild(templateNodes::add);
+
+        assertEquals(2, templateNodes.size());
+        StateNode child1 = templateNodes.get(0);
+        StateNode child2 = templateNodes.get(1);
+        String tag = child1.getFeature(ElementData.class).getTag();
+        if ("child-template".equals(tag)) {
+            assertEquals("ffs", child2.getFeature(ElementData.class).getTag());
+        } else {
+            assertEquals("ffs", child1.getFeature(ElementData.class).getTag());
+            assertEquals("child-template",
+                    child2.getFeature(ElementData.class).getTag());
+        }
+        assertTemplateInTempalte(child1);
+        assertTemplateInTempalte(child2);
+    }
+
+    private void doParseTemplate_hasTextNodesInTemplate_correctRequestIndicesPath(
+            TextNodesInHtmlTemplate template) {
+
+        VirtualChildrenList feature = template.getStateNode()
+                .getFeature(VirtualChildrenList.class);
+        JsonNode object = (JsonNode) feature.get(0)
+                .getFeature(ElementData.class).getPayload();
+        ArrayNode path = (ArrayNode) object.get(NodeProperties.PAYLOAD);
+
+        // check arrays of indices
+        assertEquals(1, path.size());
+        assertEquals(1, path.get(0).intValue());
+    }
+
+    private void doParseTemplate_hasChildTemplateOutsideDomRepeat_elementIsCreated(
+            TemplateWithDomRepeat template) {
+        UI ui = new UI();
+        ui.add(template);
+
+        VirtualChildrenList feature = template.getStateNode()
+                .getFeature(VirtualChildrenList.class);
+        List<StateNode> templateNodes = new ArrayList<>();
+        feature.forEachChild(templateNodes::add);
+
+        assertEquals(1, templateNodes.size());
+    }
+
+    private void assertElementData(StateNode node, String type,
+            String payload) {
+        JsonNode object = (JsonNode) node.getFeature(ElementData.class)
+                .getPayload();
+        assertEquals(type, object.get(NodeProperties.TYPE).asString());
+        assertEquals(payload, object.get(NodeProperties.PAYLOAD).asString());
+    }
+
+    private void assertTemplateInTempalte(StateNode node) {
+        JsonNode object = (JsonNode) node.getFeature(ElementData.class)
+                .getPayload();
+        assertEquals(NodeProperties.TEMPLATE_IN_TEMPLATE,
+                object.get(NodeProperties.TYPE).asString());
+
+        assertTrue(object.get(NodeProperties.PAYLOAD) instanceof ArrayNode);
+    }
+
+    private void assertTemplateInitialization(TemplateInitialization template) {
+        VirtualChildrenList feature = template.getStateNode()
+                .getFeature(VirtualChildrenList.class);
+        assertEquals(2, feature.size());
+
+        Optional<Component> child = com.vaadin.flow.dom.Element
+                .get(feature.get(0)).getComponent();
+
+        assertTrue(child.isPresent());
+        assertEquals(TestPolymerTemplate.class, child.get().getClass());
+
+        child = com.vaadin.flow.dom.Element.get(feature.get(1)).getComponent();
+
+        assertTrue(child.isPresent());
+        assertEquals(TemplateChild.class, child.get().getClass());
+    }
+
+    private void assertAnotherTemplateInitialization(
+            AnotherTemplateInitialization template) {
+        VirtualChildrenList feature = template.getStateNode()
+                .getFeature(VirtualChildrenList.class);
+        assertEquals(2, feature.size());
+
+        Optional<Component> child = com.vaadin.flow.dom.Element
+                .get(feature.get(0)).getComponent();
+
+        assertTrue(child.isPresent());
+        assertEquals(TemplateChild.class, child.get().getClass());
+
+        child = com.vaadin.flow.dom.Element.get(feature.get(1)).getComponent();
+
+        assertTrue(child.isPresent());
+        assertEquals(TestPolymerTemplate.class, child.get().getClass());
+    }
+}

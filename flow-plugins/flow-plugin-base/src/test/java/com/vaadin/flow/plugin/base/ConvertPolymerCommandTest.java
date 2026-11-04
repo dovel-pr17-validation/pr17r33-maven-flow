@@ -1,0 +1,189 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.plugin.base;
+
+import java.io.IOException;
+import java.net.URISyntaxException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mock;
+import org.mockito.MockedConstruction;
+import org.mockito.MockitoAnnotations;
+
+import com.vaadin.flow.internal.FrontendUtils.CommandExecutionException;
+import com.vaadin.flow.polymer2lit.FrontendConverter;
+import com.vaadin.flow.polymer2lit.ServerConverter;
+
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+
+class ConvertPolymerCommandTest {
+    @TempDir
+    Path tmpDir;
+
+    @Mock
+    private MockedConstruction<FrontendConverter> frontendConverterMock;
+
+    @Mock
+    private MockedConstruction<ServerConverter> serverConverterMock;
+
+    @Mock
+    private PluginAdapterBase adapter;
+
+    @Mock
+    private ConvertPolymerCommand command;
+
+    private AutoCloseable closeable;
+
+    @BeforeEach
+    void init() throws IOException, URISyntaxException, IllegalAccessException {
+        closeable = MockitoAnnotations.openMocks(this);
+        TestUtil.stubPluginAdapterBase(adapter, tmpDir.toFile());
+
+        Files.createFile(tmpDir.resolve("component.js"));
+        Files.createDirectories(tmpDir.resolve("nested"));
+        Files.createFile(tmpDir.resolve("nested/component.js"));
+        Files.createDirectories(tmpDir.resolve("node_modules"));
+        Files.createFile(tmpDir.resolve("node_modules/component.js"));
+        Files.createFile(tmpDir.resolve("Component.java"));
+        Files.createFile(tmpDir.resolve("nested/Component.java"));
+    }
+
+    @AfterEach
+    void teardown() throws Exception {
+        closeable.close();
+    }
+
+    @Test
+    void execute() throws URISyntaxException, IOException, InterruptedException,
+            CommandExecutionException {
+        try (ConvertPolymerCommand command = new ConvertPolymerCommand(adapter,
+                null, false, false)) {
+            command.execute();
+
+            FrontendConverter frontendConverter = frontendConverterMock
+                    .constructed().get(0);
+            verify(frontendConverter)
+                    .convertFile(getTmpFilePath("component.js"), false, false);
+            verify(frontendConverter).convertFile(
+                    getTmpFilePath("nested/component.js"), false, false);
+            verify(frontendConverter, never()).convertFile(
+                    getTmpFilePath("node_modules/component.js"), false, false);
+            verify(frontendConverter, never()).convertFile(
+                    getTmpFilePath("Component.java"), false, false);
+            verify(frontendConverter, never()).convertFile(
+                    getTmpFilePath("nested/Component.java"), false, false);
+
+            ServerConverter serverConverter = serverConverterMock.constructed()
+                    .get(0);
+            verify(serverConverter)
+                    .convertFile(getTmpFilePath("Component.java"));
+            verify(serverConverter)
+                    .convertFile(getTmpFilePath("nested/Component.java"));
+            verify(serverConverter, never())
+                    .convertFile(getTmpFilePath("component.js"));
+            verify(serverConverter, never())
+                    .convertFile(getTmpFilePath("nested/component.js"));
+        }
+    }
+
+    @Test
+    void setSpecificFrontendFile_execute() throws URISyntaxException,
+            IOException, InterruptedException, CommandExecutionException {
+        try (ConvertPolymerCommand command = new ConvertPolymerCommand(adapter,
+                "/nested/component.js", false, false)) {
+            command.execute();
+
+            FrontendConverter frontendConverter = frontendConverterMock
+                    .constructed().get(0);
+            verify(frontendConverter, never())
+                    .convertFile(getTmpFilePath("component.js"), false, false);
+            verify(frontendConverter).convertFile(
+                    getTmpFilePath("nested/component.js"), false, false);
+
+            ServerConverter serverConverter = serverConverterMock.constructed()
+                    .get(0);
+            verify(serverConverter, never())
+                    .convertFile(getTmpFilePath("Component.java"));
+            verify(serverConverter, never())
+                    .convertFile(getTmpFilePath("nested/Component.java"));
+        }
+    }
+
+    @Test
+    void setSpecificServerFile_execute() throws URISyntaxException, IOException,
+            InterruptedException, CommandExecutionException {
+        try (ConvertPolymerCommand command = new ConvertPolymerCommand(adapter,
+                "/nested/Component.java", false, false)) {
+            command.execute();
+
+            FrontendConverter frontendConverter = frontendConverterMock
+                    .constructed().get(0);
+            verify(frontendConverter, never())
+                    .convertFile(getTmpFilePath("component.js"), true, false);
+            verify(frontendConverter, never()).convertFile(
+                    getTmpFilePath("nested/component.js"), true, false);
+
+            ServerConverter serverConverter = serverConverterMock.constructed()
+                    .get(0);
+            verify(serverConverter, never())
+                    .convertFile(getTmpFilePath("Component.java"));
+            verify(serverConverter)
+                    .convertFile(getTmpFilePath("nested/Component.java"));
+        }
+    }
+
+    @Test
+    void useLit1_execute() throws URISyntaxException, IOException,
+            InterruptedException, CommandExecutionException {
+        try (ConvertPolymerCommand command = new ConvertPolymerCommand(adapter,
+                null, true, false)) {
+            command.execute();
+
+            FrontendConverter frontendConverter = frontendConverterMock
+                    .constructed().get(0);
+            verify(frontendConverter)
+                    .convertFile(getTmpFilePath("component.js"), true, false);
+            verify(frontendConverter).convertFile(
+                    getTmpFilePath("nested/component.js"), true, false);
+        }
+    }
+
+    @Test
+    void disableOptionalChaining_execute() throws URISyntaxException,
+            IOException, InterruptedException, CommandExecutionException {
+        try (ConvertPolymerCommand command = new ConvertPolymerCommand(adapter,
+                null, false, true)) {
+            command.execute();
+
+            FrontendConverter frontendConverter = frontendConverterMock
+                    .constructed().get(0);
+            verify(frontendConverter)
+                    .convertFile(getTmpFilePath("component.js"), false, true);
+            verify(frontendConverter).convertFile(
+                    getTmpFilePath("nested/component.js"), false, true);
+        }
+    }
+
+    private Path getTmpFilePath(String path) {
+        return tmpDir.resolve(path);
+    }
+}

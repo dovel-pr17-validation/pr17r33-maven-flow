@@ -1,0 +1,751 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.component.page;
+
+import java.io.Serializable;
+import java.time.DateTimeException;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.util.Date;
+import java.util.Objects;
+import java.util.TimeZone;
+import java.util.function.UnaryOperator;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.JsonNodeType;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.fullscreen.Fullscreen;
+import com.vaadin.flow.component.geolocation.GeolocationAvailability;
+import com.vaadin.flow.component.screenorientation.ScreenOrientation;
+import com.vaadin.flow.component.screenorientation.ScreenOrientationType;
+import com.vaadin.flow.component.wakelock.WakeLockAvailability;
+import com.vaadin.flow.component.webshare.WebShareSupport;
+import com.vaadin.flow.function.SerializableConsumer;
+import com.vaadin.flow.js.JsDefinition;
+import com.vaadin.flow.js.JsExpression;
+
+/**
+ * Provides extended information about the web browser, such as screen
+ * resolution and time zone.
+ * <p>
+ * Browser details are automatically fetched on the first call to
+ * {@link Page#getExtendedClientDetails()} and cached for the lifetime of the
+ * UI. The fetch happens asynchronously, so the first call may return
+ * {@code null} while the data is being retrieved. To update the cached values
+ * with fresh data from the browser, use
+ * {@link #refresh(SerializableConsumer)}}.
+ *
+ * @author Vaadin Ltd
+ * @since 2.0
+ */
+public class ExtendedClientDetails implements Serializable {
+    private final UI ui;
+    private int screenWidth = -1;
+    private int screenHeight = -1;
+    private int bodyClientWidth = -1;
+    private int bodyClientHeight = -1;
+    private int timezoneOffset = 0;
+    private int rawTimezoneOffset = 0;
+    private int dstSavings;
+    private boolean dstInEffect;
+    private String timeZoneId;
+    private long clientServerTimeDelta;
+    private boolean touchDevice;
+    private double devicePixelRatio = -1.0D;
+    private String windowName;
+    private String navigatorPlatform;
+    private ColorScheme.Value colorScheme = ColorScheme.Value.NORMAL;
+    private String themeName;
+
+    /**
+     * For internal use only. Updates all properties in the class according to
+     * the given information.
+     *
+     * @param ui
+     *            the UI instance that owns this ExtendedClientDetails
+     * @param screenWidth
+     *            Screen width
+     * @param screenHeight
+     *            Screen height
+     * @param windowInnerWidth
+     *            Window width
+     * @param windowInnerHeight
+     *            Window height
+     * @param bodyClientWidth
+     *            Body element width
+     * @param bodyClientHeight
+     *            Body element height
+     * @param tzOffset
+     *            TimeZone offset in minutes from GMT
+     * @param rawTzOffset
+     *            raw TimeZone offset in minutes from GMT (w/o DST adjustment)
+     * @param dstShift
+     *            the difference between the raw TimeZone and DST in minutes
+     * @param dstInEffect
+     *            is DST currently active in the region or not?
+     * @param tzId
+     *            time zone id
+     * @param curDate
+     *            the current date in milliseconds since the epoch
+     * @param touchDevice
+     *            whether browser responds to touch events
+     * @param devicePixelRatio
+     *            the ratio of the display's resolution in physical pixels to
+     *            the resolution in CSS pixels
+     * @param windowName
+     *            a unique browser window name which persists on reload
+     * @param navigatorPlatform
+     *            navigation platform received from the browser
+     * @param colorScheme
+     *            the current color scheme
+     * @param themeName
+     *            the theme name (e.g., "lumo", "aura")
+     * @since 25.0
+     */
+    public ExtendedClientDetails(UI ui, String screenWidth, String screenHeight,
+            String windowInnerWidth, String windowInnerHeight,
+            String bodyClientWidth, String bodyClientHeight, String tzOffset,
+            String rawTzOffset, String dstShift, String dstInEffect,
+            String tzId, String curDate, String touchDevice,
+            String devicePixelRatio, String windowName,
+            String navigatorPlatform, String colorScheme, String themeName) {
+        this.ui = ui;
+        if (screenWidth != null) {
+            try {
+                this.screenWidth = Integer.parseInt(screenWidth);
+                this.screenHeight = Integer.parseInt(screenHeight);
+            } catch (final NumberFormatException e) {
+                this.screenHeight = this.screenWidth = -1;
+            }
+        }
+        if (bodyClientHeight != null) {
+            try {
+                this.bodyClientHeight = Integer.parseInt(bodyClientHeight);
+                this.bodyClientWidth = Integer.parseInt(bodyClientWidth);
+            } catch (final NumberFormatException e) {
+                this.bodyClientHeight = this.bodyClientWidth = -1;
+            }
+        }
+        if (windowInnerHeight != null && ui != null) {
+            try {
+                ui.getPage().setWindowSize(Integer.parseInt(windowInnerWidth),
+                        Integer.parseInt(windowInnerHeight));
+            } catch (final NumberFormatException e) {
+                // ignore, signal keeps its current value
+            }
+        }
+        if (tzOffset != null) {
+            try {
+                // browser->java conversion: min->ms, reverse sign
+                timezoneOffset = -Integer.parseInt(tzOffset) * 60 * 1000;
+            } catch (final NumberFormatException e) {
+                timezoneOffset = 0; // default gmt+0
+            }
+        }
+        if (rawTzOffset != null) {
+            try {
+                // browser->java conversion: min->ms, reverse sign
+                rawTimezoneOffset = -Integer.parseInt(rawTzOffset) * 60 * 1000;
+            } catch (final NumberFormatException e) {
+                rawTimezoneOffset = 0; // default gmt+0
+            }
+        }
+        if (dstShift != null) {
+            try {
+                // browser->java conversion: min->ms
+                this.dstSavings = Integer.parseInt(dstShift) * 60 * 1000;
+            } catch (final NumberFormatException e) {
+                this.dstSavings = 0; // default no savings
+            }
+        }
+        if (dstInEffect != null) {
+            this.dstInEffect = Boolean.parseBoolean(dstInEffect);
+        }
+
+        if (tzId == null || "undefined".equals(tzId)) {
+            this.timeZoneId = null;
+        } else {
+            this.timeZoneId = tzId;
+        }
+
+        if (curDate != null) {
+            try {
+                long curTime = Long.parseLong(curDate);
+                clientServerTimeDelta = curTime - new Date().getTime();
+            } catch (final NumberFormatException e) {
+                clientServerTimeDelta = 0;
+            }
+        }
+        if (touchDevice != null) {
+            this.touchDevice = Boolean.parseBoolean(touchDevice);
+        }
+        if (devicePixelRatio != null) {
+            this.devicePixelRatio = Double.parseDouble(devicePixelRatio);
+        }
+
+        this.windowName = windowName;
+        this.navigatorPlatform = navigatorPlatform;
+        setColorScheme(ColorScheme.Value.fromString(colorScheme));
+        this.themeName = themeName;
+    }
+
+    /**
+     * Gets the width of the screen in pixels. This is the full screen
+     * resolution and not the width available for the application.
+     *
+     * @return the width of the screen in pixels.
+     */
+    public int getScreenWidth() {
+        return screenWidth;
+    }
+
+    /**
+     * Gets the height of the screen in pixels. This is the full screen
+     * resolution and not the height available for the application.
+     *
+     * @return the height of the screen in pixels.
+     */
+    public int getScreenHeight() {
+        return screenHeight;
+    }
+
+    /**
+     * Gets the inner height of the browser window {@code window.innerHeight} in
+     * pixels. This includes the scrollbar, if it is visible.
+     * <p>
+     * Delegates to the window size signal on the {@link Page}. Returns
+     * {@code -1} if no UI is available.
+     *
+     * @return the browser window inner height in pixels, or {@code -1}
+     */
+    public int getWindowInnerHeight() {
+        return ui == null ? -1
+                : ui.getPage().windowSizeSignal().peek().height();
+    }
+
+    /**
+     * Gets the inner width of the browser window {@code window.innerWidth} in
+     * pixels. This includes the scrollbar, if it is visible.
+     * <p>
+     * Delegates to the window size signal on the {@link Page}. Returns
+     * {@code -1} if no UI is available.
+     *
+     * @return the browser window inner width in pixels, or {@code -1}
+     */
+    public int getWindowInnerWidth() {
+        return ui == null ? -1 : ui.getPage().windowSizeSignal().peek().width();
+    }
+
+    /**
+     * Gets the height of the body element in the document in pixels.
+     *
+     * @return the height of the body element
+     */
+    public int getBodyClientHeight() {
+        return bodyClientHeight;
+    }
+
+    /**
+     * Gets the width of the body element in the document in pixels.
+     *
+     * @return the width of the body element
+     */
+    public int getBodyClientWidth() {
+        return bodyClientWidth;
+    }
+
+    /**
+     * Returns the browser-reported TimeZone offset in milliseconds from GMT.
+     * This includes possible daylight saving adjustments, to figure out which
+     * TimeZone the user actually might be in, see
+     * {@link #getRawTimezoneOffset()}. To convert dates and times to the
+     * browser's time zone, use {@link #getZoneId()} instead.
+     *
+     * @see ExtendedClientDetails#getRawTimezoneOffset()
+     * @see #getZoneId()
+     * @return timezone offset in milliseconds, 0 if not available
+     */
+    public int getTimezoneOffset() {
+        return timezoneOffset;
+    }
+
+    /**
+     * Returns the TimeZone Id (like "Europe/Helsinki") provided by the browser
+     * (if the browser supports this feature). This is the raw value reported by
+     * the browser; for a {@link ZoneId} that is never {@code null}, use
+     * {@link #getZoneId()}.
+     *
+     * @return the TimeZone Id if provided by the browser, null otherwise.
+     * @see #getZoneId()
+     * @see <a href=
+     *      "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/DateTimeFormat/resolvedOptions">Intl.DateTimeFormat.prototype.resolvedOptions()</a>
+     */
+    public String getTimeZoneId() {
+        return timeZoneId;
+    }
+
+    /**
+     * Returns the time zone of the browser, for showing dates and times the way
+     * the user sees them. For the current date and time of the browser, use
+     * {@link #getBrowserDateTime()}.
+     * <p>
+     * Only a zone ID gets daylight saving time right for dates other than
+     * today. The offset fallback is correct for the current moment only.
+     *
+     * @return the zone of {@link #getTimeZoneId()}, or a fixed
+     *         {@link ZoneOffset} of {@link #getTimezoneOffset()} if the browser
+     *         reported no zone ID or one the JVM does not know; never
+     *         {@code null}
+     * @since 25.4
+     */
+    public ZoneId getZoneId() {
+        if (timeZoneId != null) {
+            try {
+                return ZoneId.of(timeZoneId);
+            } catch (DateTimeException e) {
+                // an ID from a newer tzdb than the JVM's, or a garbage value
+                getLogger().debug(
+                        "Browser time zone ID '{}' is not known to the JVM, falling back to offset {} ms",
+                        timeZoneId, timezoneOffset, e);
+            }
+        }
+        try {
+            return ZoneOffset.ofTotalSeconds(timezoneOffset / 1000);
+        } catch (DateTimeException e) {
+            // beyond +-18 hours, only possible with a tampered payload
+            getLogger().debug(
+                    "Browser time zone offset {} ms is out of range, falling back to UTC",
+                    timezoneOffset, e);
+            return ZoneOffset.UTC;
+        }
+    }
+
+    /**
+     * Returns the browser-reported TimeZone offset in milliseconds from GMT
+     * ignoring possible daylight saving adjustments that may be in effect in
+     * the browser.
+     * <p>
+     * You can use this to figure out which TimeZones the user could actually be
+     * in by calling {@link TimeZone#getAvailableIDs(int)}.
+     * <p>
+     * If {@link #getRawTimezoneOffset()} and {@link #getTimezoneOffset()}
+     * returns the same value, the browser is either in a zone that does not
+     * currently have daylight saving time, or in a zone that never has daylight
+     * saving time.
+     *
+     * @return timezone offset in milliseconds excluding DST, 0 if not available
+     */
+    public int getRawTimezoneOffset() {
+        return rawTimezoneOffset;
+    }
+
+    /**
+     * Returns the offset in milliseconds between the browser's GMT TimeZone and
+     * DST.
+     *
+     * @return the number of milliseconds that the TimeZone shifts when DST is
+     *         in effect
+     */
+    public int getDSTSavings() {
+        return dstSavings;
+    }
+
+    /**
+     * Returns whether daylight saving time (DST) is currently in effect in the
+     * region of the browser or not.
+     *
+     * @return true if the browser resides at a location that currently is in
+     *         DST
+     */
+    public boolean isDSTInEffect() {
+        return dstInEffect;
+    }
+
+    /**
+     * Returns the current time of the browser as an {@link Instant}. This will
+     * not be entirely accurate due to varying network latencies, but should
+     * provide a close-enough value for most cases.
+     * <p>
+     * The returned instant is a point on the time line and does not carry a
+     * time zone. To get the date and time as shown in the end user's computer,
+     * use {@link #getBrowserDateTime()}.
+     *
+     * @return the current time of the browser, not {@code null}
+     * @see #getBrowserDateTime()
+     * @since 25.3
+     */
+    public Instant getBrowserTime() {
+        return Instant.now().plusMillis(clientServerTimeDelta);
+    }
+
+    /**
+     * Returns the current date and time of the browser in the browser's time
+     * zone, i.e. {@link #getBrowserTime()} in the zone of {@link #getZoneId()}.
+     * This will not be entirely accurate due to varying network latencies, but
+     * should provide a close-enough value for most cases.
+     *
+     * @return the current date and time of the browser, not {@code null}
+     * @see #getZoneId()
+     * @since 25.4
+     */
+    public ZonedDateTime getBrowserDateTime() {
+        return getBrowserTime().atZone(getZoneId());
+    }
+
+    /**
+     * Returns the current date and time of the browser. This will not be
+     * entirely accurate due to varying network latencies, but should provide a
+     * close-enough value for most cases. Also note that the returned Date
+     * object uses servers default time zone, not the clients.
+     * <p>
+     * To get the actual date and time shown in the end users computer, you can
+     * do something like:
+     *
+     * <pre>
+     * WebBrowser browser = ...;
+     * SimpleTimeZone timeZone = new SimpleTimeZone(browser.getTimezoneOffset(), "Fake client time zone");
+     * DateFormat format = DateFormat.getDateTimeInstance();
+     * format.setTimeZone(timeZone);
+     * myLabel.setValue(format.format(browser.getCurrentDate()));
+     * </pre>
+     *
+     * @return the current date and time of the browser.
+     * @see #isDSTInEffect()
+     * @see #getDSTSavings()
+     * @see #getTimezoneOffset()
+     * @deprecated use {@link #getBrowserTime()} instead, which returns a
+     *             time-zone independent {@link Instant}, or
+     *             {@link #getBrowserDateTime()} for the date and time in the
+     *             browser's time zone
+     */
+    @Deprecated(since = "25.3", forRemoval = true)
+    public Date getCurrentDate() {
+        return Date.from(getBrowserTime());
+    }
+
+    /**
+     * Checks if the browser supports touch events.
+     *
+     * @return true if the browser is detected to support touch events, false
+     *         otherwise
+     */
+    public boolean isTouchDevice() {
+        return touchDevice;
+    }
+
+    /**
+     * Gets the device pixel ratio, {@code window.devicePixelRatio}. See more
+     * from <a href=
+     * "https://developer.mozilla.org/en-US/docs/Web/API/Window/devicePixelRatio">MDN
+     * web docs</a>.
+     * <p>
+     * A value of -1 indicates that the value was not reported by the browser
+     * correctly.
+     *
+     * @return double-precision floating-point value indicating the ratio of the
+     *         display's resolution in physical pixels to the resolution in CSS
+     *         pixels
+     */
+    public double getDevicePixelRatio() {
+        return devicePixelRatio;
+    }
+
+    /**
+     * Returns a unique browser window identifier. For internal use only.
+     *
+     * @return An id which persists if the UI is reloaded in the same browser
+     *         window/tab.
+     */
+    public String getWindowName() {
+        return windowName;
+    }
+
+    /**
+     * Gets the raw platform string reported by the browser through
+     * {@code window.navigator.platform}, for example {@code "iPhone"},
+     * {@code "MacIntel"} or {@code "Linux x86_64"}.
+     * <p>
+     * The underlying browser API is deprecated and the values it reports are
+     * neither standardized nor reliable: browsers freeze, spoof or omit them,
+     * and the same platform string is reported for different devices (iPadOS
+     * reports {@code "MacIntel"}, the same value as a desktop Mac). Prefer
+     * feature detection over branching on this value.
+     *
+     * @return the platform reported by the browser, or {@code null} if the
+     *         browser did not report one
+     * @since 25.3
+     */
+    public String getNavigatorPlatform() {
+        return navigatorPlatform;
+    }
+
+    /**
+     * Check if the browser is run on IPad.
+     *
+     * @return true if run on IPad false if the user is not using IPad or if no
+     *         information from the browser is present
+     * @since 2.2
+     * @deprecated use feature detection instead of platform detection, or
+     *             inspect {@link #getNavigatorPlatform()} directly
+     */
+    @Deprecated(since = "25.3")
+    public boolean isIPad() {
+        return navigatorPlatform != null && (navigatorPlatform
+                .startsWith("iPad")
+                || (navigatorPlatform.equals("MacIntel") && isTouchDevice()));
+    }
+
+    /**
+     * Check if the browser is run on IOS.
+     *
+     * @return {@code true} if run on IOS , {@code false} if the user is not
+     *         using IOS or if no information from the browser is present
+     * @since 2.2
+     * @deprecated use feature detection instead of platform detection, or
+     *             inspect {@link #getNavigatorPlatform()} directly
+     */
+    @Deprecated(since = "25.3")
+    public boolean isIOS() {
+        return isIPad() || (navigatorPlatform != null
+                && (navigatorPlatform.startsWith("iPhone")
+                        || navigatorPlatform.startsWith("iPod")));
+    }
+
+    /**
+     * Gets the color scheme.
+     *
+     * @return the color scheme, never {@code null}
+     * @since 25.0
+     */
+    public ColorScheme.Value getColorScheme() {
+        return colorScheme;
+    }
+
+    /**
+     * Returns whether the browser implements the <a href=
+     * "https://developer.mozilla.org/en-US/docs/Web/API/Screen_Orientation_API">Screen
+     * Orientation API</a>.
+     * <p>
+     * Mirrors the current state of
+     * {@link ScreenOrientation#orientationSignal()}: {@code true} once the
+     * bootstrap has seeded the signal with a real orientation, {@code false}
+     * when the browser reports {@link ScreenOrientationType#UNSUPPORTED} or
+     * before the client handshake has completed (signal is still
+     * {@link ScreenOrientationType#UNKNOWN}). Lets callers decide synchronously
+     * whether to expose UI affordances that rely on the API (such as an
+     * orientation lock button) without subscribing to the signal first.
+     *
+     * @return {@code true} if the Screen Orientation API is available
+     * @since 25.2
+     */
+    public boolean isScreenOrientationSupported() {
+        if (ui == null) {
+            return false;
+        }
+        ScreenOrientationType type = ScreenOrientation.orientationSignal(ui)
+                .peek().type();
+        return type != ScreenOrientationType.UNKNOWN
+                && type != ScreenOrientationType.UNSUPPORTED;
+    }
+
+    /**
+     * Gets the theme name.
+     *
+     * @return the theme name (e.g., "lumo", "aura"), or empty string if not
+     *         detected
+     * @since 25.0
+     */
+    public String getThemeName() {
+        return themeName;
+    }
+
+    /**
+     * Updates the color scheme. For internal use only.
+     *
+     * @param colorScheme
+     *            the new color scheme
+     */
+    void setColorScheme(ColorScheme.Value colorScheme) {
+        this.colorScheme = colorScheme == null ? ColorScheme.Value.NORMAL
+                : colorScheme;
+    }
+
+    /**
+     * Parses browser details from the given JSON and updates the UI from them:
+     * stores the resulting {@link ExtendedClientDetails} on the UI's internals
+     * and seeds the page-visibility, geolocation-availability,
+     * wake-lock-availability and web-share-support signals from the same
+     * payload.
+     * <p>
+     * For internal use only.
+     *
+     * @param ui
+     *            the UI to update, not {@code null}
+     * @param json
+     *            the JSON object containing browser details parameters
+     * @return the parsed details
+     * @throws RuntimeException
+     *             if the JSON is not a valid object
+     * @since 25.2
+     */
+    public static ExtendedClientDetails updateFromJson(UI ui, JsonNode json) {
+        Objects.requireNonNull(ui, "UI must not be null");
+        if (!(json instanceof ObjectNode jsonObj)) {
+            throw new IllegalArgumentException("Expected a JSON object");
+        }
+
+        // The values are plain strings; the actual parsing of the fields
+        // happens in ExtendedClient's constructor. If a field is missing or
+        // the wrong type, pass on null for default.
+        return updateFromValues(ui, key -> {
+            final JsonNode jsValue = jsonObj.get(key);
+            if (jsValue != null
+                    && jsValue.getNodeType() == JsonNodeType.STRING) {
+                return jsValue.asString();
+            } else {
+                return null;
+            }
+        });
+    }
+
+    /**
+     * Updates the UI from browser details resolved through the given value
+     * provider, which maps a browser-detail key (e.g. {@code v-sw},
+     * {@code v-tzid}) to its raw string value, or {@code null} when the value
+     * is absent. Used to populate the details directly from individual request
+     * parameters during bootstrap, avoiding a JSON round-trip.
+     * <p>
+     * For internal use only.
+     *
+     * @param ui
+     *            the UI to update, not {@code null}
+     * @param getStringElseNull
+     *            resolves a browser-detail key to its raw string value, or
+     *            {@code null} if not present
+     * @return the parsed details
+     * @since 25.2.1
+     */
+    public static ExtendedClientDetails updateFromValues(UI ui,
+            UnaryOperator<String> getStringElseNull) {
+        Objects.requireNonNull(ui, "UI must not be null");
+
+        ExtendedClientDetails details = new ExtendedClientDetails(ui,
+                getStringElseNull.apply("v-sw"),
+                getStringElseNull.apply("v-sh"),
+                getStringElseNull.apply("v-ww"),
+                getStringElseNull.apply("v-wh"),
+                getStringElseNull.apply("v-bw"),
+                getStringElseNull.apply("v-bh"),
+                getStringElseNull.apply("v-tzo"),
+                getStringElseNull.apply("v-rtzo"),
+                getStringElseNull.apply("v-dstd"),
+                getStringElseNull.apply("v-dston"),
+                getStringElseNull.apply("v-tzid"),
+                getStringElseNull.apply("v-curdate"),
+                getStringElseNull.apply("v-td"),
+                getStringElseNull.apply("v-pr"),
+                getStringElseNull.apply("v-wn"),
+                getStringElseNull.apply("v-np"),
+                getStringElseNull.apply("v-cs"),
+                getStringElseNull.apply("v-tn"));
+        ui.getInternals().setExtendedClientDetails(details);
+        ui.getPage().setPageVisibility(getStringElseNull.apply("v-pv"));
+        ui.getInternals().setScreenOrientationFromClient(
+                getStringElseNull.apply("v-so"),
+                getStringElseNull.apply("v-soa"));
+        Fullscreen.setStateFromClient(ui, getStringElseNull.apply("v-fs"));
+        String ga = getStringElseNull.apply("v-ga");
+        if (ga != null) {
+            try {
+                ui.getInternals().setGeolocationAvailability(
+                        GeolocationAvailability.valueOf(ga));
+            } catch (IllegalArgumentException e) {
+                // unknown value; leave the current availability alone
+            }
+        }
+        String wla = getStringElseNull.apply("v-wla");
+        if (wla != null) {
+            try {
+                ui.getInternals().setWakeLockAvailability(
+                        WakeLockAvailability.valueOf(wla));
+            } catch (IllegalArgumentException e) {
+                // unknown value; leave the current availability alone
+            }
+        }
+        String ws = getStringElseNull.apply("v-ws");
+        if (ws != null) {
+            ui.getInternals().setWebShareSupport(
+                    Boolean.parseBoolean(ws) ? WebShareSupport.SUPPORTED
+                            : WebShareSupport.UNSUPPORTED);
+        }
+        return details;
+    }
+
+    /**
+     * Refreshes the browser details by fetching updated values from the
+     * browser. The refresh happens asynchronously. The cached values in this
+     * instance will be updated when the browser responds, and then the provided
+     * callback will be invoked with the updated details.
+     *
+     * @param callback
+     *            a callback that will be invoked with the updated
+     *            ExtendedClientDetails when the refresh is complete
+     * @since 25.0
+     */
+    public void refresh(SerializableConsumer<ExtendedClientDetails> callback) {
+        final SerializableConsumer<JsonNode> resultHandler = json -> {
+            ExtendedClientDetails details = updateFromJson(ui, json);
+            if (callback != null) {
+                callback.accept(details);
+            }
+        };
+        final SerializableConsumer<String> errorHandler = err -> {
+            throw new RuntimeException("Unable to retrieve extended "
+                    + "client details. JS error is '" + err + "'");
+        };
+        ui.getPage().executeJs(ClientDetailsJs.class).readDetails()
+                .then(resultHandler, errorHandler);
+    }
+
+    private static Logger getLogger() {
+        return LoggerFactory.getLogger(ExtendedClientDetails.class);
+    }
+
+    /**
+     * How the browser is asked about itself again, as a JavaScript definition
+     * for {@link com.vaadin.flow.component.page.Page#executeJs(Class)}.
+     * 
+     * @since 25.4
+     */
+    @JsDefinition
+    public interface ClientDetailsJs extends Serializable {
+
+        /**
+         * Reads what the browser reports about itself, which is the same set of
+         * values the bootstrap collects.
+         *
+         * @return the pending details
+         */
+        @JsExpression("return Vaadin.Flow.getBrowserDetailsParameters();")
+        PendingJavaScriptResult readDetails();
+    }
+}

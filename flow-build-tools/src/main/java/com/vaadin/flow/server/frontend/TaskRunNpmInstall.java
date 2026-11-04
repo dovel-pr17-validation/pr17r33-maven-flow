@@ -1,0 +1,1139 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.frontend;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+import org.slf4j.Logger;
+import tools.jackson.databind.JsonNode;
+
+import com.vaadin.flow.internal.FileIOUtils;
+import com.vaadin.flow.internal.FrontendUtils;
+import com.vaadin.flow.internal.Pair;
+import com.vaadin.flow.server.Constants;
+import com.vaadin.flow.server.InitParameters;
+import com.vaadin.flow.shared.util.SharedUtil;
+
+import static com.vaadin.flow.internal.FrontendUtils.commandToString;
+import static com.vaadin.flow.server.frontend.NodeUpdater.HASH_KEY;
+import static com.vaadin.flow.server.frontend.NodeUpdater.PROJECT_FOLDER;
+import static com.vaadin.flow.server.frontend.NodeUpdater.VAADIN_DEP_KEY;
+import static com.vaadin.flow.server.frontend.NodeUpdater.VAADIN_VERSION;
+
+/**
+ * Run <code>npm install</code> after dependencies have been updated.
+ * <p>
+ * For internal use only. May be renamed or removed in a future release.
+ *
+ * @since 2.0
+ */
+public class TaskRunNpmInstall implements FallibleCommand {
+
+    /**
+     * The minimum age, in days, a frontend package version must have before it
+     * is installed, used when neither Vaadin nor the package manager itself has
+     * been configured with a value. Mitigates supply-chain attacks where a
+     * compromised version is briefly available on the registry.
+     */
+    static final int DEFAULT_MINIMUM_FRONTEND_PACKAGE_AGE_DAYS = 1;
+
+    /**
+     * The package name pattern that is exempt from the minimum frontend package
+     * age. The packages Vaadin publishes itself are pinned to the version of
+     * the platform in use, so a project that is built right after a Vaadin
+     * release has no older version to fall back to.
+     */
+    static final String MINIMUM_FRONTEND_PACKAGE_AGE_EXCLUDE = "@vaadin/*";
+
+    /**
+     * A {@code minimumReleaseAgeExcludes} setting of a {@code bunfig.toml} that
+     * has a package Vaadin publishes among its values.
+     */
+    private static final Pattern BUNFIG_VAADIN_EXCLUDE = Pattern
+            .compile("minimumReleaseAgeExcludes\\s*=\\s*\\[[^]]*[\"']@vaadin/");
+
+    private static final String MODULES_YAML = ".modules.yaml";
+
+    private static final String NPM_VALIDATION_FAIL_MESSAGE = "%n%n======================================================================================================"
+            + "%nThe path to npm cache contains whitespaces, and the currently installed npm version doesn't accept this."
+            + "%nMost likely your Windows user home path contains whitespaces."
+            + "%nTo workaround it, please change the npm cache path by using the following command:"
+            + "%n    npm config set cache [path-to-npm-cache] --global"
+            + "%n(you may also want to exclude the whitespaces with 'dir /x' to use the same dir),"
+            + "%nor upgrade the npm version to 7 (or newer) by:"
+            + "%n 1) Running 'npm-windows-upgrade' tool with Windows PowerShell:"
+            + "%n        Set-ExecutionPolicy Unrestricted -Scope CurrentUser -Force"
+            + "%n        npm install -g npm-windows-upgrade"
+            + "%n        npm-windows-upgrade"
+            + "%n 2) Manually installing a newer version of npx: npm install -g npx"
+            + "%n 3) Manually installing a newer version of pnpm: npm install -g pnpm"
+            + "%n 4) Deleting the following files from your Vaadin project's folder (if present):"
+            + "%n        node_modules, package-lock.json, vite.generated.ts, webpack.generated.js, pnpm-lock.yaml"
+            + "%n======================================================================================================%n";
+
+    /**
+     * How many times the install command is run in total before the build
+     * fails, when the failure looks like a temporary network problem.
+     */
+    private static final int INSTALL_ATTEMPTS = 3;
+
+    private static final long RETRY_DELAY_MILLIS = 3000;
+
+    /**
+     * Markers that npm, pnpm and bun print when a package could not be fetched
+     * because of a connectivity problem rather than because the dependency
+     * itself is broken or missing.
+     */
+    private static final List<String> NETWORK_FAILURE_MARKERS = List.of(
+            "econnreset", "econnrefused", "etimedout", "eai_again", "enotfound",
+            "enetunreach", "ehostunreach", "epipe", "eproto",
+            "err_socket_timeout", "err_stream_premature_close",
+            "socket hang up", "network timeout", "npm error network",
+            "err_pnpm_meta_fetch_fail", "connectionclosed",
+            "failedtoopensocket");
+
+    private final NodeUpdater packageUpdater;
+
+    private final List<String> ignoredNodeFolders = Arrays.asList(".bin",
+            "pnpm", ".ignored_pnpm", ".pnpm", ".staging", ".vaadin",
+            MODULES_YAML);
+
+    private final Options options;
+
+    /**
+     * Create an instance of the command.
+     *
+     * @param packageUpdater
+     *            package-updater instance used for checking if previous
+     *            execution modified the package.json file
+     * @param options
+     *            the options for the task
+     */
+    TaskRunNpmInstall(NodeUpdater packageUpdater, Options options) {
+        this.packageUpdater = packageUpdater;
+        this.options = options;
+    }
+
+    @Override
+    public void execute() throws ExecutionFailedException {
+        String toolName = getToolName(options);
+        String command = "install";
+        if (options.isCiBuild()) {
+            if (options.isEnablePnpm() || options.isEnableBun()) {
+                command += " --frozen-lockfile";
+            } else {
+                command = "ci";
+            }
+        } else if (options.isEnablePnpm()) {
+            command += " --no-frozen-lockfile";
+        }
+
+        if (packageUpdater.modified || shouldRunNpmInstall()) {
+            packageUpdater.log().info("Running `" + toolName + " " + command
+                    + "` to "
+                    + "resolve and optionally download frontend dependencies. "
+                    + "This may take a moment, please stand by...");
+            runNpmInstall();
+
+            updateLocalHash();
+        } else {
+            packageUpdater.log().info(
+                    "Skipping `{} {}` because the frontend packages are already "
+                            + "installed in the folder '{}' and the hash in the file '{}' is the same as in '{}'",
+                    toolName, command,
+                    options.getNodeModulesFolder().getAbsolutePath(),
+                    packageUpdater.getVaadinJsonFile().getAbsolutePath(),
+                    Constants.PACKAGE_JSON);
+
+        }
+    }
+
+    /**
+     * Updates
+     *
+     * <pre>
+     * node_modules/.vaadin/vaadin.json
+     * </pre>
+     *
+     * with package.json hash, project folder and the platform version.
+     * <p>
+     * This is for handling updated package to the code repository by another
+     * developer as then the hash is updated and we may just be missing one
+     * module, as well as for detecting that the platform version has changed
+     * which may require a deeper cleanup.
+     */
+    private void updateLocalHash() {
+        try {
+            final JsonNode vaadin = packageUpdater.getPackageJson()
+                    .get(VAADIN_DEP_KEY);
+            if (vaadin == null) {
+                packageUpdater.log().warn("No vaadin object in package.json");
+                return;
+            }
+            final String hash = vaadin.get(HASH_KEY).asString();
+
+            final Map<String, String> updates = new HashMap<>();
+            updates.put(HASH_KEY, hash);
+            FrontendBuildUtils.getVaadinVersion(packageUpdater.options)
+                    .ifPresent(s -> updates.put(VAADIN_VERSION, s));
+            updates.put(PROJECT_FOLDER,
+                    options.getNpmFolder().getAbsolutePath());
+            packageUpdater.updateVaadinJsonContents(updates);
+        } catch (IOException e) {
+            packageUpdater.log().warn("Failed to update node_modules hash.", e);
+        }
+    }
+
+    private boolean shouldRunNpmInstall() {
+        if (!options.getNodeModulesFolder().isDirectory()) {
+            return true;
+        }
+        // Ignore .bin and pnpm folders as those are always installed for
+        // pnpm execution
+        File[] installedPackages = options.getNodeModulesFolder()
+                .listFiles((dir, name) -> !ignoredNodeFolders.contains(name));
+        assert installedPackages != null;
+        if (installedPackages.length == 0) {
+            // Nothing installed
+            return true;
+        }
+
+        return isVaadinHashOrProjectFolderUpdated();
+    }
+
+    boolean isVaadinHashOrProjectFolderUpdated() {
+        try {
+            JsonNode nodeModulesVaadinJson = packageUpdater
+                    .getVaadinJsonContents();
+            if (nodeModulesVaadinJson.has(HASH_KEY)) {
+                final JsonNode packageJson = packageUpdater.getPackageJson();
+                if (!nodeModulesVaadinJson.get(HASH_KEY).asString()
+                        .equals(packageJson.get(VAADIN_DEP_KEY).get(HASH_KEY)
+                                .asString())) {
+                    return true;
+                }
+
+                if (nodeModulesVaadinJson.has(PROJECT_FOLDER)
+                        && !options.getNpmFolder().getAbsolutePath()
+                                .equals(nodeModulesVaadinJson
+                                        .get(PROJECT_FOLDER).asString())) {
+                    return true;
+                }
+
+                return false;
+            }
+        } catch (IOException e) {
+            packageUpdater.log()
+                    .warn("Failed to load hashes forcing npm execution", e);
+        }
+        return true;
+    }
+
+    /**
+     * Installs frontend resources (using either pnpm or npm) after
+     * `package.json` has been updated.
+     */
+    private void runNpmInstall() throws ExecutionFailedException {
+        // Do possible cleaning before generating any new files.
+        cleanUp();
+
+        Logger logger = packageUpdater.log();
+
+        String baseDir = options.getNpmFolder().getAbsolutePath();
+
+        FrontendToolsSettings settings = new FrontendToolsSettings(baseDir,
+                () -> FrontendUtils.getVaadinHomeDirectory().getAbsolutePath());
+        settings.setNodeDownloadRoot(options.getNodeDownloadRoot());
+        settings.setForceAlternativeNode(options.isRequireHomeNodeExec());
+        settings.setNodeFolder(options.getNodeFolder());
+        settings.setUseGlobalPnpm(options.isUseGlobalPnpm());
+        settings.setNodeVersion(options.getNodeVersion());
+        settings.setIgnoreVersionChecks(
+                options.isFrontendIgnoreVersionChecks());
+        FrontendTools tools = new FrontendTools(settings);
+
+        if (options.isEnablePnpm()) {
+            try {
+                createNpmRcFile();
+            } catch (IOException exception) {
+                logger.warn(".npmrc generation failed; pnpm "
+                        + "package installation may require manually passing "
+                        + "the --shamefully-hoist flag", exception);
+            }
+        }
+
+        List<String> npmExecutable;
+        List<String> npmInstallCommand;
+        List<String> postinstallCommand;
+
+        try {
+            if (options.isRequireHomeNodeExec()) {
+                tools.getNodeExecutable();
+            }
+            if (options.isEnableBun()) {
+                npmExecutable = tools.getBunExecutable();
+            } else if (options.isEnablePnpm()) {
+                npmExecutable = tools.getPnpmExecutable();
+            } else {
+                npmExecutable = tools.getNpmExecutable();
+            }
+            npmInstallCommand = new ArrayList<>(npmExecutable);
+            postinstallCommand = new ArrayList<>(npmExecutable);
+            // This only works together with "install"
+            postinstallCommand.remove("--shamefully-hoist=true");
+
+        } catch (IllegalStateException exception) {
+            throw new ExecutionFailedException(exception.getMessage(),
+                    exception);
+        }
+
+        npmInstallCommand.add("--ignore-scripts");
+
+        if (options.isCiBuild()) {
+            if (options.isEnablePnpm() || options.isEnableBun()) {
+                npmInstallCommand.add("install");
+                npmInstallCommand.add("--frozen-lockfile");
+            } else {
+                npmInstallCommand.add("ci");
+            }
+        } else {
+            npmInstallCommand.add("install");
+            if (options.isEnablePnpm()) {
+                npmInstallCommand.add("--no-frozen-lockfile");
+            }
+        }
+
+        MinimumFrontendPackageAge minimumAge = resolveMinimumFrontendPackageAge(
+                options, tools, npmExecutable, logger);
+        minimumAge.argument().ifPresent(npmInstallCommand::add);
+        // Also excluded when the age itself comes from the package manager
+        // configuration, so that a just released Vaadin version installs
+        npmInstallCommand.addAll(
+                resolveMinimumFrontendPackageAgeExcludeArguments(options, tools,
+                        npmExecutable, minimumAge.applies(), logger));
+
+        postinstallCommand.addAll(resolvePostinstallArguments(options));
+        postinstallCommand.add("run");
+        postinstallCommand.add("postinstall");
+
+        if (logger.isDebugEnabled()) {
+            logger.debug(
+                    commandToString(options.getNpmFolder().getAbsolutePath(),
+                            npmInstallCommand));
+            logger.debug(
+                    commandToString(options.getNpmFolder().getAbsolutePath(),
+                            postinstallCommand));
+        }
+
+        String toolName = getToolName(options);
+
+        String commandString = npmInstallCommand.stream()
+                .collect(Collectors.joining(" "));
+
+        logger.info("using '{}' for frontend package installation",
+                String.join(" ", npmInstallCommand));
+
+        // Log a stronger request for patience if package-lock.json is
+        // missing as "npm install" in this case can take minutes
+        // https://github.com/vaadin/flow/issues/12825
+        File packageLockFile = packageUpdater.getPackageLockFile();
+        if (!options.isEnableBun() && !options.isEnablePnpm()
+                && !packageLockFile.exists()) {
+            packageUpdater.log().warn("package-lock.json is missing from this "
+                    + "project. This may cause the npm package installation to "
+                    + "take several minutes. It is recommended to keep the "
+                    + "package-lock.json file persistently in your project. "
+                    + "Please stand by...");
+        }
+
+        for (int attempt = 1; attempt <= INSTALL_ATTEMPTS; attempt++) {
+            CommandOutcome outcome = runInstallCommand(npmInstallCommand,
+                    toolName);
+
+            if (outcome.exitCode() == 0) {
+                logger.info("Frontend dependencies resolved successfully.");
+                break;
+            }
+
+            // Echo the stdout from pnpm/npm to error level log
+            logger.error("Command `{}` failed:\n{}", commandString,
+                    outcome.output());
+
+            if (attempt == INSTALL_ATTEMPTS
+                    || !isNetworkFailure(outcome.output())) {
+                logger.error(
+                        ">>> Dependency ERROR. Check that all required dependencies are "
+                                + "deployed in {} repositories.",
+                        toolName);
+                throw new ExecutionFailedException(
+                        SharedUtil.capitalize(toolName)
+                                + " install has exited with non zero status. "
+                                + "Some dependencies are not installed. Check "
+                                + toolName + " command output");
+            }
+
+            long delayMillis = attempt * RETRY_DELAY_MILLIS;
+            logger.warn(
+                    "`{}` failed because of a network problem, retrying in {} seconds ({}/{})",
+                    commandString, delayMillis / 1000, attempt + 1,
+                    INSTALL_ATTEMPTS);
+            sleepBeforeRetry(delayMillis, toolName);
+        }
+
+        List<String> postinstallPackages = new ArrayList<>();
+        postinstallPackages.add(".");
+        postinstallPackages.add("esbuild");
+        postinstallPackages.add("@vaadin/vaadin-usage-statistics");
+        postinstallPackages.addAll(options.getPostinstallPackages());
+        postinstallPackages.removeAll(options.getExcludePostinstallPackages());
+
+        for (String postinstallPackage : postinstallPackages) {
+            File packageJsonFile = getPackageJsonForModule(postinstallPackage);
+            if (packageJsonFile == null || !packageJsonFile.exists()) {
+                continue;
+            }
+            File packageFolder = packageJsonFile.getParentFile();
+
+            try {
+                JsonNode packageJson = TaskGeneratePackageJson
+                        .getJsonFileContent(packageJsonFile);
+                if (!containsPostinstallScript(packageJson)) {
+                    logger.debug(
+                            "Skipping postinstall for '{}' as no postinstall script was found in the package.json",
+                            postinstallPackage);
+                    continue;
+                }
+            } catch (IOException ioe) {
+                logger.error(
+                        "Couldn't read package.json for {}. Skipping postinstall",
+                        postinstallPackage, ioe);
+                continue;
+            }
+
+            logger.debug("Running postinstall for '{}'", postinstallPackage);
+            Process postinstallProcess = null;
+            try {
+                postinstallProcess = runNpmCommand(postinstallCommand,
+                        packageFolder);
+                logger.debug("Output of postinstall `{}`:", postinstallPackage);
+                StringBuilder output = new StringBuilder();
+                consumeProcessOutput(postinstallProcess, line -> {
+                    logger.debug(line);
+                    output.append(line).append(System.lineSeparator());
+                });
+                int exitCode = postinstallProcess.waitFor();
+                if (exitCode != 0) {
+                    throw new ExecutionFailedException(
+                            "The postinstall script of '" + postinstallPackage
+                                    + "' exited with status " + exitCode + ":"
+                                    + System.lineSeparator() + output);
+                }
+            } catch (IOException | InterruptedException e) {
+                if (e instanceof InterruptedException) {
+                    // Restore interrupted state
+                    Thread.currentThread().interrupt();
+                }
+                throw new ExecutionFailedException(
+                        "Error when running postinstall script for '"
+                                + postinstallPackage + "'",
+                        e);
+            } finally {
+                if (postinstallProcess != null) {
+                    postinstallProcess.destroyForcibly();
+                }
+            }
+        }
+    }
+
+    static String getToolName(Options options) {
+        if (options.isEnableBun()) {
+            return "bun";
+        } else if (options.isEnablePnpm()) {
+            return "pnpm";
+        } else {
+            return "npm";
+        }
+    }
+
+    /**
+     * Resolves the install argument that stops the active package manager from
+     * installing frontend package versions that are too new, or nothing if the
+     * age should not be restricted from here.
+     * <p>
+     * A value configured through Vaadin is always used as is, {@code 0} adding
+     * no restriction. When nothing is configured, the package manager is asked
+     * what it resolves for its own minimum release age setting; if it already
+     * has one, no argument is passed so that the package manager applies its
+     * own configuration. Only when neither is configured does
+     * {@link #DEFAULT_MINIMUM_FRONTEND_PACKAGE_AGE_DAYS} apply.
+     * <p>
+     * An age the package manager resolves for itself is reported as applying
+     * even when Vaadin is configured with {@code 0}, as a command line argument
+     * is the only thing Vaadin leaves out in that case.
+     *
+     * @param options
+     *            current build options
+     * @param tools
+     *            the frontend tools used to read the package manager
+     *            configuration
+     * @param toolCommand
+     *            the npm, pnpm or bun command used for the install
+     * @param logger
+     *            the logger to report the resolved source of the value to
+     * @return whether an age applies at all, and the install argument if one
+     *         has to be passed
+     */
+    static MinimumFrontendPackageAge resolveMinimumFrontendPackageAge(
+            Options options, FrontendTools tools, List<String> toolCommand,
+            Logger logger) {
+        Integer configuredDays = options.getMinimumFrontendPackageAgeDays();
+        if (configuredDays != null && configuredDays == 0) {
+            // Vaadin adds no restriction of its own, but an age the package
+            // manager is configured with still applies to the install
+            return new MinimumFrontendPackageAge(
+                    getPackageManagerConfiguredMinimumReleaseAge(options, tools,
+                            toolCommand)
+                            .filter(TaskRunNpmInstall::blocksSomeVersion)
+                            .isPresent(),
+                    Optional.empty());
+        }
+        int days;
+        if (configuredDays != null) {
+            days = configuredDays;
+        } else {
+            Optional<String> packageManagerValue = getPackageManagerConfiguredMinimumReleaseAge(
+                    options, tools, toolCommand);
+            if (packageManagerValue.isPresent()) {
+                logger.info(
+                        "Keeping the minimum frontend package age configured for {} "
+                                + "({}) instead of applying the Vaadin default. Set the "
+                                + "'{}' parameter to override it.",
+                        getToolName(options),
+                        describeConfiguredMinimumReleaseAge(options,
+                                packageManagerValue.get()),
+                        InitParameters.MINIMUM_FRONTEND_PACKAGE_AGE_DAYS);
+                return new MinimumFrontendPackageAge(
+                        blocksSomeVersion(packageManagerValue.get()),
+                        Optional.empty());
+            }
+            days = DEFAULT_MINIMUM_FRONTEND_PACKAGE_AGE_DAYS;
+        }
+        boolean npmSupportsMinReleaseAge = !options.isEnableBun()
+                && !options.isEnablePnpm()
+                && tools.npmSupportsMinReleaseAge(toolCommand);
+        return new MinimumFrontendPackageAge(true,
+                Optional.of(getMinimumFrontendPackageAgeArgument(options, days,
+                        npmSupportsMinReleaseAge)));
+    }
+
+    /**
+     * Whether a minimum frontend package age applies to the install, and the
+     * install argument that makes the package manager apply the age Vaadin
+     * resolved, when it has to be passed at all.
+     *
+     * @param applies
+     *            {@code true} when some version can be blocked for being too
+     *            new, either because of this argument or because of the
+     *            configuration of the package manager
+     * @param argument
+     *            the install argument to pass, or an empty optional when the
+     *            package manager needs none
+     */
+    record MinimumFrontendPackageAge(boolean applies,
+            Optional<String> argument) {
+    }
+
+    /**
+     * Checks whether a minimum release age the package manager resolved for
+     * itself blocks some version, which every value but zero does. The
+     * {@code before} date npm falls back to is not a number and always blocks
+     * something.
+     */
+    private static boolean blocksSomeVersion(String packageManagerValue) {
+        try {
+            return Double.parseDouble(packageManagerValue.trim()) != 0;
+        } catch (NumberFormatException e) { // NOSONAR
+            return true;
+        }
+    }
+
+    /**
+     * Spells out a minimum release age the package manager resolved for itself,
+     * as the unit of the value depends on the package manager and the setting
+     * it comes from: days for npm, minutes for pnpm, and a date for the
+     * {@code before} setting npm resolves {@code min-release-age} into.
+     */
+    private static String describeConfiguredMinimumReleaseAge(Options options,
+            String packageManagerValue) {
+        String value = packageManagerValue.trim();
+        if (options.isEnablePnpm()) {
+            return value + " minutes";
+        }
+        try {
+            Double.parseDouble(value);
+            return value + " days";
+        } catch (NumberFormatException e) { // NOSONAR
+            return "no versions released after " + value;
+        }
+    }
+
+    /**
+     * Resolves the install arguments that exempt the packages Vaadin publishes
+     * itself from the minimum frontend package age, so that a project can be
+     * built with a Vaadin version that was released a moment ago.
+     * <p>
+     * <ul>
+     * <li>npm 11.17 or newer is passed
+     * {@code --min-release-age-exclude=@vaadin/*}, which exempts the matching
+     * packages from both {@code --min-release-age} and {@code --before}</li>
+     * <li>pnpm 10.17 or newer is passed
+     * {@code --config.minimum-release-age-exclude=@vaadin/*}</li>
+     * <li>bun and older npm and pnpm versions cannot exclude packages on the
+     * command line, so nothing is passed and the build is warned that an
+     * installation may fail during the first day after a Vaadin release, unless
+     * a {@code bunfig.toml} of the project lists the packages already</li>
+     * <li>nothing is passed and nothing is warned about when no age applies, as
+     * then no version is blocked to begin with</li>
+     * </ul>
+     * The patterns the package manager is configured with are passed along, as
+     * a command line value replaces them instead of adding to them. Only the
+     * excluded packages themselves are exempt; their own dependencies still
+     * have to be old enough.
+     *
+     * @param options
+     *            current build options
+     * @param tools
+     *            the frontend tools used to read the package manager version
+     *            and configuration
+     * @param toolCommand
+     *            the npm, pnpm or bun command used for the install
+     * @param ageApplies
+     *            {@code false} when no version is blocked for being too new, in
+     *            which case nothing has to be excluded
+     * @param logger
+     *            the logger to report an unsupported package manager to
+     * @return the install arguments, empty if none should be passed
+     */
+    static List<String> resolveMinimumFrontendPackageAgeExcludeArguments(
+            Options options, FrontendTools tools, List<String> toolCommand,
+            boolean ageApplies, Logger logger) {
+        if (!ageApplies) {
+            return List.of();
+        }
+        if (options.isEnableBun()) {
+            if (!bunfigExcludesVaadinPackages(options.getNpmFolder(), logger)) {
+                warnAboutPackagesThatCannotBeExcluded(logger,
+                        "bun accepts exclusions only as exact package names in the 'minimumReleaseAgeExcludes' setting of a bunfig.toml",
+                        "List the '" + MINIMUM_FRONTEND_PACKAGE_AGE_EXCLUDE
+                                + "' packages the project depends on in that setting, spelled out one by one, to get the same result as with npm and pnpm.");
+            }
+            return List.of();
+        }
+        if (options.isEnablePnpm()) {
+            if (!tools.pnpmSupportsMinimumReleaseAgeExclude(toolCommand)) {
+                warnAboutPackagesThatCannotBeExcluded(logger, "pnpm older than "
+                        + FrontendTools.MIN_PNPM_VERSION_FOR_RELEASE_AGE_EXCLUDE
+                                .getFullVersion()
+                        + " ignores the 'minimumReleaseAgeExclude' setting",
+                        "Upgrade pnpm to "
+                                + FrontendTools.MIN_PNPM_VERSION_FOR_RELEASE_AGE_EXCLUDE
+                                        .getFullVersion()
+                                + " or newer.");
+                return List.of();
+            }
+            List<String> arguments = excludeArguments(
+                    "--config.minimum-release-age-exclude=",
+                    tools.getConfiguredSettingValues(toolCommand,
+                            options.getNpmFolder(), "minimumReleaseAgeExclude",
+                            "minimum-release-age-exclude"));
+            if (arguments.size() == 1) {
+                // pnpm reads the setting as a list only when the argument is
+                // given more than once, and pnpm 11 excludes every package
+                // when it is a single string instead of a list
+                arguments = List.of(arguments.get(0), arguments.get(0));
+            }
+            return arguments;
+        }
+        if (!tools.npmSupportsMinReleaseAgeExclude(toolCommand)) {
+            warnAboutPackagesThatCannotBeExcluded(logger, "npm older than "
+                    + FrontendTools.MIN_NPM_VERSION_FOR_RELEASE_AGE_EXCLUDE
+                            .getFullVersion()
+                    + " does not know the '--min-release-age-exclude' argument",
+                    "Upgrade npm to "
+                            + FrontendTools.MIN_NPM_VERSION_FOR_RELEASE_AGE_EXCLUDE
+                                    .getFullVersion()
+                            + " or newer, which Node.js "
+                            + FrontendTools.MIN_NODE_VERSION_FOR_RELEASE_AGE_EXCLUDE
+                                    .getFullVersion()
+                            + " and newer ship with.");
+            return List.of();
+        }
+        return excludeArguments("--min-release-age-exclude=",
+                tools.getConfiguredSettingValues(toolCommand,
+                        options.getNpmFolder(), "min-release-age-exclude"));
+    }
+
+    /**
+     * Resolves the arguments that the command running a {@code postinstall}
+     * script needs on top of the ones the package manager is called with
+     * anyway.
+     * <p>
+     * Before pnpm runs a script it checks that {@code node_modules} is up to
+     * date, and that check starts an install of its own. The install right
+     * above has just made that pointless, and the one pnpm starts is not the
+     * same one: it is not passed the arguments that exempt the packages Vaadin
+     * publishes from the minimum release age, and it does not skip the
+     * lifecycle scripts of the dependencies. Whenever it fails, for that or any
+     * other reason, the script itself is never run, so the check is turned off.
+     * <p>
+     * npm and bun run a script without checking anything, and bun rejects an
+     * argument it is not expecting, so nothing is passed for them.
+     *
+     * @param options
+     *            current build options
+     * @return the arguments to pass before {@code run}, empty when the package
+     *         manager needs none
+     */
+    static List<String> resolvePostinstallArguments(Options options) {
+        if (!options.isEnablePnpm()) {
+            return List.of();
+        }
+        return List.of("--config.verify-deps-before-run=false");
+    }
+
+    /**
+     * Builds one install argument per package name pattern that has to be
+     * excluded, which are the ones the package manager is configured with plus
+     * the one Vaadin needs.
+     */
+    private static List<String> excludeArguments(String argumentPrefix,
+            List<String> configuredPatterns) {
+        List<String> patterns = new ArrayList<>(configuredPatterns);
+        if (!patterns.contains(MINIMUM_FRONTEND_PACKAGE_AGE_EXCLUDE)) {
+            patterns.add(MINIMUM_FRONTEND_PACKAGE_AGE_EXCLUDE);
+        }
+        return patterns.stream().map(pattern -> argumentPrefix + pattern)
+                .toList();
+    }
+
+    /**
+     * Checks whether a {@code bunfig.toml} next to the {@code package.json}
+     * already lists packages Vaadin publishes in its
+     * {@code minimumReleaseAgeExcludes} setting, so that a build that has taken
+     * care of the exclusion is not warned about it on every run.
+     * <p>
+     * The file is read as it is, as bun has no command for printing its
+     * resolved configuration. A {@code bunfig.toml} the project does not
+     * contain itself, such as the one in the home directory, is not seen.
+     */
+    private static boolean bunfigExcludesVaadinPackages(File npmFolder,
+            Logger logger) {
+        File bunfig = new File(npmFolder, "bunfig.toml");
+        if (!bunfig.isFile()) {
+            return false;
+        }
+        try {
+            String content = Files.readString(bunfig.toPath());
+            return BUNFIG_VAADIN_EXCLUDE.matcher(content).find();
+        } catch (IOException | UncheckedIOException e) {
+            logger.debug("Could not read '{}'", bunfig, e);
+            return false;
+        }
+    }
+
+    private static void warnAboutPackagesThatCannotBeExcluded(Logger logger,
+            String reason, String remedy) {
+        logger.warn("The packages Vaadin publishes cannot be excluded from the "
+                + "minimum frontend package age, as {}. Installing a "
+                + "Vaadin version during the first day after its "
+                + "release may therefore fail. {}", reason, remedy);
+    }
+
+    /**
+     * Reads the minimum release age the active package manager resolves from
+     * its own configuration, so that Vaadin does not override it with a command
+     * line argument.
+     * <p>
+     * Only npm and pnpm are asked, as bun has no command for printing its
+     * resolved configuration (see <a href=
+     * "https://github.com/oven-sh/bun/issues/7140">oven-sh/bun#7140</a>). The
+     * {@code minimumReleaseAge} setting a {@code bunfig.toml} may define is
+     * therefore not taken into account.
+     *
+     * @return the value as the package manager reports it, which is a number of
+     *         days for npm, a number of minutes for pnpm and a date for the
+     *         {@code before} setting npm resolves {@code min-release-age} into.
+     *         It is never converted into days, only checked for whether it
+     *         blocks a version at all ({@link #blocksSomeVersion(String)}) and
+     *         reported to the build
+     *         ({@link #describeConfiguredMinimumReleaseAge(Options, String)}),
+     *         as the package manager is the one applying it.
+     */
+    private static Optional<String> getPackageManagerConfiguredMinimumReleaseAge(
+            Options options, FrontendTools tools, List<String> toolCommand) {
+        File npmFolder = options.getNpmFolder();
+        if (options.isEnableBun()) {
+            return Optional.empty();
+        }
+        if (options.isEnablePnpm()) {
+            // pnpm reads the setting from pnpm-workspace.yaml and, up to pnpm
+            // 10, from .npmrc as well, reporting it camel-cased since pnpm 11
+            return tools.getConfiguredSetting(toolCommand, npmFolder,
+                    "minimumReleaseAge", "minimum-release-age");
+        }
+        // npm resolves min-release-age into the before setting it shares the
+        // implementation with, and up to npm 11.13 it drops the key itself
+        // while doing so, reporting an age the project configured as unset.
+        // Reading before as well covers those versions, npm older than 11.10
+        // where the setting does not exist at all and the --before argument is
+        // used as a fallback, and a project configuring before directly; the
+        // two settings are mutually exclusive for npm, so a Vaadin argument
+        // would override whichever of them is configured.
+        return tools.getConfiguredSetting(toolCommand, npmFolder,
+                "min-release-age", "before");
+    }
+
+    /**
+     * Builds the install argument that prevents npm, pnpm or bun from
+     * installing frontend package versions newer than the given number of days.
+     *
+     * @param options
+     *            current build options
+     * @param days
+     *            the minimum age in days, always positive
+     * @param npmSupportsMinReleaseAge
+     *            {@code true} if the active npm understands
+     *            {@code --min-release-age} (npm 11.10+); when {@code false} the
+     *            legacy {@code --before=<date>} flag is used instead. Ignored
+     *            when bun or pnpm is enabled.
+     */
+    static String getMinimumFrontendPackageAgeArgument(Options options,
+            int days, boolean npmSupportsMinReleaseAge) {
+        if (options.isEnableBun()) {
+            // bun: --minimum-release-age takes a value in seconds
+            long seconds = (long) days * 24 * 60 * 60;
+            return "--minimum-release-age=" + seconds;
+        }
+        if (options.isEnablePnpm()) {
+            // pnpm: minimumReleaseAge is a setting (in minutes), so it has
+            // to be passed via the --config.<name> CLI form, not as a
+            // top-level option
+            long minutes = (long) days * 24 * 60;
+            return "--config.minimum-release-age=" + minutes;
+        }
+        if (npmSupportsMinReleaseAge) {
+            // npm 11.10+: --min-release-age takes a value in days
+            return "--min-release-age=" + days;
+        }
+        // Older npm: --before takes any Date.parse-able string
+        String before = Instant.now().minus(days, ChronoUnit.DAYS).toString();
+        return "--before=" + before;
+    }
+
+    /**
+     * The exit code and the collected output of a finished command.
+     */
+    private record CommandOutcome(int exitCode, String output) {
+    }
+
+    /**
+     * Runs the given install command once and waits for it to finish.
+     *
+     * @param command
+     *            the install command to run
+     * @param toolName
+     *            the name of the package manager, used in error messages
+     * @return the exit code and the output of the command
+     * @throws ExecutionFailedException
+     *             if the command could not be run to completion
+     */
+    private CommandOutcome runInstallCommand(List<String> command,
+            String toolName) throws ExecutionFailedException {
+        Logger logger = packageUpdater.log();
+        Process process = null;
+        try {
+            process = runNpmCommand(command, options.getNpmFolder());
+
+            logger.debug("Output of `{}`:", String.join(" ", command));
+            StringBuilder output = new StringBuilder();
+            consumeProcessOutput(process, stdoutLine -> {
+                logger.debug(stdoutLine);
+                output.append(stdoutLine).append(System.lineSeparator());
+            });
+
+            return new CommandOutcome(process.waitFor(), output.toString());
+        } catch (InterruptedException | IOException | UncheckedIOException e) {
+            logger.error("Error when running `{} install`", toolName, e);
+            Throwable cause = e;
+            if (e instanceof InterruptedException) {
+                // Restore interrupted state
+                Thread.currentThread().interrupt();
+            }
+            if (e instanceof UncheckedIOException) {
+                cause = e.getCause();
+            }
+            throw new ExecutionFailedException(
+                    "Command '" + toolName + " install' failed to finish",
+                    cause);
+        } finally {
+            if (process != null) {
+                process.destroyForcibly();
+            }
+        }
+    }
+
+    private void sleepBeforeRetry(long delayMillis, String toolName)
+            throws ExecutionFailedException {
+        try {
+            Thread.sleep(delayMillis);
+        } catch (InterruptedException e) {
+            // Restore interrupted state
+            Thread.currentThread().interrupt();
+            throw new ExecutionFailedException(
+                    "Command '" + toolName + " install' failed to finish", e);
+        }
+    }
+
+    /**
+     * Checks whether the output of a failed install command indicates a
+     * temporary network problem, meaning that simply running the command again
+     * is likely to succeed.
+     *
+     * @param toolOutput
+     *            the combined output of the install command
+     * @return {@code true} if the failure looks like a network problem
+     */
+    static boolean isNetworkFailure(String toolOutput) {
+        String output = toolOutput.toLowerCase(Locale.ENGLISH);
+        return NETWORK_FAILURE_MARKERS.stream().anyMatch(output::contains);
+    }
+
+    private void consumeProcessOutput(Process process,
+            Consumer<String> consumer)
+            throws IOException, InterruptedException {
+        try {
+            Pair<String, String> outputs = FrontendUtils
+                    .consumeProcessStreams(process).get();
+            outputs.getFirst().lines().forEach(consumer);
+        } catch (ExecutionException e) {
+            Throwable cause = e;
+            if (e.getCause() != null) {
+                cause = e.getCause();
+            }
+            if (cause instanceof IOException ioException) {
+                throw ioException;
+            }
+            throw new IOException(cause);
+        }
+    }
+
+    private File getPackageJsonForModule(String module) {
+        if (module.trim().equals("")) {
+            return null;
+        }
+        if (module.equals(".")) {
+            // The location of the project package.json
+            return new File(options.getNpmFolder(), "package.json");
+        }
+
+        return new File(new File(options.getNodeModulesFolder(), module),
+                "package.json");
+
+    }
+
+    private boolean containsPostinstallScript(JsonNode packageJson) {
+        return packageJson != null && packageJson.has("scripts")
+                && packageJson.get("scripts").has("postinstall");
+    }
+
+    private Process runNpmCommand(List<String> command, File workingDirectory)
+            throws IOException {
+        ProcessBuilder builder = FrontendUtils.createProcessBuilder(command);
+        builder.environment().put("ADBLOCK", "1");
+        builder.environment().put("NO_UPDATE_NOTIFIER", "1");
+        builder.directory(workingDirectory);
+        builder.redirectInput(ProcessBuilder.Redirect.PIPE);
+        builder.redirectErrorStream(true);
+
+        Process process = builder.start();
+
+        // This will allow to destroy the process which does IO regardless
+        // whether it's executed in the same thread or another (may be
+        // daemon) thread
+        Runtime.getRuntime()
+                .addShutdownHook(new Thread(process::destroyForcibly));
+
+        return process;
+    }
+
+    /*
+     * Create an .npmrc file the project directory if there is none.
+     */
+    private void createNpmRcFile() throws IOException {
+        File npmrcFile = new File(options.getNpmFolder().getAbsolutePath(),
+                ".npmrc");
+        boolean shouldWrite;
+        if (npmrcFile.exists()) {
+            List<String> lines = Files.readAllLines(npmrcFile.toPath(),
+                    StandardCharsets.UTF_8);
+            if (lines.stream().anyMatch(line -> line
+                    .contains("NOTICE: this is an auto-generated file"))) {
+                shouldWrite = true;
+            } else {
+                // Looks like this file was not generated by Vaadin
+                if (lines.stream()
+                        .noneMatch(line -> line.contains("shamefully-hoist"))) {
+                    String message = "Custom .npmrc file ({}) found in "
+                            + "project; pnpm package installation may "
+                            + "require passing the --shamefully-hoist flag";
+                    packageUpdater.log().info(message, npmrcFile);
+                }
+                shouldWrite = false;
+            }
+        } else {
+            shouldWrite = true;
+        }
+        if (shouldWrite) {
+            try (InputStream content = TaskRunNpmInstall.class
+                    .getResourceAsStream("/npmrc")) {
+                if (content == null) {
+                    throw new IOException(
+                            "Couldn't find template npmrc in the classpath");
+                }
+                Files.copy(content, npmrcFile.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING);
+                packageUpdater.log().debug("Generated pnpm configuration: '{}'",
+                        npmrcFile);
+            }
+        }
+    }
+
+    private void cleanUp() throws ExecutionFailedException {
+        verifyPackageLockAndClean();
+
+        if (!options.getNodeModulesFolder().exists()) {
+            return;
+        }
+
+        if (options.isCiBuild()) {
+            deleteNodeModules(options.getNodeModulesFolder());
+        } else {
+            File modulesYaml = new File(options.getNodeModulesFolder(),
+                    MODULES_YAML);
+            boolean hasModulesYaml = modulesYaml.exists()
+                    && modulesYaml.isFile();
+            if (!options.isEnablePnpm() && hasModulesYaml) {
+                deleteNodeModules(options.getNodeModulesFolder());
+            } else if (options.isEnablePnpm() && !hasModulesYaml) {
+                // presence of .staging dir with a "pnpm-*" folder means that
+                // pnpm download is in progress, don't remove anything in this
+                // case
+                File staging = new File(options.getNodeModulesFolder(),
+                        ".staging");
+                if (!staging.isDirectory() || staging.listFiles(
+                        (dir, name) -> name.startsWith("pnpm-")).length == 0) {
+                    deleteNodeModules(options.getNodeModulesFolder());
+                }
+            }
+        }
+    }
+
+    /**
+     * Check the lockfile lockversion to see if it is compatible with the used
+     * npm version. If the lockfile is too old delete it.
+     * 
+     * @since 25.0
+     */
+    protected void verifyPackageLockAndClean() {
+        File packageLockFile = packageUpdater.getPackageLockFile();
+        if (!options.isEnablePnpm() && packageLockFile.exists()) {
+            boolean removeLockfile = false;
+            try (BufferedReader br = new BufferedReader(
+                    new FileReader(packageLockFile))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    if (line.contains("\"lockfileVersion\"")) {
+                        int lockfileVersion = getLockfileVersion(line);
+                        removeLockfile = lockfileVersion != 3;
+                        break;
+                    }
+                }
+            } catch (IOException e) {
+                // NO-OP
+                packageUpdater.log()
+                        .debug("Failed to read the package-lock.json file.", e);
+            }
+            if (removeLockfile) {
+                packageUpdater.log().info(
+                        "Removing package-lock.json as it has the wrong lockfileVersion.");
+                try {
+                    FileIOUtils.delete(packageLockFile);
+                } catch (IOException e) {
+                    // NO-OP
+                    packageUpdater.log().warn(
+                            "Exception handling the package-lock.json file.",
+                            e);
+                }
+            }
+        }
+    }
+
+    private static int getLockfileVersion(String line) {
+        Matcher matcher = Pattern.compile("\"lockfileVersion\"\\s*:\\s*(\\d+)")
+                .matcher(line);
+        if (matcher.find()) {
+            return Integer.parseInt(matcher.group(1));
+        }
+        return -1;
+    }
+
+    private void deleteNodeModules(File nodeModulesFolder)
+            throws ExecutionFailedException {
+        try {
+            FrontendUtils.deleteNodeModules(nodeModulesFolder);
+        } catch (IOException exception) {
+            Logger log = packageUpdater.log();
+            log.debug("Exception removing node_modules", exception);
+            log.error("Failed to remove '"
+                    + options.getNodeModulesFolder().getAbsolutePath()
+                    + "'. Please remove it manually.");
+            throw new ExecutionFailedException(
+                    "Exception removing node_modules. Please remove it manually.");
+        }
+    }
+}

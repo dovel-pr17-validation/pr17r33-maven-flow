@@ -1,0 +1,308 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.dau;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+import java.util.HashMap;
+import java.util.Map;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.JsonNodeType;
+
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.server.Constants;
+import com.vaadin.flow.server.HandlerHelper;
+import com.vaadin.flow.server.SystemMessagesInfo;
+import com.vaadin.flow.server.VaadinContext;
+import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.flow.server.VaadinResponse;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.server.VaadinServiceDauTest;
+import com.vaadin.flow.server.VaadinServletService;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.flow.shared.ApplicationConstants;
+import com.vaadin.pro.licensechecker.dau.DauIntegration;
+import com.vaadin.pro.licensechecker.dau.EnforcementException;
+import com.vaadin.tests.util.MockDeploymentConfiguration;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.isNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class DAUUtilsTest {
+
+    private String subscriptionKey;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        subscriptionKey = System.getProperty("vaadin.subscriptionKey");
+        System.setProperty("vaadin.subscriptionKey", "sub-1234");
+    }
+
+    @AfterEach
+    void tearDown() throws Exception {
+        if (subscriptionKey != null) {
+            System.setProperty("vaadin.subscriptionKey", subscriptionKey);
+        } else {
+            System.clearProperty("vaadin.subscriptionKey");
+        }
+    }
+
+    @Test
+    void trackUser_uidlRequest_deferTracking() {
+        VaadinRequest request = mock(VaadinRequest.class);
+        when(request.getParameter(ApplicationConstants.REQUEST_TYPE_PARAMETER))
+                .thenReturn(HandlerHelper.RequestType.UIDL.getIdentifier());
+        Map<String, Object> attributes = new HashMap<>();
+        doAnswer(i -> attributes.put(i.getArgument(0), i.getArgument(1)))
+                .when(request).setAttribute(anyString(), any());
+        when(request.getAttribute(anyString()))
+                .thenAnswer(i -> attributes.get(i.<String> getArgument(0)));
+
+        try (MockedStatic<DauIntegration> dauIntegration = mockStatic(
+                DauIntegration.class)) {
+            dauIntegration
+                    .when(() -> DauIntegration.trackUser("trackingHash", null))
+                    .thenThrow(new EnforcementException("STOP"));
+
+            FlowDauIntegration.trackUser(request, "trackingHash", null);
+            dauIntegration.verifyNoInteractions();
+
+            assertThrows(DauEnforcementException.class, () -> FlowDauIntegration
+                    .applyEnforcement(request, unused -> true));
+            dauIntegration.verify(
+                    () -> DauIntegration.trackUser("trackingHash", null));
+        } finally {
+            VaadinSession.setCurrent(null);
+        }
+    }
+
+    @Test
+    void trackUser_notUidlRequest_track() {
+        VaadinRequest request = mock(VaadinRequest.class);
+        when(request.getParameter(ApplicationConstants.REQUEST_TYPE_PARAMETER))
+                .thenReturn(HandlerHelper.RequestType.INIT.getIdentifier());
+        Map<String, Object> attributes = new HashMap<>();
+        doAnswer(i -> attributes.put(i.getArgument(0), i.getArgument(1)))
+                .when(request).setAttribute(anyString(), any());
+        when(request.getAttribute(anyString()))
+                .thenAnswer(i -> attributes.get(i.<String> getArgument(0)));
+
+        try (MockedStatic<DauIntegration> dauIntegration = mockStatic(
+                DauIntegration.class)) {
+            dauIntegration
+                    .when(() -> DauIntegration.trackUser("trackingHash", null))
+                    .thenThrow(new EnforcementException("STOP"));
+
+            FlowDauIntegration.trackUser(request, "trackingHash", null);
+            dauIntegration.verify(
+                    () -> DauIntegration.trackUser("trackingHash", null));
+
+            assertThrows(DauEnforcementException.class, () -> FlowDauIntegration
+                    .applyEnforcement(request, unused -> true));
+
+        } finally {
+            VaadinSession.setCurrent(null);
+        }
+    }
+
+    @Test
+    void jsonEnforcementResponse_noDauCustomizer_defaultMessages() {
+        try (MockedStatic<DauIntegration> dauIntegrationMock = mockStatic(
+                DauIntegration.class)) {
+            VaadinService service = VaadinServiceDauTest
+                    .vaadinServiceWithDau(null);
+            VaadinRequest request = mock(VaadinRequest.class);
+            when(request.getService()).thenReturn(service);
+            String response = DAUUtils.jsonEnforcementResponse(request,
+                    new DauEnforcementException(
+                            new EnforcementException("STOP")));
+
+            JsonNode json = JacksonUtils.readTree(response).get("meta")
+                    .get("appError");
+
+            EnforcementNotificationMessages expectedMessages = EnforcementNotificationMessages.DEFAULT;
+            assertJsonErrorProperty("caption", expectedMessages.caption(),
+                    json);
+            assertJsonErrorProperty("message", expectedMessages.message(),
+                    json);
+            assertJsonErrorProperty("details", expectedMessages.details(),
+                    json);
+            assertJsonErrorProperty("url", expectedMessages.url(), json);
+        }
+    }
+
+    @Test
+    void jsonEnforcementResponse_customMessages() {
+        try (MockedStatic<DauIntegration> dauIntegrationMock = mockStatic(
+                DauIntegration.class)) {
+            EnforcementNotificationMessages expectedMessages = new EnforcementNotificationMessages(
+                    "caption", "message", "details", "url");
+            DAUCustomizer customizer = new DAUCustomizer() {
+                @Override
+                public EnforcementNotificationMessages getEnforcementNotificationMessages(
+                        SystemMessagesInfo systemMessagesInfo) {
+                    return expectedMessages;
+                }
+            };
+            VaadinService service = VaadinServiceDauTest
+                    .vaadinServiceWithDau(customizer);
+            VaadinRequest request = mock(VaadinRequest.class);
+            when(request.getService()).thenReturn(service);
+
+            String response = DAUUtils.jsonEnforcementResponse(request,
+                    new DauEnforcementException(
+                            new EnforcementException("STOP")));
+            JsonNode json = JacksonUtils.readTree(response).get("meta")
+                    .get("appError");
+
+            assertJsonErrorProperty("caption", expectedMessages.caption(),
+                    json);
+            assertJsonErrorProperty("message", expectedMessages.message(),
+                    json);
+            assertJsonErrorProperty("details", expectedMessages.details(),
+                    json);
+            assertJsonErrorProperty("url", expectedMessages.url(), json);
+        }
+    }
+
+    @Test
+    void trackDAU_trackingIntegratedWithRequest_noEnforcement() {
+        MocksForTrackDAU mocks = new MocksForTrackDAU();
+        VaadinService service = mocks.service;
+        HttpServletRequest request = mocks.request;
+        HttpServletResponse response = mocks.response;
+
+        try (MockedStatic<FlowDauIntegration> flowDauIntegration = mockStatic(
+                FlowDauIntegration.class)) {
+
+            DAUUtils.EnforcementResult result = DAUUtils.trackDAU(service,
+                    request, response);
+
+            mocks.assertNoEnforcement(result);
+            flowDauIntegration.verify(() -> FlowDauIntegration
+                    .applyEnforcement(any(VaadinRequest.class), any()));
+
+            result.endRequestAction().run();
+
+            verify(service).requestEnd(any(VaadinRequest.class), isNull(),
+                    isNull());
+        }
+    }
+
+    @Test
+    void trackDAU_trackingIntegratedWithRequest_enforcement() {
+        MocksForTrackDAU mocks = new MocksForTrackDAU();
+        VaadinService service = mocks.service;
+        HttpServletRequest request = mocks.request;
+        HttpServletResponse response = mocks.response;
+
+        try (MockedStatic<FlowDauIntegration> flowDauIntegration = mockStatic(
+                FlowDauIntegration.class)) {
+            flowDauIntegration
+                    .when(() -> FlowDauIntegration
+                            .applyEnforcement(any(VaadinRequest.class), any()))
+                    .thenThrow(new DauEnforcementException(
+                            new EnforcementException("STOP")));
+
+            DAUUtils.EnforcementResult result = DAUUtils.trackDAU(service,
+                    request, response);
+
+            mocks.assertEnforcement(result);
+            flowDauIntegration.verify(() -> FlowDauIntegration
+                    .applyEnforcement(any(VaadinRequest.class), any()));
+
+            result.endRequestAction().run();
+
+            verify(service).requestEnd(any(VaadinRequest.class), isNull(),
+                    isNull());
+        }
+    }
+
+    private void assertJsonErrorProperty(String expectedKey,
+            String expectedValue, JsonNode json) {
+        if (expectedValue != null) {
+            assertEquals(expectedValue, json.get(expectedKey).asString(),
+                    expectedKey);
+        } else {
+            assertEquals(JsonNodeType.NULL, json.get(expectedKey).getNodeType(),
+                    "expected key " + expectedKey + " to be null");
+        }
+
+    }
+
+    /**
+     * Mocks for
+     * {@link DAUUtils#trackDAU(VaadinService, HttpServletRequest, HttpServletResponse)}.
+     */
+    private static class MocksForTrackDAU {
+        private VaadinService service;
+        private HttpServletRequest request;
+        private HttpServletResponse response;
+
+        public MocksForTrackDAU() {
+            this.service = mock(VaadinServletService.class);
+            this.request = mock(HttpServletRequest.class);
+            this.response = mock(HttpServletResponse.class);
+
+            VaadinContext vaadinContext = mock(VaadinContext.class);
+            when(vaadinContext.getAttribute(any())).thenReturn(null);
+            MockDeploymentConfiguration config = new MockDeploymentConfiguration();
+            config.setProductionMode(true);
+            config.setApplicationOrSystemProperty(Constants.DAU_TOKEN, "true");
+            when(service.getDeploymentConfiguration()).thenReturn(config);
+            when(service.getContext()).thenReturn(vaadinContext);
+        }
+
+        private void assertNoEnforcement(DAUUtils.EnforcementResult result) {
+            assertNotNull(result);
+            assertNotNull(result.endRequestAction());
+            assertNull(result.messages());
+            assertNull(result.origin());
+            verify(service).requestStart(any(VaadinRequest.class),
+                    any(VaadinResponse.class));
+            verify(service, never()).requestEnd(any(VaadinRequest.class),
+                    isNull(), isNull());
+        }
+
+        private void assertEnforcement(DAUUtils.EnforcementResult result) {
+            assertNotNull(result);
+            assertNotNull(result.endRequestAction());
+            assertNotNull(result.messages());
+            assertNotNull(result.origin());
+            verify(service).requestStart(any(VaadinRequest.class),
+                    any(VaadinResponse.class));
+            verify(service, never()).requestEnd(any(VaadinRequest.class),
+                    isNull(), isNull());
+        }
+    }
+}

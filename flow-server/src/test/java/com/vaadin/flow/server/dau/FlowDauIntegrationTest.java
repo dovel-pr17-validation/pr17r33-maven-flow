@@ -1,0 +1,66 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.dau;
+
+import jakarta.servlet.http.Cookie;
+
+import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+
+import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.pro.licensechecker.dau.DauIntegration;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
+
+class FlowDauIntegrationTest {
+
+    @Test
+    void generateNewCookie_setsUpExpectedParameters() {
+        try (MockedStatic<DauIntegration> key = mockStatic(
+                DauIntegration.class)) {
+            key.when(DauIntegration::newTrackingHash).thenReturn("hash");
+            VaadinRequest request = mock(VaadinRequest.class);
+            when(request.isSecure()).thenReturn(true);
+            Cookie cookie = FlowDauIntegration.generateNewCookie(request);
+            String[] hashAndTime = cookie.getValue().split("\\$");
+            assertEquals("hash", hashAndTime[0]);
+            assertFalse(hashAndTime[1].isBlank());
+            assertEquals(DAUUtils.DAU_COOKIE_NAME, cookie.getName());
+            assertTrue(cookie.isHttpOnly());
+            assertTrue(cookie.getSecure());
+            assertEquals(DAUUtils.DAU_COOKIE_MAX_AGE_IN_SECONDS,
+                    cookie.getMaxAge());
+            assertEquals("/", cookie.getPath());
+        }
+    }
+
+    @Test
+    void generateNewCookie_notSecureRequest_cookieNotSecure() {
+        try (MockedStatic<DauIntegration> key = mockStatic(
+                DauIntegration.class)) {
+            key.when(DauIntegration::newTrackingHash).thenReturn("hash");
+            VaadinRequest request = mock(VaadinRequest.class);
+            when(request.isSecure()).thenReturn(false);
+            Cookie cookie = FlowDauIntegration.generateNewCookie(request);
+            assertFalse(cookie.getSecure());
+        }
+    }
+}

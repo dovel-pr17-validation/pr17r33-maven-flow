@@ -1,0 +1,146 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.internal.nodefeature;
+
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.List;
+import java.util.stream.Stream;
+
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.component.ClientCallable;
+import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.Tag;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.dom.DisabledUpdateMode;
+import com.vaadin.flow.internal.StateNode;
+import com.vaadin.flow.internal.StateTree;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+
+class ClientCallableHandlersTest {
+
+    @Tag("div")
+    static class NonTemplateComponentWithoutEventHandler extends Component {
+    }
+
+    @Tag("div")
+    static class NonTemplateComponentWithEventHandler extends Component {
+
+        @ClientCallable
+        public void publishedMethod1() {
+
+        }
+    }
+
+    @Tag("div")
+    static class ComponentWithEventHandlerEnabledWhenDisabled
+            extends Component {
+
+        @ClientCallable(DisabledUpdateMode.ALWAYS)
+        public void publishedMethod2() {
+            // Only the handler registration is tested, the method is never
+            // invoked
+        }
+    }
+
+    @Test
+    void attach_noFeature() {
+        StateTree tree = new StateTree(new UI().getInternals(),
+                ElementChildrenList.class);
+
+        StateNode stateNode = new StateNode(ClientCallableHandlers.class);
+
+        tree.getRootNode().getFeature(ElementChildrenList.class).add(stateNode);
+        assertEquals(0,
+                stateNode.getFeature(ClientCallableHandlers.class).size());
+    }
+
+    @Test
+    void attach_noComponent() {
+        StateTree tree = new StateTree(new UI().getInternals(),
+                ElementChildrenList.class);
+
+        StateNode stateNode = new StateNode(ComponentMapping.class,
+                ClientCallableHandlers.class);
+
+        tree.getRootNode().getFeature(ElementChildrenList.class).add(stateNode);
+        assertEquals(0,
+                stateNode.getFeature(ClientCallableHandlers.class).size());
+    }
+
+    @Test
+    void nonTemplateComponentWithEventHandler() {
+        UI ui = new UI();
+        NonTemplateComponentWithEventHandler component = new NonTemplateComponentWithEventHandler();
+        ui.add(component);
+
+        ClientCallableHandlers feature = component.getElement().getNode()
+                .getFeature(ClientCallableHandlers.class);
+        assertListFeature(feature, "publishedMethod1");
+    }
+
+    @Test
+    void secondComponentOfSameClass_getsCachedHandlerWithUpdateMode() {
+        // The handlers are cached per component class: the first component
+        // fills the cache and the second one is served from it. Both must get
+        // the handler and its update mode. ALWAYS is used since the default
+        // ONLY_WHEN_ENABLED would pass even if the mode was not cached.
+        UI ui = new UI();
+        ComponentWithEventHandlerEnabledWhenDisabled first = new ComponentWithEventHandlerEnabledWhenDisabled();
+        ComponentWithEventHandlerEnabledWhenDisabled second = new ComponentWithEventHandlerEnabledWhenDisabled();
+        ui.add(first, second);
+
+        for (Component component : List.of(first, second)) {
+            ClientCallableHandlers feature = component.getElement().getNode()
+                    .getFeature(ClientCallableHandlers.class);
+            assertListFeature(feature, "publishedMethod2");
+            assertEquals(DisabledUpdateMode.ALWAYS,
+                    feature.getDisabledUpdateMode("publishedMethod2"));
+        }
+    }
+
+    @Test
+    void nonTemplateComponentWithoutEventHandler() {
+        UI ui = new UI();
+        NonTemplateComponentWithoutEventHandler component = new NonTemplateComponentWithoutEventHandler();
+        ui.add(component);
+
+        assertFalse(component.getElement().getNode()
+                .getFeatureIfInitialized(ClientCallableHandlers.class)
+                .isPresent());
+    }
+
+    private void assertListFeature(SerializableNodeList<String> feature,
+            String... expected) {
+        assertEquals(expected.length, feature.size());
+        for (int i = 0; i < expected.length; i++) {
+            assertEquals(expected[i], feature.get(i));
+        }
+
+    }
+
+    private Stream<String> getDeclaredMethods(Class<?> clazz) {
+        // Code coverage jacoco adds nice unexpected private static method
+        // $jacocoInit which nobody needs
+        return Stream.of(clazz.getDeclaredMethods())
+                .filter(method -> !Modifier.isStatic(method.getModifiers())
+                        && !Modifier.isPrivate(method.getModifiers()))
+                .map(Method::getName);
+    }
+}

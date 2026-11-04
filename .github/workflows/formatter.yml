@@ -1,0 +1,85 @@
+name: Formatter
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    # Deliberately unfiltered by base branch so that PRs stacked on another
+    # feature branch are checked too, not only those targeting main. Spotless
+    # is only configured in 25.x, which is all this copy of the workflow can
+    # ever run against: PRs against an older maintenance branch use that
+    # branch's own copy of this file.
+  merge_group:
+
+# Cancel previous runs if a new one is triggered. The merge group head sha comes
+# first because the merge queue reuses one branch name for every merge group built
+# from the same PR and base commit, see the same note in validation.yml.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  _HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+# Runs code of the pull request, which may come from a fork, so it gets no
+# write access. The report on the pull request, the comment and the suggested
+# changes, is posted by formatter-suggestions.yml from the diff this uploads.
+permissions:
+  contents: read
+
+jobs:
+  formatter:
+    name: Verify Java code format
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ env._HEAD_SHA }}
+          fetch-depth: 0
+
+      - name: Set up JDK
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          java-version-file: .tool-versions
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Run formatter
+        id: formatter
+        run: |
+          echo "Running formatter..."
+          mvn -ntp -B -q spotless:apply -P benchmark 2>&1 | grep -v null || true
+
+          # Check for modified files
+          files=$(git status --porcelain | awk '{print $2}')
+          modified=$(echo "$files" | wc -w | xargs)
+
+          echo "modified=$modified" >> $GITHUB_OUTPUT
+          # Written even when empty, so that formatter-suggestions.yml can
+          # remove the comment of an earlier run once the format is fixed
+          git diff > formatter-diff.txt
+
+          if [ "$modified" -gt 0 ]; then
+            echo "Modified files:"
+            echo "$files"
+          fi
+
+      - name: Upload formatter diff
+        if: github.event_name == 'pull_request' || steps.formatter.outputs.modified != '0'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # Not formatter-diff, the artifact maintenance branches upload while
+          # posting their own comment, so that formatter-suggestions.yml only
+          # reports on runs of this copy of the workflow
+          name: formatter-suggestions-diff
+          path: formatter-diff.txt
+          retention-days: 30
+
+      - name: Fail if formatting issues exist
+        if: steps.formatter.outputs.modified != '0'
+        run: |
+          echo "::error::There are ${{ steps.formatter.outputs.modified }} files with format errors"
+          exit 1

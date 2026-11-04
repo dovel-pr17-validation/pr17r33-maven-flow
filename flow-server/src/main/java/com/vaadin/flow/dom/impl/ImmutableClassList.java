@@ -1,0 +1,95 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.dom.impl;
+
+import java.io.Serializable;
+import java.util.AbstractSet;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+
+import com.vaadin.flow.dom.ClassList;
+import com.vaadin.flow.dom.SignalBinding;
+import com.vaadin.flow.signals.Signal;
+
+/**
+ * Immutable class list implementation.
+ * <p>
+ * For internal use only. May be renamed or removed in a future release.
+ *
+ * @author Vaadin Ltd
+ * @since 1.0
+ */
+public class ImmutableClassList extends AbstractSet<String>
+        implements ClassList, Serializable {
+
+    private static final String CANT_MODIFY_MESSAGE = ImmutableEmptyStyle.CANT_MODIFY_MESSAGE;
+
+    private final Collection<String> values;
+
+    /**
+     * Creates a new immutable class list with the given values.
+     *
+     * @param values
+     *            the values of the class list
+     */
+    public ImmutableClassList(Collection<String> values) {
+        this.values = Collections.unmodifiableList(new ArrayList<>(values));
+    }
+
+    @Override
+    public boolean add(String e) {
+        throw new UnsupportedOperationException(CANT_MODIFY_MESSAGE);
+    }
+
+    @Override
+    public Iterator<String> iterator() {
+        return values.iterator();
+    }
+
+    @Override
+    public int size() {
+        return values.size();
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * Text nodes do not support binding a {@link Signal} to a stylesheet class,
+     * because they do not support styling in general.
+     * 
+     * @since 25.0
+     */
+    @Override
+    public SignalBinding<Boolean> bind(String name, Signal<Boolean> signal) {
+        throw new UnsupportedOperationException(CANT_MODIFY_MESSAGE);
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * Text nodes do not support binding a {@link Signal} to stylesheet classes,
+     * because they do not support styling in general.
+     * 
+     * @since 25.1
+     */
+    @Override
+    public SignalBinding<List<String>> bind(Signal<List<String>> names) {
+        throw new UnsupportedOperationException(CANT_MODIFY_MESSAGE);
+    }
+}

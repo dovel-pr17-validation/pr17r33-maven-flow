@@ -1,0 +1,88 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.spring;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.SpringApplication;
+import org.springframework.core.env.ConfigurableEnvironment;
+
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class SpringDevToolsPortHandlerTest {
+
+    private SpringDevToolsPortHandler handler;
+    private ConfigurableEnvironment environment;
+    private SpringApplication application;
+
+    @BeforeEach
+    void setUp() {
+        handler = new SpringDevToolsPortHandler();
+        environment = mock(ConfigurableEnvironment.class);
+        application = mock(SpringApplication.class);
+    }
+
+    @Test
+    void liveReloadEnabled_portIsAssigned() {
+        // Arrange: livereload explicitly enabled, no port set
+        when(environment.getProperty("spring.devtools.livereload.enabled",
+                Boolean.class, false)).thenReturn(true);
+        when(environment.getProperty("spring.devtools.livereload.port"))
+                .thenReturn(null);
+
+        // Act
+        handler.postProcessEnvironment(environment, application);
+
+        // Assert: port should be set via System.setProperty
+        String portProperty = System
+                .getProperty("spring.devtools.livereload.port");
+        assertNotNull(portProperty,
+                "Port should be set when livereload is enabled");
+
+        // Verify it's a valid port number
+        int port = Integer.parseInt(portProperty);
+        assertTrue(port > 0, "Port should be positive");
+        assertTrue(port <= 65535, "Port should be in valid range");
+
+        // Clean up
+        System.clearProperty("spring.devtools.livereload.port");
+    }
+
+    @Test
+    void liveReloadDisabled_portIsNotAssigned() {
+        // Arrange: livereload explicitly disabled, no port set
+        when(environment.getProperty("spring.devtools.livereload.enabled",
+                Boolean.class, false)).thenReturn(false);
+        when(environment.getProperty("spring.devtools.livereload.port"))
+                .thenReturn(null);
+
+        // Clear any previously set system property
+        System.clearProperty("spring.devtools.livereload.port");
+
+        // Act
+        handler.postProcessEnvironment(environment, application);
+
+        // Assert: port should NOT be set
+        String portProperty = System
+                .getProperty("spring.devtools.livereload.port");
+        assertNull(portProperty,
+                "Port should not be set when livereload is disabled");
+    }
+}

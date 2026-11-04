@@ -1,0 +1,95 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.internal.hilla;
+
+import jakarta.servlet.http.HttpServletRequest;
+
+import java.io.Serializable;
+
+/**
+ * A container for utility methods related with Hilla endpoints.
+ * <p>
+ * For internal use only. May be renamed or removed in a future release.
+ *
+ * @author Vaadin Ltd
+ * @since 23.2
+ */
+public interface EndpointRequestUtil extends Serializable {
+
+    String HILLA_ENDPOINT_CLASS = "com.vaadin.hilla.EndpointController";
+
+    /**
+     * Checks if the request is for an endpoint.
+     * <p>
+     * Note even if this method returns <code>true</code>, there is no guarantee
+     * that an endpoint method will actually be called, e.g. access might be
+     * denied.
+     *
+     * @param request
+     *            the HTTP request
+     * @return <code>true</code> if the request is for an endpoint,
+     *         <code>false</code> otherwise
+     */
+    boolean isEndpointRequest(HttpServletRequest request);
+
+    /**
+     * Checks if the given request goes to an anonymous (public) endpoint.
+     *
+     * @param request
+     *            the HTTP request to check
+     * @return <code>true</code> if the request goes to an anonymous endpoint,
+     *         <code>false</code> otherwise
+     */
+    boolean isAnonymousEndpoint(HttpServletRequest request);
+
+    /**
+     * Checks if Hilla is available.
+     * <p>
+     * The result is computed once on first access and cached, since the
+     * availability of the Hilla endpoint class cannot change during the
+     * lifetime of the classloader that loaded this interface.
+     *
+     * @return true if Hilla is available, false otherwise
+     * @since 24.0
+     */
+    static boolean isHillaAvailable() {
+        return HillaAvailability.AVAILABLE;
+    }
+
+    /**
+     * Holder for the lazily-computed, cached Hilla availability flag.
+     * <p>
+     * Using a nested class defers the {@link Class#forName(String)} lookup
+     * until {@link #isHillaAvailable()} is first called and relies on the JVM
+     * class-initialization guarantees for thread safety.
+     */
+    class HillaAvailability {
+        private static final boolean AVAILABLE = computeAvailable();
+
+        private HillaAvailability() {
+        }
+
+        private static boolean computeAvailable() {
+            try {
+                Class.forName(HILLA_ENDPOINT_CLASS);
+                return true;
+            } catch (ClassNotFoundException e) {
+                return false;
+            }
+        }
+    }
+
+}

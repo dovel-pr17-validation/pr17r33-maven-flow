@@ -1,0 +1,149 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.spring.security;
+
+import jakarta.servlet.http.HttpSession;
+
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
+
+import com.vaadin.flow.internal.CurrentInstance;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.flow.server.WrappedHttpSession;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class VaadinAwareSecurityContextHolderStrategyTest {
+
+    private VaadinAwareSecurityContextHolderStrategy vaadinAwareSecurityContextHolderStrategy;
+
+    @BeforeEach
+    void setup() {
+        vaadinAwareSecurityContextHolderStrategy = new VaadinAwareSecurityContextHolderStrategy();
+        // The thread specific context is shared by all instances, so it has to
+        // be cleared between tests
+        vaadinAwareSecurityContextHolderStrategy.clearContext();
+        CurrentInstance.clearAll();
+    }
+
+    @AfterEach
+    void teardown() {
+        vaadinAwareSecurityContextHolderStrategy.clearContext();
+        CurrentInstance.clearAll();
+    }
+
+    @Test
+    void currentSessionOverrides() {
+        VaadinSession vaadinSession = mock(VaadinSession.class);
+        HttpSession httpSession = mock(HttpSession.class);
+        when(vaadinSession.getSession())
+                .thenReturn(new WrappedHttpSession(httpSession));
+        SecurityContext securityContext = mock(SecurityContext.class);
+        when(httpSession.getAttribute(
+                HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY))
+                .thenReturn(securityContext);
+        VaadinSession.setCurrent(vaadinSession);
+
+        vaadinAwareSecurityContextHolderStrategy
+                .setContext(mock(SecurityContext.class));
+        assertEquals(securityContext,
+                vaadinAwareSecurityContextHolderStrategy.getContext());
+    }
+
+    @Test
+    void detachedSessionWorks() {
+        VaadinSession vaadinSession = mock(VaadinSession.class);
+        when(vaadinSession.getSession()).thenReturn(null);
+        VaadinSession.setCurrent(vaadinSession);
+
+        SecurityContext explicit = mock(SecurityContext.class);
+        vaadinAwareSecurityContextHolderStrategy.setContext(explicit);
+        assertEquals(explicit,
+                vaadinAwareSecurityContextHolderStrategy.getContext());
+    }
+
+    @Test
+    void explicitUsedWhenNoSessionAvailable() {
+        SecurityContext explicit = mock(SecurityContext.class);
+        vaadinAwareSecurityContextHolderStrategy.setContext(explicit);
+        assertEquals(explicit,
+                vaadinAwareSecurityContextHolderStrategy.getContext());
+    }
+
+    @Test
+    void separateInstances_shareThreadSecurityContext() {
+        VaadinAwareSecurityContextHolderStrategy other = new VaadinAwareSecurityContextHolderStrategy();
+
+        SecurityContext explicit = mock(SecurityContext.class);
+        vaadinAwareSecurityContextHolderStrategy.setContext(explicit);
+        assertEquals(explicit, other.getContext(),
+                "Instance should see the context set on another instance");
+
+        other.clearContext();
+        assertNotEquals(explicit,
+                vaadinAwareSecurityContextHolderStrategy.getContext(),
+                "Clearing on one instance should clear for all instances");
+    }
+
+    @Test
+    void separateThreads_doNotShareThreadSecurityContext()
+            throws InterruptedException {
+        SecurityContext main = mock(SecurityContext.class);
+        vaadinAwareSecurityContextHolderStrategy.setContext(main);
+
+        SecurityContext onOtherThread = mock(SecurityContext.class);
+        AtomicReference<SecurityContext> seenOnOtherThread = new AtomicReference<>();
+        Thread thread = new Thread(() -> {
+            seenOnOtherThread
+                    .set(vaadinAwareSecurityContextHolderStrategy.getContext());
+            vaadinAwareSecurityContextHolderStrategy.setContext(onOtherThread);
+        });
+        thread.start();
+        thread.join();
+
+        assertNotEquals(main, seenOnOtherThread.get(),
+                "Another thread should not see the context of this thread");
+        assertEquals(main,
+                vaadinAwareSecurityContextHolderStrategy.getContext(),
+                "Context set on another thread should not leak into this thread");
+    }
+
+    @Test
+    void getContext_invalidateSession_getsThreadSecurityContext() {
+        SecurityContext explicit = mock(SecurityContext.class);
+        vaadinAwareSecurityContextHolderStrategy.setContext(explicit);
+
+        VaadinSession vaadinSession = mock(VaadinSession.class);
+        HttpSession httpSession = mock(HttpSession.class);
+        when(vaadinSession.getSession())
+                .thenReturn(new WrappedHttpSession(httpSession));
+        doThrow(IllegalStateException.class).when(httpSession).getAttribute(
+                HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY);
+        VaadinSession.setCurrent(vaadinSession);
+
+        assertEquals(explicit,
+                vaadinAwareSecurityContextHolderStrategy.getContext());
+    }
+}

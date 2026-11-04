@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "sourceMap": true,
+    "inlineSources": true,
+    "module": "esNext",
+    "target": "es2023",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noImplicitAny": true,
+    "noImplicitThis": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "experimentalDecorators": true,
+    "rootDir": "src/main/frontend",
+    "paths": {
+      // Flow.ts imports the client through this bare specifier, which an
+      // application's generated Vite config aliases to the copy of
+      // FlowClient.js in frontend/generated/jar-resources.
+      "vaadin-flow-client": ["./src/main/frontend/FlowClient"]
+    },
+    "outDir": "target/classes/META-INF/frontend",
+    "declaration": true,
+    "skipLibCheck": true
+  },
+  "include": [
+    "src/main/frontend/**/*.ts"
+  ],
+  "exclude": []
+}

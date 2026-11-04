@@ -1,0 +1,1107 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.frontend;
+
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.io.FileUtils;
+import org.hamcrest.core.StringContains;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.mockito.MockedStatic;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.experimental.FeatureFlags;
+import com.vaadin.flow.internal.FrontendUtils;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.internal.hilla.EndpointRequestUtil;
+import com.vaadin.flow.server.Constants;
+import com.vaadin.flow.server.frontend.scanner.ClassFinder;
+import com.vaadin.flow.server.frontend.scanner.FrontendDependencies;
+import com.vaadin.tests.util.MockOptions;
+
+import static com.vaadin.flow.server.Constants.PACKAGE_JSON;
+import static com.vaadin.flow.server.Constants.TARGET;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+class NodeUpdaterTest {
+
+    private static final String POLYMER_VERSION = "3.5.2";
+
+    @TempDir
+    File temporaryFolder;
+
+    private NodeUpdater nodeUpdater;
+
+    private File npmFolder;
+
+    private ClassFinder finder;
+
+    private Options options;
+
+    @BeforeEach
+    void setUp() throws IOException {
+        npmFolder = Files.createTempDirectory(temporaryFolder.toPath(), "tmp")
+                .toFile();
+        FeatureFlags featureFlags = mock(FeatureFlags.class);
+        finder = spy(new ClassFinder.DefaultClassFinder(
+                this.getClass().getClassLoader()));
+        options = new MockOptions(finder, npmFolder).withBuildDirectory(TARGET)
+                .withFeatureFlags(featureFlags).withFrontendDependenciesScanner(
+                        mock(FrontendDependencies.class));
+
+        nodeUpdater = new NodeUpdater(options) {
+
+            @Override
+            public void execute() {
+                // NO-OP
+            }
+
+        };
+    }
+
+    @Test
+    void getGeneratedModules_should_includeOnlyWebComponents()
+            throws IOException {
+        File frontend = Files
+                .createTempDirectory(temporaryFolder.toPath(), "tmp").toFile();
+        File generated = new File(frontend, FrontendUtils.GENERATED);
+        File flow = new File(generated, "flow");
+        File webComponents = new File(flow, "web-components");
+        File fileA = new File(webComponents, "a.js");
+        File fileB = new File(webComponents, "b.js");
+        File fileC = new File(generated, "c.js");
+        create(fileA);
+        create(fileB);
+        create(fileC);
+
+        Set<String> modules = NodeUpdater.getGeneratedModules(frontend);
+
+        assertEquals(Set.of("web-components/a.js", "web-components/b.js"),
+                modules);
+    }
+
+    private void create(File file) throws IOException {
+        file.getParentFile().mkdirs();
+        file.createNewFile();
+    }
+
+    @Test
+    void getDefaultDependencies_withPolymerTemplate_includesAllDependencies() {
+        fakePolymerTemplateInClasspath();
+
+        Map<String, String> defaultDeps = nodeUpdater.getDefaultDependencies();
+        Set<String> expectedDependencies = new HashSet<>();
+        expectedDependencies.add("@polymer/polymer");
+        expectedDependencies.add("@vaadin/common-frontend");
+        expectedDependencies.add("lit");
+        expectedDependencies.add("react");
+        expectedDependencies.add("react-dom");
+        expectedDependencies.add("react-router");
+
+        Set<String> actualDependendencies = defaultDeps.keySet();
+
+        assertEquals(expectedDependencies, actualDependendencies);
+    }
+
+    @Test
+    void getDefaultDependencies_includesAllDependencies() {
+        Map<String, String> defaultDeps = nodeUpdater.getDefaultDependencies();
+        Set<String> expectedDependencies = new HashSet<>();
+        expectedDependencies.add("@vaadin/common-frontend");
+        expectedDependencies.add("lit");
+        expectedDependencies.add("react");
+        expectedDependencies.add("react-dom");
+        expectedDependencies.add("react-router");
+
+        Set<String> actualDependendencies = defaultDeps.keySet();
+
+        assertEquals(expectedDependencies, actualDependendencies);
+    }
+
+    @Test
+    void getDefaultDevDependencies_includesAllDependencies_whenUsingVite() {
+        Map<String, String> defaultDeps = nodeUpdater
+                .getDefaultDevDependencies();
+        Set<String> expectedDependencies = getCommonDevDeps();
+
+        // Vite
+        expectedDependencies.add("vite");
+        expectedDependencies.add("@vitejs/plugin-react");
+        expectedDependencies.add("rollup-plugin-brotli");
+        expectedDependencies.add("rollup-plugin-visualizer");
+        expectedDependencies.add("vite-plugin-checker");
+        // Note: workbox-build is now only included when PWA offline is enabled
+        expectedDependencies.add("transform-ast");
+        expectedDependencies.add("strip-css-comments");
+        expectedDependencies.add("@babel/core");
+        expectedDependencies.add("@babel/types");
+        expectedDependencies
+                .add("@babel/plugin-transform-react-jsx-development");
+        expectedDependencies.add("@rolldown/plugin-babel");
+        expectedDependencies.add("@types/react");
+        expectedDependencies.add("@types/react-dom");
+        expectedDependencies.add("@preact/signals-react-transform");
+        // the transform injects imports from the signals runtime into the
+        // application sources, so the runtime must be declared too
+        expectedDependencies.add("@preact/signals-react");
+        expectedDependencies.add("magic-string");
+        expectedDependencies.add("@types/node");
+
+        Set<String> actualDependendencies = defaultDeps.keySet();
+
+        assertEquals(expectedDependencies, actualDependendencies);
+    }
+
+    private Set<String> getCommonDevDeps() {
+        Set<String> expectedDependencies = new HashSet<>();
+        // Native TypeScript for Flow's checker and classic TypeScript for
+        // tooling that needs the compiler API.
+        expectedDependencies.add("@typescript/native");
+        expectedDependencies.add("typescript");
+        return expectedDependencies;
+    }
+
+    @Test
+    void updateMainDefaultDependencies_polymerVersionIsNull_useDefault() {
+        fakePolymerTemplateInClasspath();
+        ObjectNode object = JacksonUtils.createObjectNode();
+        nodeUpdater.addVaadinDefaultsToJson(object);
+        nodeUpdater.updateDefaultDependencies(object);
+
+        String version = getPolymerVersion(object);
+        assertEquals(POLYMER_VERSION, version);
+    }
+
+    @Test
+    void updateMainDefaultDependencies_polymerVersionIsProvidedByUser_useProvided() {
+        ObjectNode object = JacksonUtils.createObjectNode();
+        ObjectNode dependencies = JacksonUtils.createObjectNode();
+        dependencies.put("@polymer/polymer", "4.0.0");
+        object.set(NodeUpdater.DEPENDENCIES, dependencies);
+        nodeUpdater.addVaadinDefaultsToJson(object);
+
+        nodeUpdater.updateDefaultDependencies(object);
+
+        String version = getPolymerVersion(object);
+        assertEquals("4.0.0", version);
+    }
+
+    @Test
+    void updateMainDefaultDependencies_vaadinIsProvidedByUser_useDefault() {
+        fakePolymerTemplateInClasspath();
+        ObjectNode object = JacksonUtils.createObjectNode();
+
+        ObjectNode vaadin = JacksonUtils.createObjectNode();
+        vaadin.put("disableUsageStatistics", true);
+        object.set(NodeUpdater.VAADIN_DEP_KEY, vaadin);
+
+        nodeUpdater.addVaadinDefaultsToJson(object);
+        nodeUpdater.updateDefaultDependencies(object);
+
+        assertEquals(POLYMER_VERSION, getPolymerVersion(object));
+        assertEquals(POLYMER_VERSION,
+                getPolymerVersion(object.get(NodeUpdater.VAADIN_DEP_KEY)));
+    }
+
+    @Test
+    void updateDefaultDependencies_olderVersionsAreUpdated()
+            throws IOException {
+        ObjectNode packageJson = nodeUpdater.getPackageJson();
+        packageJson.set(NodeUpdater.DEPENDENCIES,
+                JacksonUtils.createObjectNode());
+        packageJson.set(NodeUpdater.DEV_DEPENDENCIES,
+                JacksonUtils.createObjectNode());
+        ((ObjectNode) packageJson.get(NodeUpdater.DEV_DEPENDENCIES)).put("vite",
+                "1.0.0");
+        nodeUpdater.updateDefaultDependencies(packageJson);
+
+        assertNotEquals("1.0.0", packageJson.get(NodeUpdater.DEV_DEPENDENCIES)
+                .get("vite").stringValue());
+    }
+
+    @Test // #6907 test when user has set newer versions
+    void updateDefaultDependencies_newerVersionsAreNotChanged()
+            throws IOException {
+        ObjectNode packageJson = nodeUpdater.getPackageJson();
+        packageJson.set(NodeUpdater.DEPENDENCIES,
+                JacksonUtils.createObjectNode());
+        packageJson.set(NodeUpdater.DEV_DEPENDENCIES,
+                JacksonUtils.createObjectNode());
+        ((ObjectNode) packageJson.get(NodeUpdater.DEV_DEPENDENCIES)).put("vite",
+                "78.2.3");
+        nodeUpdater.updateDefaultDependencies(packageJson);
+
+        assertEquals("78.2.3", packageJson.get(NodeUpdater.DEV_DEPENDENCIES)
+                .get("vite").asString());
+    }
+
+    @Test
+    void shouldUpdateExistingLocalFormPackageToNpmPackage() {
+        ObjectNode packageJson = JacksonUtils.createObjectNode();
+        ObjectNode dependencies = JacksonUtils.createObjectNode();
+        packageJson.set(NodeUpdater.DEPENDENCIES, dependencies);
+        ObjectNode vaadinDependencies = JacksonUtils.createObjectNode();
+        vaadinDependencies.set(NodeUpdater.DEPENDENCIES,
+                JacksonUtils.createObjectNode());
+        packageJson.set(NodeUpdater.VAADIN_DEP_KEY, vaadinDependencies);
+
+        String formPackage = "@vaadin/form";
+        String legecyVersion = "./target/flow-frontend/form";
+        String newVersion = "22.0.0";
+
+        dependencies.put(formPackage, legecyVersion);
+
+        nodeUpdater.addDependency(packageJson, NodeUpdater.DEPENDENCIES,
+                formPackage, newVersion);
+
+        assertEquals(newVersion, packageJson.get(NodeUpdater.DEPENDENCIES)
+                .get(formPackage).asString());
+    }
+
+    @Test
+    void shouldSkipUpdatingNonParsableVersions() {
+        ObjectNode packageJson = JacksonUtils.createObjectNode();
+        ObjectNode dependencies = JacksonUtils.createObjectNode();
+        packageJson.set(NodeUpdater.DEPENDENCIES, dependencies);
+        ObjectNode vaadinDependencies = JacksonUtils.createObjectNode();
+        vaadinDependencies.set(NodeUpdater.DEPENDENCIES,
+                JacksonUtils.createObjectNode());
+        packageJson.set(NodeUpdater.VAADIN_DEP_KEY, vaadinDependencies);
+
+        String formPackage = "@vaadin/form";
+        String existingVersion = "../../../some/local/path";
+        String newVersion = "2.0.0";
+
+        dependencies.put(formPackage, existingVersion);
+
+        nodeUpdater.addDependency(packageJson, NodeUpdater.DEPENDENCIES,
+                formPackage, newVersion);
+
+        assertEquals(existingVersion, packageJson.get(NodeUpdater.DEPENDENCIES)
+                .get(formPackage).textValue());
+    }
+
+    @Test
+    void canUpdateNonParseableVersions() {
+        ObjectNode packageJson = JacksonUtils.createObjectNode();
+        ObjectNode dependencies = JacksonUtils.createObjectNode();
+        packageJson.set(NodeUpdater.DEPENDENCIES, dependencies);
+        ObjectNode vaadinDependencies = JacksonUtils.createObjectNode();
+        vaadinDependencies.set(NodeUpdater.DEPENDENCIES,
+                JacksonUtils.createObjectNode());
+        packageJson.set(NodeUpdater.VAADIN_DEP_KEY, vaadinDependencies);
+
+        String pkg = "mypackage";
+        String existingVersion = "./some/path";
+
+        dependencies.put(pkg, existingVersion);
+
+        nodeUpdater.addDependency(packageJson, NodeUpdater.DEPENDENCIES, pkg,
+                existingVersion);
+
+        assertEquals(existingVersion,
+                packageJson.get(NodeUpdater.DEPENDENCIES).get(pkg).textValue());
+
+    }
+
+    @Test
+    void managedNpmAlias_isUpdatedAndRetainsTarget() throws IOException {
+        ObjectNode json = nodeUpdater.getPackageJson();
+        String oldVersion = "npm:@typescript/typescript6@6.0.2";
+        String newVersion = "npm:@typescript/typescript6@6.0.3";
+        nodeUpdater.addDependency(json, NodeUpdater.DEV_DEPENDENCIES,
+                "compiler", oldVersion);
+
+        assertEquals(1, nodeUpdater.addDependency(json,
+                NodeUpdater.DEV_DEPENDENCIES, "compiler", newVersion));
+        assertEquals(newVersion, json.get(NodeUpdater.DEV_DEPENDENCIES)
+                .get("compiler").asString());
+        assertEquals(0, nodeUpdater.addDependency(json,
+                NodeUpdater.DEV_DEPENDENCIES, "compiler", newVersion));
+    }
+
+    @Test
+    void managedNpmAlias_userChangesTarget_sameVersionIsPreserved()
+            throws IOException {
+        ObjectNode json = nodeUpdater.getPackageJson();
+        nodeUpdater.addDependency(json, NodeUpdater.DEV_DEPENDENCIES,
+                "compiler", "npm:@typescript/typescript6@6.0.2");
+        ((ObjectNode) json.get(NodeUpdater.DEV_DEPENDENCIES)).put("compiler",
+                "npm:custom-compiler@6.0.2");
+
+        nodeUpdater.addDependency(json, NodeUpdater.DEV_DEPENDENCIES,
+                "compiler", "npm:@typescript/typescript6@6.0.3");
+        assertEquals("npm:custom-compiler@6.0.2", json
+                .get(NodeUpdater.DEV_DEPENDENCIES).get("compiler").asString());
+    }
+
+    @Test
+    void getJsonFileContent_incorrectPackageJsonContent_throwsExceptionWithFileName()
+            throws IOException {
+        File brokenPackageJsonFile = new File(temporaryFolder,
+                "broken-package.json");
+        brokenPackageJsonFile.createNewFile();
+        FileUtils.writeStringToFile(brokenPackageJsonFile,
+                "{ some broken json ", UTF_8);
+
+        RuntimeException exception = assertThrows(RuntimeException.class,
+                () -> NodeUpdater.getJsonFileContent(brokenPackageJsonFile));
+
+        assertThat(exception.getMessage(),
+                StringContains.containsString("Cannot parse package file "));
+        assertThat(exception.getMessage(),
+                StringContains.containsString("broken-package.json"));
+    }
+
+    @Test
+    @Disabled("Can be removed if we agree on ignoring potential issues in [23 + webpack] -> [25] upgrades")
+    void removedAllOldAndExistingPlugins() throws IOException {
+        File packageJson = new File(npmFolder, "package.json");
+        FileWriter packageJsonWriter = new FileWriter(packageJson);
+        packageJsonWriter
+                .write("""
+                        {
+                          "devDependencies": {
+                            "@vaadin/some-old-plugin": "./target/plugins/some-old-plugin",
+                            "@vaadin/application-theme-plugin": "./target/plugins/application-theme-plugin"
+                          }
+                        }
+                        """);
+        packageJsonWriter.close();
+        ObjectNode actualDevDeps = (ObjectNode) nodeUpdater.getPackageJson()
+                .get(NodeUpdater.DEV_DEPENDENCIES);
+        assertFalse(actualDevDeps.has("@vaadin/some-old-plugin"));
+        assertFalse(actualDevDeps.has("@vaadin/application-theme-plugin"));
+    }
+
+    @Test
+    void generateVersionsJson_noVersions_noDevDeps_versionsGeneratedFromPackageJson()
+            throws IOException {
+        nodeUpdater.generateVersionsJson(JacksonUtils.createObjectNode());
+        assertEquals("{}", nodeUpdater.versionsJson.toString());
+    }
+
+    @Test
+    void generateVersionsJson_versionsGeneratedFromPackageJson_containsBothDepsAndDevDeps()
+            throws IOException {
+
+        File packageJson = new File(npmFolder, PACKAGE_JSON);
+        packageJson.createNewFile();
+
+        // Write package json file
+        // @formatter:off
+        FileUtils.write(packageJson,
+            """
+                {
+                  "vaadin": {
+                    "dependencies": {
+                      "lit": "2.0.0",
+                      "@vaadin/router": "1.7.5",
+                      "@polymer/polymer": "3.4.1"
+                    },
+                    "devDependencies": {
+                      "css-loader": "4.2.1",
+                      "file-loader": "6.1.0"
+                    }
+                  },
+                  "dependencies": {
+                    "lit": "2.0.0",
+                    "@vaadin/router": "1.7.5",
+                    "@polymer/polymer": "3.4.1"
+                  },
+                  "devDependencies": {
+                    "css-loader": "4.2.1",
+                    "file-loader": "6.1.0"
+                  }
+                }
+                """, StandardCharsets.UTF_8);
+        // @formatter:on
+
+        nodeUpdater.generateVersionsJson(JacksonUtils.readTree(FileUtils
+                .readFileToString(packageJson, StandardCharsets.UTF_8)));
+        assertEquals(
+                "{\"lit\":\"2.0.0\",\"@vaadin/router\":\"1.7.5\",\"@polymer/polymer\":\"3.4.1\"}",
+                nodeUpdater.versionsJson.toString());
+    }
+
+    @Test
+    void testGetPinnedNpmVersions_versionsFilesAreReadOnceForTheBuild()
+            throws IOException {
+        when(finder.getResources(Constants.PINNED_NPM_VERSIONS_FOLDER))
+                .thenReturn(List.of());
+
+        assertSame(options.getPinnedNpmVersions(),
+                nodeUpdater.getPinnedNpmVersions(),
+                "The updater should take the versions the build has read");
+        verify(finder, times(1))
+                .getResources(Constants.PINNED_NPM_VERSIONS_FOLDER);
+    }
+
+    @Test
+    void testGetPinnedNpmDependencies_noVersionsFileIsPresent_outputIsEmptyJson()
+            throws IOException {
+        Logger logger = spy(Logger.class);
+        try (MockedStatic<LoggerFactory> loggerFactoryMocked = mockStatic(
+                LoggerFactory.class)) {
+            loggerFactoryMocked
+                    .when(() -> LoggerFactory.getLogger(nodeUpdater.getClass()))
+                    .thenReturn(logger);
+
+            when(finder.getResources(Constants.PINNED_NPM_VERSIONS_FOLDER))
+                    .thenReturn(List.of());
+
+            ObjectNode pinnedVersions = nodeUpdater.getPinnedNpmDependencies();
+            assertEquals(0, JacksonUtils.getKeys(pinnedVersions).size());
+
+            verify(logger, times(1)).info(
+                    "Couldn't find any versions file in {} to pin npm dependency versions."
+                            + " Transitive dependencies won't be pinned for npm/pnpm/bun.",
+                    Constants.PINNED_NPM_VERSIONS_FOLDER);
+        }
+    }
+
+    @Test
+    void testGetPinnedNpmDependencies_oneVersionsFileIsPresent_outputContainsItsVersions()
+            throws IOException {
+        File coreVersionsFile = File.createTempFile("core-components-versions",
+                ".json",
+                Files.createTempDirectory(temporaryFolder.toPath(), "tmp")
+                        .toFile());
+        ObjectNode mockedCoreJson = getMockCoreVersionsJson();
+        assertTrue(mockedCoreJson.has("core"));
+        assertTrue(mockedCoreJson.get("core").has("button"));
+        assertFalse(mockedCoreJson.has("vaadin"));
+
+        FileUtils.write(coreVersionsFile, mockedCoreJson.toString(),
+                StandardCharsets.UTF_8);
+        when(finder.getResources(Constants.PINNED_NPM_VERSIONS_FOLDER))
+                .thenReturn(List
+                        .of(coreVersionsFile.getParentFile().toURI().toURL()));
+
+        ObjectNode pinnedVersions = nodeUpdater.getPinnedNpmDependencies();
+
+        assertTrue(pinnedVersions.has("@vaadin/button"));
+        assertFalse(pinnedVersions.has("@vaadin/grid-pro"));
+        assertFalse(pinnedVersions.has("@vaadin/vaadin-grid-pro"));
+    }
+
+    @Test
+    void testGetPinnedNpmDependencies_reactNotAvailable_noReactComponents()
+            throws IOException {
+        File coreVersionsFile = File.createTempFile("core-components-versions",
+                ".json",
+                Files.createTempDirectory(temporaryFolder.toPath(), "tmp")
+                        .toFile());
+        ObjectNode mockedCoreJson = getMockCoreVersionsJson();
+
+        ObjectNode reactComponents = JacksonUtils.createObjectNode();
+        ObjectNode reactData = JacksonUtils.createObjectNode();
+        reactData.put("jsVersion", "24.4.0-alpha13");
+        reactData.put("npmName", "@vaadin/react-components");
+
+        reactComponents.set("react-components", reactData);
+
+        mockedCoreJson.set("react", reactComponents);
+
+        assertTrue(mockedCoreJson.has("core"));
+        assertTrue(mockedCoreJson.get("core").has("button"));
+        assertFalse(mockedCoreJson.has("vaadin"));
+
+        FileUtils.write(coreVersionsFile, mockedCoreJson.toString(),
+                StandardCharsets.UTF_8);
+        when(finder.getResources(Constants.PINNED_NPM_VERSIONS_FOLDER))
+                .thenReturn(List
+                        .of(coreVersionsFile.getParentFile().toURI().toURL()));
+
+        ObjectNode pinnedVersions = nodeUpdater.getPinnedNpmDependencies();
+
+        assertTrue(pinnedVersions.has("@vaadin/button"));
+        assertFalse(pinnedVersions.has("react-components"));
+    }
+
+    @Test
+    void testGetPinnedNpmDependencies_reactAvailable_containsReactComponents()
+            throws IOException, ClassNotFoundException {
+        generateTestDataForReactComponents();
+
+        ObjectNode pinnedVersions = nodeUpdater.getPinnedNpmDependencies();
+
+        assertTrue(pinnedVersions.has("@vaadin/button"));
+        assertTrue(pinnedVersions.has("@vaadin/react-components"));
+        assertTrue(pinnedVersions.has("@vaadin/react-components-pro"));
+    }
+
+    @Test
+    void testGetPinnedNpmDependencies_reactAvailable_excludeWebComponents()
+            throws IOException, ClassNotFoundException {
+        options.withNpmExcludeWebComponents(true);
+        generateTestDataForReactComponents();
+
+        ObjectNode pinnedVersions = nodeUpdater.getPinnedNpmDependencies();
+
+        // @vaadin/button doesn't have 'mode' set, so it should be included
+        assertTrue(pinnedVersions.has("@vaadin/button"));
+        assertFalse(pinnedVersions.has("@vaadin/react-components"));
+        assertFalse(pinnedVersions.has("@vaadin/react-components-pro"));
+    }
+
+    @Test
+    void testGetPinnedNpmDependencies_reactDisabled_excludeWebComponents()
+            throws IOException, ClassNotFoundException {
+        options.withReact(false);
+        options.withNpmExcludeWebComponents(true);
+        generateTestDataForReactComponents();
+
+        ObjectNode pinnedVersions = nodeUpdater.getPinnedNpmDependencies();
+
+        // @vaadin/button doesn't have 'mode' set, so it should be included
+        assertTrue(pinnedVersions.has("@vaadin/button"));
+        assertFalse(pinnedVersions.has("@vaadin/react-components"));
+        assertFalse(pinnedVersions.has("@vaadin/react-components-pro"));
+    }
+
+    private void generateTestDataForReactComponents()
+            throws IOException, ClassNotFoundException {
+        File coreVersionsFile = File.createTempFile("core-components-versions",
+                ".json",
+                Files.createTempDirectory(temporaryFolder.toPath(), "tmp")
+                        .toFile());
+        File commercialVersionsFile = File.createTempFile(
+                "commercial-components-versions", ".json",
+                Files.createTempDirectory(temporaryFolder.toPath(), "tmp")
+                        .toFile());
+        ObjectNode mockedCoreJson = getMockCoreVersionsJson();
+
+        ObjectNode reactComponents = JacksonUtils.createObjectNode();
+        ObjectNode reactData = JacksonUtils.createObjectNode();
+        reactData.put("jsVersion", "24.4.0-alpha13");
+        reactData.put("npmName", "@vaadin/react-components");
+        reactData.put("mode", "react");
+
+        reactComponents.set("react-components", reactData);
+
+        mockedCoreJson.set("react", reactComponents);
+
+        assertTrue(mockedCoreJson.has("core"));
+        assertTrue(mockedCoreJson.get("core").has("button"));
+        assertFalse(mockedCoreJson.has("vaadin"));
+
+        ObjectNode mockedCommercialJson = getMockCommercialVersionsJson();
+
+        reactComponents = JacksonUtils.createObjectNode();
+        reactData = JacksonUtils.createObjectNode();
+        reactData.put("jsVersion", "24.4.0-alpha13");
+        reactData.put("npmName", "@vaadin/react-components-pro");
+        reactData.put("mode", "react");
+
+        reactComponents.set("react-components-pro", reactData);
+
+        mockedCommercialJson.set("react", reactComponents);
+
+        FileUtils.write(coreVersionsFile, mockedCoreJson.toString(),
+                StandardCharsets.UTF_8);
+        FileUtils.write(commercialVersionsFile, mockedCommercialJson.toString(),
+                StandardCharsets.UTF_8);
+        when(finder.getResources(Constants.PINNED_NPM_VERSIONS_FOLDER))
+                .thenReturn(List.of(
+                        coreVersionsFile.getParentFile().toURI().toURL(),
+                        commercialVersionsFile.getParentFile().toURI()
+                                .toURL()));
+        Class clazz = FeatureFlags.class; // actual class doesn't matter
+        doReturn(clazz).when(finder).loadClass(
+                "com.vaadin.flow.component.react.ReactAdapterComponent");
+    }
+
+    @Test
+    void testGetPinnedNpmDependencies_severalVersionsFilesArePresent_outputContainsTheVersionsOfEach()
+            throws IOException {
+        File coreVersionsFile = File.createTempFile("core-components-versions",
+                ".json",
+                Files.createTempDirectory(temporaryFolder.toPath(), "tmp")
+                        .toFile());
+        JsonNode mockedCoreJson = getMockCoreVersionsJson();
+        assertTrue(mockedCoreJson.has("core"));
+        assertTrue(mockedCoreJson.get("core").has("button"));
+        assertFalse(mockedCoreJson.has("vaadin"));
+
+        FileUtils.write(coreVersionsFile, mockedCoreJson.toString(),
+                StandardCharsets.UTF_8);
+
+        File commercialVersionsFile = File.createTempFile(
+                "commercial-components-versions", ".json",
+                Files.createTempDirectory(temporaryFolder.toPath(), "tmp")
+                        .toFile());
+        JsonNode mockedCommercialJson = getMockCommercialVersionsJson();
+        assertFalse(mockedCommercialJson.has("core"));
+        assertTrue(mockedCommercialJson.has("vaadin"));
+        assertTrue(mockedCommercialJson.get("vaadin").has("grid-pro"));
+        assertTrue(mockedCommercialJson.get("vaadin").has("vaadin-grid-pro"));
+
+        FileUtils.write(commercialVersionsFile, mockedCommercialJson.toString(),
+                StandardCharsets.UTF_8);
+        when(finder.getResources(Constants.PINNED_NPM_VERSIONS_FOLDER))
+                .thenReturn(List.of(
+                        coreVersionsFile.getParentFile().toURI().toURL(),
+                        commercialVersionsFile.getParentFile().toURI()
+                                .toURL()));
+
+        ObjectNode pinnedVersions = nodeUpdater.getPinnedNpmDependencies();
+
+        assertTrue(pinnedVersions.has("@vaadin/button"));
+        assertTrue(pinnedVersions.has("@vaadin/grid-pro"));
+        assertTrue(pinnedVersions.has("@vaadin/vaadin-grid-pro"));
+    }
+
+    @Test
+    void getDefaultDependencies_reactIsUsed_addsHillaReactComponents() {
+        boolean reactEnabled = options.isReactEnabled();
+        MockedStatic<FrontendUtils> mockFrontendUtils = mockStatic(
+                FrontendUtils.class);
+        MockedStatic<FrontendBuildUtils> mockFrontendBuildUtils = mockStatic(
+                FrontendBuildUtils.class);
+        try {
+            mockFrontendBuildUtils.when(() -> FrontendBuildUtils
+                    .isHillaUsed(any(File.class), any(ClassFinder.class)))
+                    .thenReturn(true);
+            mockFrontendUtils.when(
+                    () -> FrontendUtils.isReactRouterRequired(any(File.class)))
+                    .thenReturn(true);
+            options.withReact(true);
+            Map<String, String> defaultDeps = nodeUpdater
+                    .getDefaultDependencies();
+            assertFalse(defaultDeps.containsKey("@vaadin/hilla-lit-form"),
+                    "Lit component added unexpectedly for react-router");
+            assertTrue(defaultDeps.containsKey("@vaadin/hilla-react-auth"),
+                    "React component should be added when react-router is used");
+            assertTrue(defaultDeps.containsKey("@vaadin/hilla-react-crud"));
+            assertTrue(defaultDeps.containsKey("@vaadin/hilla-react-form"));
+
+            Map<String, String> defaultDevDeps = nodeUpdater
+                    .getDefaultDevDependencies();
+            assertFalse(defaultDevDeps.containsKey("lit-dev-dependency"),
+                    "Lit dev dependency added unexpectedly for react-router");
+            assertTrue(defaultDevDeps.containsKey("react-dev-dependency"),
+                    "React dev dependency should be added when react-router is used");
+        } finally {
+            options.withReact(reactEnabled);
+            mockFrontendUtils.close();
+            mockFrontendBuildUtils.close();
+        }
+    }
+
+    @Test
+    void getDefaultDependencies_vaadinRouterIsUsed_addsHillaLitComponents() {
+        boolean reactEnabled = options.isReactEnabled();
+        try (MockedStatic<FrontendBuildUtils> mock = mockStatic(
+                FrontendBuildUtils.class)) {
+            mock.when(() -> FrontendBuildUtils.isHillaUsed(any(File.class),
+                    any(ClassFinder.class))).thenReturn(true);
+            options.withReact(false);
+            Map<String, String> defaultDeps = nodeUpdater
+                    .getDefaultDependencies();
+            assertTrue(defaultDeps.containsKey("@vaadin/hilla-lit-form"),
+                    "Lit component should be when vaadin-router is used");
+            assertFalse(defaultDeps.containsKey("@vaadin/hilla-react-form"),
+                    "React component added unexpectedly for vaadin-router");
+
+            Map<String, String> defaultDevDeps = nodeUpdater
+                    .getDefaultDevDependencies();
+            assertFalse(defaultDevDeps.containsKey("react-dev-dependency"),
+                    "React dev dependency added unexpectedly for vaadin-router");
+            assertTrue(defaultDevDeps.containsKey("lit-dev-dependency"),
+                    "Lit dev dependency should be added when vaadin-router is used");
+        } finally {
+            options.withReact(reactEnabled);
+        }
+    }
+
+    @Test
+    void getDefaultDependencies_hillaIsNotUsed_doesntAddHillaComponents() {
+        Map<String, String> defaultDeps = nodeUpdater.getDefaultDependencies();
+        assertFalse(defaultDeps.containsKey("@vaadin/hilla-lit-form"),
+                "Lit component added unexpectedly when Hilla isn't used");
+        assertFalse(defaultDeps.containsKey("@vaadin/hilla-react-auth"),
+                "React component added unexpectedly when Hilla isn't used");
+
+        Map<String, String> defaultDevDeps = nodeUpdater
+                .getDefaultDevDependencies();
+        assertFalse(defaultDevDeps.containsKey("react-dev-dependency"),
+                "React dev dependency added unexpectedly when Hilla isn't used");
+        assertFalse(defaultDevDeps.containsKey("lit-dev-dependency"),
+                "Lit dev dependency added unexpectedly when Hilla isn't used");
+    }
+
+    @Test
+    void getDefaultDevDependencies_includesWorkbox_whenPwaOfflineEnabled() {
+        // Create a mock PwaConfiguration with PWA offline enabled
+        com.vaadin.flow.server.PwaConfiguration pwaConfig = mock(
+                com.vaadin.flow.server.PwaConfiguration.class);
+        when(pwaConfig.isOfflineEnabled()).thenReturn(true);
+        when(options.getFrontendDependenciesScanner().getPwaConfiguration())
+                .thenReturn(pwaConfig);
+
+        nodeUpdater = new NodeUpdater(options) {
+            @Override
+            public void execute() {
+                // NO-OP
+            }
+        };
+
+        Map<String, String> defaultDevDeps = nodeUpdater
+                .getDefaultDevDependencies();
+        assertTrue(defaultDevDeps.containsKey("workbox-core"),
+                "workbox-core should be included when PWA offline is enabled");
+        assertTrue(defaultDevDeps.containsKey("workbox-precaching"),
+                "workbox-precaching should be included when PWA offline is enabled");
+    }
+
+    @Test
+    void getDefaultDevDependencies_excludesWorkbox_whenPwaOfflineDisabled() {
+        // Create a mock PwaConfiguration with PWA offline disabled
+        com.vaadin.flow.server.PwaConfiguration pwaConfig = mock(
+                com.vaadin.flow.server.PwaConfiguration.class);
+        when(pwaConfig.isOfflineEnabled()).thenReturn(false);
+        when(options.getFrontendDependenciesScanner().getPwaConfiguration())
+                .thenReturn(pwaConfig);
+
+        nodeUpdater = new NodeUpdater(options) {
+            @Override
+            public void execute() {
+                // NO-OP
+            }
+        };
+
+        Map<String, String> defaultDevDeps = nodeUpdater
+                .getDefaultDevDependencies();
+        assertFalse(defaultDevDeps.containsKey("workbox-core"),
+                "workbox-core should not be included when PWA offline is disabled");
+        assertFalse(defaultDevDeps.containsKey("workbox-precaching"),
+                "workbox-precaching should not be included when PWA offline is disabled");
+    }
+
+    @Test
+    void getDefaultDevDependencies_excludesWorkbox_whenPwaNull() {
+        // No PWA configuration
+        when(options.getFrontendDependenciesScanner().getPwaConfiguration())
+                .thenReturn(null);
+
+        nodeUpdater = new NodeUpdater(options) {
+            @Override
+            public void execute() {
+                // NO-OP
+            }
+        };
+
+        Map<String, String> defaultDevDeps = nodeUpdater
+                .getDefaultDevDependencies();
+        assertFalse(defaultDevDeps.containsKey("workbox-core"),
+                "workbox-core should not be included when PWA is null");
+        assertFalse(defaultDevDeps.containsKey("workbox-precaching"),
+                "workbox-precaching should not be included when PWA is null");
+    }
+
+    @Test
+    void getDefaultOverrides_includesWorkboxOverrides_whenPwaOfflineEnabled() {
+        // Create a mock PwaConfiguration with PWA offline enabled
+        com.vaadin.flow.server.PwaConfiguration pwaConfig = mock(
+                com.vaadin.flow.server.PwaConfiguration.class);
+        when(pwaConfig.isOfflineEnabled()).thenReturn(true);
+        when(options.getFrontendDependenciesScanner().getPwaConfiguration())
+                .thenReturn(pwaConfig);
+
+        nodeUpdater = new NodeUpdater(options) {
+            @Override
+            public void execute() {
+                // NO-OP
+            }
+        };
+
+        ObjectNode overrides = nodeUpdater.getDefaultOverrides();
+        assertTrue(overrides.has("workbox-build"),
+                "workbox-build override should be included when PWA offline is enabled");
+        // Verify nested structure
+        JsonNode workboxBuildOverride = overrides.get("workbox-build");
+        assertTrue(workboxBuildOverride.isObject(),
+                "workbox-build override should be an object");
+        assertTrue(workboxBuildOverride.has("glob"),
+                "workbox-build override should contain glob");
+    }
+
+    @Test
+    void getDefaultOverrides_returnsEmpty_whenPwaOfflineDisabled() {
+        // Create a mock PwaConfiguration with PWA offline enabled
+        com.vaadin.flow.server.PwaConfiguration pwaConfig = mock(
+                com.vaadin.flow.server.PwaConfiguration.class);
+        when(pwaConfig.isOfflineEnabled()).thenReturn(false);
+        when(options.getFrontendDependenciesScanner().getPwaConfiguration())
+                .thenReturn(pwaConfig);
+
+        nodeUpdater = new NodeUpdater(options) {
+            @Override
+            public void execute() {
+                // NO-OP
+            }
+        };
+
+        ObjectNode overrides = nodeUpdater.getDefaultOverrides();
+        assertTrue(overrides.isEmpty(),
+                "overrides should be empty when PWA offline is disabled");
+    }
+
+    @Test
+    void getDefaultOverrides_returnsEmpty_whenPwaNull() {
+        // No PWA configuration
+        when(options.getFrontendDependenciesScanner().getPwaConfiguration())
+                .thenReturn(null);
+
+        nodeUpdater = new NodeUpdater(options) {
+            @Override
+            public void execute() {
+                // NO-OP
+            }
+        };
+
+        ObjectNode overrides = nodeUpdater.getDefaultOverrides();
+        assertTrue(overrides.isEmpty(),
+                "overrides should be empty when PWA is null");
+    }
+
+    @Test
+    void readPackageJson_nonExistingFile_doesNotThrow() throws IOException {
+        nodeUpdater.readPackageJson("non-existing-folder");
+    }
+
+    @Test
+    void readPackageJson_nonExistingFile_jsonContainsDepsAndDevDeps()
+            throws IOException {
+        JsonNode jsonObject = nodeUpdater
+                .readPackageJson("non-existing-folder");
+        assertTrue(jsonObject.has("dependencies"));
+        assertTrue(jsonObject.has("devDependencies"));
+    }
+
+    @Test
+    void readDependencies_doesntHaveDependencies_doesNotThrow() {
+        nodeUpdater.readDependencies("no-deps", "dependencies");
+        nodeUpdater.readDependencies("no-deps", "devDependencies");
+    }
+
+    @Test
+    void readPackageJsonIfAvailable_nonExistingFile_noErrorLog() {
+        Logger log = mock(Logger.class);
+        nodeUpdater = new NodeUpdater(options) {
+
+            @Override
+            public void execute() {
+                // NO-OP
+            }
+
+            @Override
+            Logger log() {
+                return log;
+            }
+        };
+        nodeUpdater.readDependenciesIfAvailable("non-existing-folder",
+                "dependencies");
+        verifyNoInteractions(log);
+
+        nodeUpdater.readDependenciesIfAvailable("non-existing-folder",
+                "devDpendencies");
+        verifyNoInteractions(log);
+    }
+
+    @Test
+    void getDefaultDependencies_hillaAvailableButNotUsed_addsGeneratorDependencies() {
+        boolean reactEnabled = options.isReactEnabled();
+        try (MockedStatic<FrontendBuildUtils> frontendBuildUtilsMock = mockStatic(
+                FrontendBuildUtils.class);
+                MockedStatic<FrontendUtils> frontendUtilsMock = mockStatic(
+                        FrontendUtils.class);
+
+                MockedStatic<EndpointRequestUtil> endpointUtilMock = mockStatic(
+                        EndpointRequestUtil.class)) {
+
+            // Hilla is available in classpath but not used
+            frontendBuildUtilsMock.when(() -> FrontendBuildUtils
+                    .isHillaUsed(any(File.class), any(ClassFinder.class)))
+                    .thenReturn(false);
+            endpointUtilMock.when(EndpointRequestUtil::isHillaAvailable)
+                    .thenReturn(true);
+            frontendUtilsMock.when(
+                    () -> FrontendUtils.isReactRouterRequired(any(File.class)))
+                    .thenReturn(true);
+
+            // Create a spy to mock the readDependenciesIfAvailable method
+            NodeUpdater spyNodeUpdater = spy(nodeUpdater);
+            Map<String, String> mockGeneratorDeps = Map
+                    .of("@vaadin/hilla-generator-core", "2.0.0");
+            doReturn(mockGeneratorDeps).when(spyNodeUpdater)
+                    .readDependenciesIfAvailable(anyString(),
+                            eq("dependencies"), eq("@vaadin/hilla-generator-"));
+
+            // Test with React enabled
+            options.withReact(true);
+            Map<String, String> defaultDeps = spyNodeUpdater
+                    .getDefaultDependencies();
+            assertTrue(
+                    defaultDeps.keySet().stream().anyMatch(
+                            key -> key.contains("@vaadin/hilla-generator-")),
+                    "React generator dependency should be added when Hilla is available");
+
+            // Test with React disabled
+            options.withReact(false);
+            defaultDeps = spyNodeUpdater.getDefaultDependencies();
+            assertTrue(
+                    defaultDeps.keySet().stream().anyMatch(
+                            key -> key.contains("@vaadin/hilla-generator-")),
+                    "Lit generator dependency should be added when Hilla is available");
+        } finally {
+            options.withReact(reactEnabled);
+        }
+    }
+
+    private String getPolymerVersion(JsonNode object) {
+        JsonNode deps = object.get("dependencies");
+        return deps.get("@polymer/polymer").textValue();
+    }
+
+    private void fakePolymerTemplateInClasspath() {
+        Class clazz = FeatureFlags.class; // actual class doesn't matter
+        try {
+            doReturn(clazz).when(finder).loadClass(
+                    "com.vaadin.flow.component.polymertemplate.PolymerTemplate");
+        } catch (ClassNotFoundException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private ObjectNode getMockCoreVersionsJson() {
+        // @formatter:off
+        return JacksonUtils.readTree(
+                """
+                {
+                    "core": {
+                        "accordion": {
+                            "jsVersion": "23.2.0",
+                            "npmName": "@vaadin/accordion"
+                        },
+                        "app-layout": {
+                            "jsVersion": "23.2.0",
+                            "npmName": "@vaadin/app-layout"
+                        },
+                        "avatar": {
+                            "jsVersion": "23.2.0",
+                            "npmName": "@vaadin/avatar"
+                        },
+                        "avatar-group": {
+                            "jsVersion": "23.2.0",
+                            "npmName": "@vaadin/avatar-group"
+                        },
+                        "button": {
+                            "jsVersion": "23.2.0",
+                            "npmName": "@vaadin/button"
+                        },
+                        "checkbox": {
+                            "jsVersion": "23.2.0",
+                            "npmName": "@vaadin/checkbox"
+                        }
+                    },
+                    "platform": "23.2.0"
+                }
+                """
+        );
+        // @formatter:on
+    }
+
+    private ObjectNode getMockCommercialVersionsJson() {
+        // @formatter:off
+        return JacksonUtils.readTree(
+                """
+                {
+                    "vaadin": {
+                        "board": {
+                            "jsVersion": "23.2.0",
+                            "npmName": "@vaadin/board"
+                        },
+                        "charts": {
+                            "jsVersion": "23.2.0",
+                            "npmName": "@vaadin/charts"
+                        },
+                        "grid-pro": {
+                            "jsVersion": "23.2.0",
+                            "npmName": "@vaadin/grid-pro"
+                        },
+                        "vaadin-board": {
+                            "component": true,
+                            "javaVersion": "23.2.0",
+                            "jsVersion": "23.2.0",
+                            "npmName": "@vaadin/vaadin-board",
+                            "pro": true
+                        },
+                        "vaadin-charts": {
+                            "component": true,
+                            "javaVersion": "23.2.0",
+                            "jsVersion": "23.2.0",
+                            "npmName": "@vaadin/vaadin-charts",
+                            "pro": true
+                        },
+                        "vaadin-grid-pro": {
+                            "component": true,
+                            "javaVersion": "23.2.0",
+                            "jsVersion": "23.2.0",
+                            "npmName": "@vaadin/vaadin-grid-pro",
+                            "pro": true
+                        }
+                    },
+                    "platform": "23.2.0"
+                }
+                """
+        );
+        // @formatter:on
+    }
+}

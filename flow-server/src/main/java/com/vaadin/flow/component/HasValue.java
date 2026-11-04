@@ -1,0 +1,389 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.component;
+
+import java.io.Serializable;
+import java.util.EventListener;
+import java.util.Objects;
+import java.util.Optional;
+
+import com.vaadin.flow.component.HasValue.ValueChangeEvent;
+import com.vaadin.flow.dom.SignalBinding;
+import com.vaadin.flow.function.SerializableConsumer;
+import com.vaadin.flow.shared.Registration;
+import com.vaadin.flow.signals.Signal;
+
+/**
+ * A generic interface for field components and other user interface objects
+ * that have a user-editable value. Emits change events whenever the value is
+ * changed, either by the user or programmatically.
+ *
+ * @param <E>
+ *            the type of the value change event fired by this instance
+ * @param <V>
+ *            the value type
+ * @author Vaadin Ltd
+ * @since 1.0.
+ */
+public interface HasValue<E extends ValueChangeEvent<V>, V>
+        extends Serializable {
+
+    /**
+     * An event fired when the value of a {@code HasValue} changes.
+     *
+     * @param <V>
+     *            the value type
+     */
+    interface ValueChangeEvent<V> extends Serializable {
+        HasValue<?, V> getHasValue();
+
+        /**
+         * Checks if this event originated from the client side.
+         *
+         * @return <code>true</code> if the event originated from the client
+         *         side, <code>false</code> otherwise
+         */
+        boolean isFromClient();
+
+        /**
+         * Returns the value of the source before this value change event
+         * occurred.
+         *
+         * @return the value previously held by the source of this event
+         */
+        V getOldValue();
+
+        /**
+         * Returns the new value that triggered this value change event.
+         *
+         * @return the new value
+         */
+        V getValue();
+    }
+
+    /**
+     * A listener for value change events.
+     *
+     * @param <E>
+     *            the value change event type
+     * @see ValueChangeEvent
+     * @see Registration
+     */
+    @FunctionalInterface
+    interface ValueChangeListener<E extends ValueChangeEvent<?>>
+            extends EventListener, Serializable {
+
+        /**
+         * Invoked when this listener receives a value change event from an
+         * event source to which it has been added.
+         *
+         * @param event
+         *            the received event, not null
+         */
+        void valueChanged(E event);
+    }
+
+    /**
+     * Sets the value of this object. If the new value is not equal to
+     * {@code getValue()}, fires a value change event. May throw
+     * {@code IllegalArgumentException} if the value is not acceptable.
+     * <p>
+     * <i>Implementation note:</i> the implementing class should document
+     * whether null values are accepted or not, and override
+     * {@link #getEmptyValue()} if the empty value is not {@code null}.
+     *
+     * @param value
+     *            the new value
+     * @throws IllegalArgumentException
+     *             if the value is invalid
+     */
+    void setValue(V value);
+
+    /**
+     * Returns the current value of this object.
+     * <p>
+     * <i>Implementation note:</i> the implementing class should document
+     * whether null values may be returned or not, and override
+     * {@link #getEmptyValue()} if the empty value is not {@code null}.
+     *
+     * @return the current value
+     */
+    V getValue();
+
+    /**
+     * Adds a value change listener. The listener is called when the value of
+     * this {@code HasValue} is changed either by the user or programmatically.
+     *
+     * @param listener
+     *            the value change listener, not null
+     * @return a registration for the listener
+     */
+    Registration addValueChangeListener(
+            ValueChangeListener<? super E> listener);
+
+    /**
+     * Returns the value that represents an empty value.
+     * <p>
+     * By default {@link HasValue} is expected to support {@code null} as empty
+     * values. Specific implementations might not support this.
+     *
+     * @return empty value
+     */
+    default V getEmptyValue() {
+        return null;
+    }
+
+    /**
+     * Returns the current value of this object, wrapped in an {@code Optional}.
+     * <p>
+     * The {@code Optional} will be empty if the value is {@code null} or
+     * {@code isEmpty()} returns {@code true}.
+     *
+     * @return the current value, wrapped in an {@code Optional}
+     */
+    default Optional<V> getOptionalValue() {
+        return isEmpty() ? Optional.empty() : Optional.ofNullable(getValue());
+    }
+
+    /**
+     * Returns whether this {@code HasValue} is considered to be empty.
+     * <p>
+     * By default this is an equality check between current value and empty
+     * value.
+     *
+     * @return {@code true} if considered empty; {@code false} if not
+     */
+    default boolean isEmpty() {
+        return Objects.equals(getValue(), getEmptyValue());
+    }
+
+    /**
+     * Resets the value to the empty one.
+     * <p>
+     * This is just a shorthand for resetting the value, see the methods
+     * {@link #setValue(Object)} and {@link #getEmptyValue()}.
+     *
+     * @see #setValue(Object)
+     * @see #getEmptyValue()
+     */
+    default void clear() {
+        setValue(getEmptyValue());
+    }
+
+    /**
+     * Sets the read-only mode of this {@code HasValue} to given mode. The user
+     * can't change the value when in read-only mode.
+     * <p>
+     * A {@code HasValue} with a visual component in read-only mode typically
+     * looks visually different to signal to the user that the value cannot be
+     * edited.
+     *
+     * @param readOnly
+     *            a boolean value specifying whether the component is put
+     *            read-only mode or not
+     */
+    void setReadOnly(boolean readOnly);
+
+    /**
+     * Returns whether this {@code HasValue} is in read-only mode or not.
+     *
+     * @return {@code false} if the user can modify the value, {@code true} if
+     *         not.
+     */
+    boolean isReadOnly();
+
+    /**
+     * Sets the required indicator visible or not.
+     * <p>
+     * If set visible, it is visually indicated in the user interface.
+     * <p>
+     * The method is intended to be used with <code>Binder</code> which does
+     * server-side validation. In case HTML element has its own (client-side)
+     * validation it should be disabled when
+     * <code>setRequiredIndicatorVisible(true)</code> is called and re-enabled
+     * back on <code>setRequiredIndicatorVisible(false)</code>. It's
+     * responsibility of each component implementation to follow the contract so
+     * that the method call doesn't do anything else than show/hide the
+     * "required" indication. Usually components provide their own
+     * <code>setRequired</code> method which should be called in case the
+     * client-side validation is required.
+     *
+     * @param requiredIndicatorVisible
+     *            <code>true</code> to make the required indicator visible,
+     *            <code>false</code> if not
+     */
+    void setRequiredIndicatorVisible(boolean requiredIndicatorVisible);
+
+    /**
+     * Checks whether the required indicator is visible.
+     *
+     * @return <code>true</code> if visible, <code>false</code> if not
+     */
+    boolean isRequiredIndicatorVisible();
+
+    /**
+     * Binds a {@link Signal}'s value to the value state of this component. The
+     * value is set immediately with the current signal value when the binding
+     * is created, and is kept synchronized with any subsequent signal value
+     * changes while the element is in attached state. When the element is in
+     * detached state, signal value changes have no effect.
+     * <p>
+     * While a Signal is bound to a value state, any attempt to bind a new
+     * Signal while one is already bound throws
+     * {@link com.vaadin.flow.signals.BindingActiveException}.
+     * <p>
+     * While a Signal is bound to a value state and the element is in attached
+     * state, setting the value with {@link #setValue(Object)} or when a change
+     * originates from the client will invoke the write callback to propagate
+     * the value back. After the callback, the signal is re-consulted via
+     * {@link Signal#peek()} and if its value differs from what was being set,
+     * the new value is ignored and the signal's updated value is used instead,
+     * i.e. in cases where write callback has `signal.set("different")`, whereas
+     * a value being set is "a new value", the "different" value wins.
+     * <p>
+     * If the write callback is <code>null</code>, the binding is read-only and
+     * any attempt to set the value while the element is attached will throw an
+     * {@link IllegalStateException}.
+     * <p>
+     * Examples of usage:
+     *
+     * <pre>
+     * // Simple binding to a signal holding the component value
+     * ValueSignal&lt;String&gt; signal = new ValueSignal&lt;&gt;("");
+     * Input component = new Input();
+     * add(component);
+     * component.bindValue(signal, signal::set);
+     * signal.set("Hello"); // The input's value changes
+     *
+     * // Binding to a property of an immutable record using updater helper
+     * record Person(String name, int age) {
+     *     Person withName(String name) {
+     *         return new Person(name, this.age);
+     *     }
+     * }
+     * ValueSignal&lt;Person&gt; personSignal = new ValueSignal&lt;&gt;(
+     *         new Person("Alice", 30));
+     * component.bindValue(personSignal.map(Person::name),
+     *         personSignal.updater(Person::withName));
+     *
+     * // Binding to a property of a mutable bean using modifier helper
+     * class Person {
+     *     private String name;
+     *
+     *     public String getName() {
+     *         return name;
+     *     }
+     *
+     *     public void setName(String name) {
+     *         this.name = name;
+     *     }
+     * }
+     * ValueSignal&lt;Person&gt; personSignal = new ValueSignal&lt;&gt;(new Person());
+     * component.bindValue(personSignal.map(Person::getName),
+     *         personSignal.modifier(Person::setName));
+     * </pre>
+     *
+     * @param valueSignal
+     *            the signal to bind, not <code>null</code>
+     * @param writeCallback
+     *            the callback to propagate value changes back, or
+     *            <code>null</code> for a read-only binding
+     * @throws com.vaadin.flow.signals.BindingActiveException
+     *             thrown when there is already an existing binding
+     * @see #setValue(Object)
+     * @since 25.1
+     */
+    default SignalBinding<V> bindValue(Signal<V> valueSignal,
+            SerializableConsumer<V> writeCallback) {
+        throw new UnsupportedOperationException(
+                "Binding value to a Signal is not supported by "
+                        + getClass().getSimpleName());
+    }
+
+    /**
+     * Binds a {@link Signal}'s value to the read-only state of this component.
+     * The read-only state is set immediately with the current signal value when
+     * the binding is created, and is kept synchronized with any subsequent
+     * signal value changes while the component is in attached state. When the
+     * component is in detached state, signal value changes have no effect.
+     * <p>
+     * While a Signal is bound to the read-only state, any attempt to set the
+     * read-only state manually with {@link #setReadOnly(boolean)} throws
+     * {@link com.vaadin.flow.signals.BindingActiveException}. Same happens when
+     * trying to bind a new Signal while one is already bound.
+     * <p>
+     * Example of usage:
+     *
+     * <pre>
+     * ValueSignal&lt;Boolean&gt; signal = new ValueSignal&lt;&gt;(false);
+     * Input component = new Input();
+     * add(component);
+     * component.bindReadOnly(signal);
+     * signal.set(true); // The input becomes read-only
+     * </pre>
+     *
+     * @param readOnlySignal
+     *            the signal to bind, not <code>null</code>
+     * @throws com.vaadin.flow.signals.BindingActiveException
+     *             thrown when there is already an existing binding
+     * @see #setReadOnly(boolean)
+     * @since 25.1
+     */
+    default SignalBinding<Boolean> bindReadOnly(
+            Signal<Boolean> readOnlySignal) {
+        throw new UnsupportedOperationException(
+                "Binding read only state to a Signal is not supported by "
+                        + getClass().getSimpleName());
+    }
+
+    /**
+     * Binds a {@link Signal}'s value to the required indicator visible state of
+     * this component. The required indicator state is set immediately with the
+     * current signal value when the binding is created, and is kept
+     * synchronized with any subsequent signal value changes while the component
+     * is in attached state. When the component is in detached state, signal
+     * value changes have no effect.
+     * <p>
+     * While a Signal is bound to the required indicator visible state, any
+     * attempt to set the state manually with
+     * {@link #setRequiredIndicatorVisible(boolean)} throws
+     * {@link com.vaadin.flow.signals.BindingActiveException}. Same happens when
+     * trying to bind a new Signal while one is already bound.
+     * <p>
+     * Example of usage:
+     *
+     * <pre>
+     * ValueSignal&lt;Boolean&gt; signal = new ValueSignal&lt;&gt;(false);
+     * Input component = new Input();
+     * add(component);
+     * component.bindRequiredIndicatorVisible(signal);
+     * signal.set(true); // The required indicator becomes visible
+     * </pre>
+     *
+     * @param requiredSignal
+     *            the signal to bind, not <code>null</code>
+     * @throws com.vaadin.flow.signals.BindingActiveException
+     *             thrown when there is already an existing binding
+     * @see #setRequiredIndicatorVisible(boolean)
+     * @since 25.1
+     */
+    default SignalBinding<Boolean> bindRequiredIndicatorVisible(
+            Signal<Boolean> requiredSignal) {
+        throw new UnsupportedOperationException(
+                "Binding required indicator visible state to a Signal is not supported by "
+                        + getClass().getSimpleName());
+    }
+}

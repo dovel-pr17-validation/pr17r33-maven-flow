@@ -1,0 +1,226 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.dom;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.signals.BindingActiveException;
+import com.vaadin.flow.signals.local.ValueSignal;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Unit tests for Style.bind(String, Signal<String>).
+ */
+class StyleBindTest extends SignalsUnitTest {
+
+    // Lifecycle: applies on attachment and signal changes when attached
+    @Test
+    void bindingMirrorsSignalWhileAttached_updatesStyleValue() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+
+        ValueSignal<String> color = new ValueSignal<>("red");
+        element.getStyle().bind("background-color", color);
+
+        assertEquals("red", element.getStyle().get("backgroundColor"));
+
+        color.set("blue");
+        assertEquals("blue", element.getStyle().get("backgroundColor"));
+
+        // Null removes the style
+        color.set(null);
+        assertNull(element.getStyle().get("backgroundColor"));
+    }
+
+    // Lifecycle: no updates while detached; lastApplied preserved across
+    // detach/attachment
+    @Test
+    void detached_noUpdates_lastAppliedPreservedOnReattach() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+
+        ValueSignal<String> color = new ValueSignal<>("red");
+        element.getStyle().bind("background-color", color);
+        assertEquals("red", element.getStyle().get("backgroundColor"));
+
+        // Detach
+        UI.getCurrent().getElement().removeChild(element);
+
+        // Change while detached -> should not apply
+        color.set("green");
+        assertEquals("red", element.getStyle().get("backgroundColor"));
+
+        // Reattach -> current signal value should be applied
+        UI.getCurrent().getElement().appendChild(element);
+        assertEquals("green", element.getStyle().get("backgroundColor"));
+    }
+
+    // Conflict prevention: set/remove throw while binding is active
+    @Test
+    void conflict_setRemoveThrowWhileBoundAndActive() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+
+        ValueSignal<String> color = new ValueSignal<>("red");
+        element.getStyle().bind("background-color", color);
+
+        assertThrows(BindingActiveException.class,
+                () -> element.getStyle().set("background-color", "black"));
+        assertThrows(BindingActiveException.class,
+                () -> element.getStyle().remove("background-color"));
+    }
+
+    @Test
+    void clear_throwsWhenBindingsActive() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+
+        ValueSignal<String> signal = new ValueSignal<>("1");
+        element.getStyle().bind("border-top-width", signal);
+
+        assertThrows(BindingActiveException.class,
+                () -> element.getStyle().clear());
+    }
+
+    @Test
+    void bind_nullSignal_throwsNPE() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+
+        assertThrows(NullPointerException.class,
+                () -> element.getStyle().bind("background-color", null));
+    }
+
+    // Getters semantics
+    @Test
+    void getters_returnLastAppliedAndNamesWithValues() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+
+        ValueSignal<String> a = new ValueSignal<>("10px");
+        ValueSignal<String> b = new ValueSignal<>("initial");
+        element.getStyle().bind("margin-top", a);
+        element.getStyle().bind("margin-bottom", b);
+
+        // a applied, then set b to null which should remove the style
+        assertEquals("10px", element.getStyle().get("marginTop"));
+        b.set(null);
+        assertNull(element.getStyle().get("marginBottom"));
+
+        // getNames should include names that have recorded last-applied values.
+        // BasicElementStyle currently exposes attribute names (dash-separated).
+        Set<String> names = element.getStyle().getNames()
+                .collect(Collectors.toSet());
+        assertTrue(names.contains("margin-top"));
+        // b has a null last-applied value, but the binding is preserved -> name
+        // present
+        assertTrue(names.contains("margin-bottom"));
+
+        // Detach before binding c -> probe runs immediately at bind time even
+        // while detached, so value IS applied right away
+        ValueSignal<String> c = new ValueSignal<>("5px");
+        UI.getCurrent().getElement().removeChild(element);
+        element.getStyle().bind("padding-top", c);
+        assertEquals("5px", element.getStyle().get("paddingTop"));
+        names = element.getStyle().getNames().collect(Collectors.toSet());
+        // The current implementation records the binding name even before first
+        // attach
+        assertTrue(names.contains("padding-top"));
+    }
+
+    @Test
+    void nullSignalValue_removesStyleAndHasReturnsFalse() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+
+        ValueSignal<String> color = new ValueSignal<>("rgba(255, 0, 0, 1)");
+        element.getStyle().bind("background-color", color);
+        assertEquals("rgba(255, 0, 0, 1)",
+                element.getStyle().get("backgroundColor"));
+
+        // Set null -> should remove the style and has() should report false
+        color.set(null);
+        assertNull(element.getStyle().get("backgroundColor"));
+        assertFalse(element.getStyle().has("background-color"));
+
+        // but it preserves the signal binding
+        Set<String> names = element.getStyle().getNames()
+                .collect(Collectors.toSet());
+        assertTrue(names.contains("background-color"));
+        color.set("rgba(0, 0, 255, 1)");
+        assertEquals("rgba(0, 0, 255, 1)",
+                element.getStyle().get("backgroundColor"));
+    }
+
+    @Test
+    void bind_onChange_receivesBindingContext() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+
+        ValueSignal<String> signal = new ValueSignal<>("red");
+        List<BindingContext<String>> contexts = new ArrayList<>();
+
+        element.getStyle().bind("background-color", signal)
+                .onChange(contexts::add);
+
+        // onChange should have been called once initially
+        assertEquals(1, contexts.size());
+
+        signal.set("blue");
+
+        assertEquals(2, contexts.size());
+        BindingContext<String> ctx = contexts.get(1);
+        assertFalse(ctx.isInitialRun());
+        assertEquals("red", ctx.getOldValue());
+        assertEquals("blue", ctx.getNewValue());
+        assertEquals(element, ctx.getElement());
+    }
+
+    @Test
+    void bind_returnsTypedSignalBinding() {
+        Element element = new Element("div");
+        UI.getCurrent().getElement().appendChild(element);
+
+        ValueSignal<String> signal = new ValueSignal<>("red");
+
+        // Verify that bind returns SignalBinding<String>
+        SignalBinding<String> binding = element.getStyle()
+                .bind("background-color", signal);
+
+        // Verify that we can use the typed binding with String context
+        binding.onChange(ctx -> {
+            String oldValue = ctx.getOldValue(); // No cast needed
+            String newValue = ctx.getNewValue(); // No cast needed
+            assertNotNull(oldValue);
+            assertNotNull(newValue);
+            assertEquals(String.class, oldValue.getClass());
+            assertEquals(String.class, newValue.getClass());
+        });
+    }
+
+}

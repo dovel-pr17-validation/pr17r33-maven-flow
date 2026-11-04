@@ -1,0 +1,378 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.vaadin.flow.gradle
+
+import java.io.File
+import java.net.URI
+import java.nio.file.Path
+import java.util.function.Consumer
+import com.vaadin.flow.plugin.base.BuildFrontendUtil
+import com.vaadin.flow.plugin.base.PluginAdapterBuild
+import com.vaadin.flow.server.Constants
+import com.vaadin.flow.server.frontend.scanner.ClassFinder
+import org.gradle.api.GradleException
+import org.gradle.api.Project
+import org.gradle.api.Task
+import org.gradle.api.artifacts.Configuration
+import org.gradle.api.artifacts.ModuleIdentifier
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.file.FileCollection
+import org.gradle.api.logging.Logger
+import org.gradle.api.provider.Provider
+import org.gradle.api.tasks.bundling.War
+
+private val servletApiJarRegex =
+    Regex(".*(/|\\\\)(portlet-api|javax\\.servlet-api)-.+jar$")
+
+internal class GradlePluginAdapter private constructor(
+    project: Project,
+    internal val config: PluginEffectiveConfiguration,
+    private val isBeforeProcessResources: Boolean,
+    private val logger: Logger,
+) : PluginAdapterBuild {
+
+
+    private val projectDir = config.projectDir
+    private val projectName = config.projectName
+    private val jarProject: Boolean =
+        project.tasks.withType(War::class.java).isEmpty()
+    private val jarFiles: FileCollection
+    private val resolvedArtifacts: Provider<Set<ModuleIdentifier>>
+    private val classFinderClasspath: FileCollection
+
+    constructor(
+        task: Task,
+        config: PluginEffectiveConfiguration,
+        isBeforeProcessResources: Boolean
+    ) : this(task.project, config, isBeforeProcessResources, task.logger)
+
+    init {
+        val dependencyConfiguration =
+            project.configurations.getByName(config.dependencyScope.get())
+        resolvedArtifacts =
+            dependencyConfiguration.incoming.artifacts.resolvedArtifacts.map { result ->
+                result.filter { it.id.componentIdentifier is ModuleComponentIdentifier }
+                    .map { (it.id.componentIdentifier as ModuleComponentIdentifier).moduleIdentifier }
+                    .toSet()
+            } ?: project.provider { emptySet() }
+        classFinderClasspath =
+            createClassFinderClasspath(project, dependencyConfiguration)
+        jarFiles = dependencyConfiguration.incoming.files.filter {
+            it.name.endsWith(".jar", true)
+        } ?: project.files()
+    }
+
+    // ClassFinder instance is created the first time it is accessed with the
+    // relative getter
+    private lateinit var _classFinder: ClassFinder
+
+    private fun createClassFinder(): ClassFinder {
+        val apis = classFinderClasspath.filter { it.exists() }.toSet()
+
+        val classFinder =
+            BuildFrontendUtil.getClassFinder(apis.map { it.absolutePath })
+        // sanity check that the project has flow-server.jar as a dependency
+        try {
+            classFinder.loadClass<Any>("com.vaadin.flow.server.webcomponent.WebComponentModulesWriter")
+        } catch (e: ClassNotFoundException) {
+            throw RuntimeException("Failed to find classes from flow-server.jar. The project '${projectName}' needs to have a dependency on flow-server.jar")
+        }
+        logger.info("Passing this classpath to NodeTasks.Builder: ${apis.toPrettyFormat()}")
+        return classFinder
+    }
+
+    override fun applicationProperties(): File =
+        config.applicationProperties.get()
+
+    override fun eagerServerLoad(): Boolean = config.eagerServerLoad.get()
+
+    override fun frontendDirectory(): File = config.frontendDirectory.get()
+
+    override fun generatedTsFolder(): File = config.generatedTsFolder.get()
+
+    override fun getClassFinder(): ClassFinder {
+        if (!::_classFinder.isInitialized) {
+            _classFinder = createClassFinder()
+        }
+        return _classFinder
+    }
+
+    fun closeClassFinder() {
+        if (::_classFinder.isInitialized && _classFinder is AutoCloseable) {
+            try {
+                (_classFinder as AutoCloseable).close()
+            } catch (e: Exception) {
+                logger.debug("Error closing ClassFinder", e)
+            }
+        }
+    }
+
+    private fun createClassFinderClasspath(
+        project: Project,
+        dependencyConfiguration: Configuration?
+    ): FileCollection {
+        val dependencyConfigurationJars: FileCollection =
+            if (dependencyConfiguration != null) {
+                val artifacts = dependencyConfiguration.incoming.artifactView {
+                    it.componentFilter(
+                        ClasspathComponentFilter(config.classpathFilter)
+                    )
+                }.files
+                artifacts
+            } else project.files()
+
+        val sourceSetName = config.sourceSetName.get()
+
+        // we need to also analyze the project's classes
+        val classesDirs: FileCollection =
+            project.getSourceSet(sourceSetName).output.classesDirs;
+
+        val resourcesDir: File? =
+            project.getSourceSet(sourceSetName).output.resourcesDir
+
+        // for Spring Boot project there is no "providedCompile" scope: the WAR plugin brings that in.
+        val providedDeps: Configuration? =
+            project.configurations.findByName("providedCompile")
+        val servletJar: FileCollection = providedDeps
+            ?.incoming?.files?.filter {
+                it.absolutePath.matches(servletApiJarRegex)
+            } ?: project.files()
+
+        return project.files(classesDirs, resourcesDir, servletJar)
+            .filter { it != null }
+            .plus(dependencyConfigurationJars.filter {
+                check(it.exists()) { "$it doesn't exist" }
+                it.exists()
+            })
+    }
+
+    override fun getJarFiles(): MutableSet<File> = jarFiles.toMutableSet()
+
+    override fun isJarProject(): Boolean = jarProject
+
+    override fun isDebugEnabled(): Boolean = true
+
+    override fun javaSourceFolder(): File = config.javaSourceFolder.get()
+
+    override fun javaResourceFolder(): File = config.javaResourceFolder.get()
+
+    override fun logDebug(debugMessage: CharSequence) {
+        logger.debug(debugMessage.toString())
+    }
+
+    override fun logDebug(debugMessage: CharSequence, throwable: Throwable?) {
+        logger.debug(debugMessage.toString(), throwable)
+    }
+
+    override fun logInfo(infoMessage: CharSequence) {
+        logger.info(infoMessage.toString())
+    }
+
+    override fun logWarn(warningMessage: CharSequence) {
+        logger.warn(warningMessage.toString())
+    }
+
+    override fun logWarn(warningMessage: CharSequence, throwable: Throwable?) {
+        logger.warn(warningMessage.toString(), throwable)
+    }
+
+    override fun logError(errorMessage: CharSequence) {
+        logger.error(errorMessage.toString())
+    }
+
+    override fun logError(warning: CharSequence, e: Throwable?) {
+        logger.error(warning.toString(), e)
+    }
+
+    override fun nodeDownloadRoot(): URI =
+        URI.create(config.nodeDownloadRoot.get())
+
+    override fun nodeVersion(): String = config.nodeVersion.get()
+
+    override fun npmFolder(): File = config.npmFolder.get()
+
+    override fun openApiJsonFile(): File = config.openApiJsonFile.get()
+
+    override fun pnpmEnable(): Boolean = config.pnpmEnable.get()
+
+    override fun bunEnable(): Boolean = config.bunEnable.get()
+
+    override fun useGlobalPnpm(): Boolean = config.useGlobalPnpm.get()
+
+    override fun projectBaseDirectory(): Path = projectDir.toPath()
+
+    override fun requireHomeNodeExec(): Boolean =
+        config.requireHomeNodeExec.get()
+
+    override fun nodeFolder(): String? =
+        config.nodeFolder.orNull
+
+    override fun servletResourceOutputDirectory(): File {
+        // when running a task which runs before processResources, we need to
+        // generate stuff to build/vaadin-generated.
+        //
+        // However, after processResources is done, anything generated into
+        // build/vaadin-generated would simply be ignored. In such cases,
+        // production resources are generated into the task-owned frontend
+        // output tree, next to the webapp bundle, so that the whole
+        // META-INF/VAADIN tree is packaged into the application archive as a
+        // single, task-owned unit.
+        if (isBeforeProcessResources) {
+            return File(
+                config.resourceOutputDirectory.get(),
+                Constants.VAADIN_SERVLET_RESOURCES
+            )
+        }
+        val frontendOutputDirectory = frontendOutputDirectory()
+        if (frontendOutputDirectory.hasVaadinWebappResourcesPath()) {
+            return frontendOutputDirectory.parentFile
+        }
+        // The servlet resources (config, token, stats.json) must sit next to
+        // the webapp bundle so the whole META-INF/VAADIN tree can be packaged
+        // together, which is only possible when frontendOutputDirectory follows
+        // the META-INF/VAADIN/webapp layout. Falling back to the source set
+        // resources directory (build/resources/main) instead would make
+        // vaadinBuildFrontend share outputs with processResources/jar, which
+        // silently drops the bundle from the archive and, on Gradle 9, fails
+        // the build with an implicit task-dependency error. Such a
+        // frontendOutputDirectory is a misconfiguration that never produced a
+        // servable archive, so reject it with an actionable message instead of
+        // producing a broken package.
+        val webappResourcesPath =
+            Constants.VAADIN_WEBAPP_RESOURCES.removeSuffix("/")
+        throw GradleException(
+            "The Vaadin 'frontendOutputDirectory' is set to " +
+            "'${frontendOutputDirectory.path}', which does not end in " +
+            "'$webappResourcesPath'. The production frontend bundle can only " +
+            "be packaged when this directory follows the '$webappResourcesPath' " +
+            "layout. Either leave 'frontendOutputDirectory' at its default or " +
+            "set it to a path ending in '$webappResourcesPath'."
+        )
+    }
+
+    @Deprecated(
+        "use frontendOutputDirectory instead",
+        replaceWith = ReplaceWith("frontendOutputDirectory()")
+    )
+    override fun webpackOutputDirectory(): File = frontendOutputDirectory()
+
+    override fun frontendOutputDirectory(): File =
+        config.frontendOutputDirectory.get()
+
+    override fun resourcesOutputDirectory(): File =
+        config.resourcesOutputDirectory.get()
+
+    override fun frontendResourcesDirectory(): File =
+        config.frontendResourcesDirectory.get()
+
+    override fun generateBundle(): Boolean = config.generateBundle.get()
+
+    override fun generateEmbeddableWebComponents(): Boolean =
+        config.generateEmbeddableWebComponents.get()
+
+    override fun optimizeBundle(): Boolean = config.optimizeBundle.get()
+
+    override fun runNpmInstall(): Boolean = config.runNpmInstall.get()
+
+    override fun buildFolder(): String {
+        val projectBuildDir = config.projectBuildDir.get()
+        val buildDirFile = File(projectBuildDir)
+        // buildFolder() is consumed as a path relative to the project folder
+        // (new File(npmFolder, buildFolder)), so always return it relative to
+        // projectDir. When the build dir is outside projectDir this yields a "../"
+        // path. Returning the absolute path would instead append it to the project
+        // folder and point outside the build dir.
+        // relativeToOrNull() needs a shared root; projectDir is always absolute
+        // in a real build, absoluteFile only guards exotic setups.
+        return when {
+            !buildDirFile.isAbsolute -> projectBuildDir
+            else -> buildDirFile.relativeToOrNull(projectDir.absoluteFile)
+                    ?.toString() ?: projectBuildDir
+        }
+    }
+
+    override fun postinstallPackages(): List<String> =
+        config.postinstallPackages.get()
+
+    override fun excludePostinstallPackages(): List<String> =
+        config.excludePostinstallPackages.get()
+
+    override fun isFrontendHotdeploy(): Boolean = config.frontendHotdeploy.get()
+
+    override fun ciBuild(): Boolean = config.ciBuild.get()
+
+    override fun skipDevBundleBuild(): Boolean = config.skipDevBundleBuild.get()
+
+    override fun forceProductionBuild(): Boolean =
+        config.forceProductionBuild.get()
+
+    override fun compressBundle(): Boolean {
+        // The compress bundle was decided to not be configurable as there is no
+        // point in not compressing it except in the case where we create a pre-compiled frontend bundle jar.
+        // For that there is another maven plugin that is used just for this case.
+        return true
+    }
+
+    override fun isPrepareFrontendCacheDisabled(): Boolean =
+        config.alwaysExecutePrepareFrontend.get()
+
+    override fun isReactEnabled(): Boolean = config.reactEnable.get()
+
+    override fun applicationIdentifier(): String =
+        config.applicationIdentifier.get()
+
+    override fun isNpmExcludeWebComponents(): Boolean =
+        config.npmExcludeWebComponents.get()
+
+    override fun checkRuntimeDependency(
+        groupId: String,
+        artifactId: String,
+        missingDependencyMessageConsumer: Consumer<String>?
+    ): Boolean {
+        val dependencyAbsent = resolvedArtifacts.get().none {
+            groupId == it.group && artifactId == it.name
+        }
+        if (dependencyAbsent && missingDependencyMessageConsumer != null) {
+            missingDependencyMessageConsumer.accept(
+                """
+                The dependency ${groupId}:${artifactId} has not been found in the project configuration.
+                Please add the following dependency to your project configuration:
+                
+                dependencies {
+                    runtimeOnly("${groupId}:${artifactId}")
+                }                
+            """.trimIndent()
+            )
+        }
+        return dependencyAbsent
+    }
+
+    override fun frontendExtraFileExtensions(): List<String> =
+        config.frontendExtraFileExtensions.get()
+
+    override fun isFrontendIgnoreVersionChecks(): Boolean =
+        config.frontendIgnoreVersionChecks.get()
+
+    override fun isCommercialBannerEnabled(): Boolean {
+        return config.commercialWithBanner.get()
+    }
+
+    // Null when not configured, so that the value configured for the package
+    // manager itself is used instead of being overridden
+    override fun minimumFrontendPackageAgeDays(): Int? =
+        config.minimumFrontendPackageAgeDays.orNull
+
+}

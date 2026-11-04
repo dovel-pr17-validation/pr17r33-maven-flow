@@ -1,0 +1,1348 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server;
+
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.ServletOutputStream;
+import jakarta.servlet.WriteListener;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.Serializable;
+import java.lang.reflect.Field;
+import java.net.MalformedURLException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.net.URLConnection;
+import java.net.URLStreamHandler;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystemNotFoundException;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Isolated;
+
+import com.vaadin.flow.WarURLStreamHandlerFactory;
+import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.internal.CurrentInstance;
+import com.vaadin.flow.internal.ResponseWriter;
+import com.vaadin.flow.shared.ApplicationConstants;
+import com.vaadin.tests.util.TestUtil;
+
+import static com.vaadin.flow.internal.FrontendUtils.DEFAULT_FRONTEND_DIR;
+import static com.vaadin.flow.internal.FrontendUtils.PARAM_FRONTEND_DIR;
+import static com.vaadin.flow.server.Constants.POLYFILLS_DEFAULT_VALUE;
+import static com.vaadin.flow.server.Constants.STATISTICS_JSON_DEFAULT;
+import static com.vaadin.flow.server.Constants.VAADIN_SERVLET_RESOURCES;
+import static com.vaadin.flow.server.InitParameters.SERVLET_PARAMETER_STATISTICS_JSON;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@Isolated
+class StaticFileServerTest implements Serializable {
+
+    private OverrideableStaticFileServer fileServer;
+    private HttpServletRequest request;
+    private HttpServletResponse response;
+    private Map<String, String> headers;
+    private Map<String, Long> dateHeaders;
+    private AtomicInteger responseCode;
+    private AtomicLong responseContentLength;
+    private VaadinServletService servletService = mock(
+            VaadinServletService.class);
+    private DeploymentConfiguration configuration;
+    private ServletContext servletContext;
+
+    private static final String WEBAPP_RESOURCE_PREFIX = "META-INF/VAADIN/webapp";
+    private CapturingServletOutputStream out;
+    @TempDir
+    Path temporaryFolder;
+
+    private static URL createFileURLWithDataAndLength(String name, String data)
+            throws MalformedURLException {
+        return createFileURLWithDataAndLength(name, data, -1);
+    }
+
+    private static URL createFileURLWithDataAndLength(String name, String data,
+            long lastModificationTime) throws MalformedURLException {
+        return new URL("file", "", -1, name, new URLStreamHandler() {
+
+            @Override
+            protected URLConnection openConnection(URL u) throws IOException {
+                byte[] bytes = data.getBytes(StandardCharsets.UTF_8);
+                URLConnection connection = mock(URLConnection.class);
+                when(connection.getInputStream())
+                        .thenReturn(new ByteArrayInputStream(bytes));
+                when(connection.getContentLengthLong())
+                        .thenReturn((long) bytes.length);
+                when(connection.getLastModified())
+                        .thenReturn(lastModificationTime);
+                return connection;
+            }
+        });
+
+    }
+
+    @BeforeAll
+    static void beforeClass() {
+        // must be cleared before running this class
+        CurrentInstance.clearAll();
+    }
+
+    @BeforeEach
+    void setUp() throws IOException {
+        request = mock(HttpServletRequest.class);
+        response = mock(HttpServletResponse.class);
+        // No header == getDateHeader returns -1 (Mockito default is 0)
+        when(request.getDateHeader(anyString())).thenReturn(-1L);
+
+        responseCode = new AtomicInteger(-1);
+        responseContentLength = new AtomicLong(-1L);
+        headers = new HashMap<>();
+        dateHeaders = new HashMap<>();
+
+        doAnswer(invocation -> {
+            headers.put((String) invocation.getArguments()[0],
+                    (String) invocation.getArguments()[1]);
+            return null;
+        }).when(response).setHeader(anyString(), anyString());
+        doAnswer(invocation -> {
+            dateHeaders.put((String) invocation.getArguments()[0],
+                    (Long) invocation.getArguments()[1]);
+            return null;
+        }).when(response).setDateHeader(anyString(), anyLong());
+        doAnswer(invocation -> {
+            responseCode.set((int) invocation.getArguments()[0]);
+            return null;
+        }).when(response).setStatus(anyInt());
+        doAnswer(invocation -> {
+            responseCode.set((int) invocation.getArguments()[0]);
+            return null;
+        }).when(response).sendError(anyInt());
+        doAnswer(invocation -> {
+            responseContentLength.set((long) invocation.getArguments()[0]);
+            return null;
+        }).when(response).setContentLengthLong(anyLong());
+
+        configuration = mock(DeploymentConfiguration.class);
+        when(configuration.isProductionMode()).thenReturn(true);
+        when(configuration.getMode()).thenAnswer(q -> {
+            if (configuration.isProductionMode()) {
+                return Mode.PRODUCTION_CUSTOM;
+            } else {
+                return Mode.DEVELOPMENT_BUNDLE;
+            }
+        });
+        when(servletService.getDeploymentConfiguration())
+                .thenReturn(configuration);
+
+        // Use test class loader to enable reading `manifest.json` resource
+        doAnswer(invocationOnMock -> servletService.getClass().getClassLoader())
+                .when(servletService).getClassLoader();
+
+        fileServer = new OverrideableStaticFileServer(servletService,
+                configuration);
+
+        // Required by the ResponseWriter
+        servletContext = mock(ServletContext.class);
+        when(request.getServletContext()).thenReturn(servletContext);
+
+        out = new CapturingServletOutputStream();
+        when(response.getOutputStream()).thenReturn(out);
+    }
+
+    @Test
+    void getRequestFilename() {
+        // Context path should not affect the filename in any way
+        for (String contextPath : new String[] { "", "/foo", "/foo/bar" }) {
+            // /* servlet
+            assertEquals("", getRequestFilename(contextPath, "", null));
+            assertEquals("/bar.js",
+                    getRequestFilename(contextPath, "", "/bar.js"));
+            assertEquals("/foo/bar.js",
+                    getRequestFilename(contextPath, "", "/foo/bar.js"));
+
+            // /foo servlet
+            assertEquals("/foo", getRequestFilename(contextPath, "/foo", null));
+            assertEquals("/foo/bar.js",
+                    getRequestFilename(contextPath, "/foo", "/bar.js"));
+            assertEquals("/foo/bar/baz.js",
+                    getRequestFilename(contextPath, "/foo", "/bar/baz.js"));
+
+            // /foo/bar servlet
+            assertEquals("/foo/bar",
+                    getRequestFilename(contextPath, "/foo/bar", null));
+            assertEquals("/foo/bar/baz.js",
+                    getRequestFilename(contextPath, "/foo/bar", "/baz.js"));
+            assertEquals("/foo/bar/baz/baz.js",
+                    getRequestFilename(contextPath, "/foo/bar", "/baz/baz.js"));
+        }
+    }
+
+    @Test
+    void getRequestFilename_shouldAlwaysBeResolvedAsRootResourceForServiceWorkerRequest() {
+        for (String swFile : new String[] { "/sw.js", "/sw.js.gz" }) {
+            assertEquals(swFile, getRequestFilename("", "", swFile));
+            assertEquals(swFile, getRequestFilename("", "/foo", swFile));
+            assertEquals(swFile, getRequestFilename("", "/foo/bar", swFile));
+            assertEquals(swFile, getRequestFilename("/ctx", "", swFile));
+            assertEquals(swFile, getRequestFilename("/ctx", "/foo", swFile));
+            assertEquals(swFile,
+                    getRequestFilename("/ctx", "/foo/bar", swFile));
+            assertEquals(swFile, getRequestFilename("/ctx/sub", "", swFile));
+            assertEquals(swFile,
+                    getRequestFilename("/ctx/sub", "/foo", swFile));
+            assertEquals(swFile,
+                    getRequestFilename("/ctx/sub", "/foo/bar", swFile));
+        }
+    }
+
+    private String getRequestFilename(String encodedContextPath,
+            String servletPath, String pathInfo) {
+        setupRequestURI(encodedContextPath, servletPath, pathInfo);
+        return fileServer.getRequestFilename(request);
+    }
+
+    private void setupRequestURI(String encodedContextPath, String servletPath,
+            String pathInfo) {
+        assert !encodedContextPath.equals("/") : "root context is always \"\"";
+        assert encodedContextPath.equals("")
+                || encodedContextPath.startsWith("/")
+                : "context always starts with /";
+        assert !encodedContextPath.endsWith("/")
+                : "context path should start with / but not end with /";
+        assert !servletPath.equals("/") : "a /* mapped servlet has path \"\"";
+        assert servletPath.equals("") || servletPath.startsWith("/")
+                : "servlet path always starts with /";
+        assert !servletPath.endsWith("/")
+                : "servlet path should start with / but not end with /";
+        assert pathInfo == null || pathInfo.startsWith("/");
+
+        String requestURI = "";
+        if (!encodedContextPath.isEmpty()) {
+            requestURI += encodedContextPath;
+        }
+        if (!servletPath.isEmpty()) {
+            requestURI += servletPath;
+        }
+        if (pathInfo != null) {
+            requestURI += pathInfo;
+        }
+
+        when(request.getContextPath()).thenReturn(encodedContextPath);
+        when(request.getServletPath()).thenReturn(servletPath);
+        when(request.getPathInfo()).thenReturn(pathInfo);
+        when(request.getRequestURI()).thenReturn(requestURI);
+    }
+
+    @Test
+    void isResourceRequest() throws Exception {
+        fileServer.writeResponse = false;
+        setupRequestURI("", "/static", "/file.png");
+        when(servletService.getStaticResource("/static/file.png"))
+                .thenReturn(new URL("file:///static/file.png"));
+        assertTrue(fileServer.serveStaticResource(request, response));
+    }
+
+    @Test
+    void isResourceRequestWithContextPath() throws Exception {
+        fileServer.writeResponse = false;
+        setupRequestURI("/foo", "/static", "/file.png");
+        when(servletService.getStaticResource("/static/file.png"))
+                .thenReturn(new URL("file:///static/file.png"));
+        assertTrue(fileServer.serveStaticResource(request, response));
+    }
+
+    @Test
+    void isNotResourceRequest() throws Exception {
+        setupRequestURI("", "", null);
+        when(servletContext.getResource("/")).thenReturn(null);
+        assertFalse(fileServer.serveStaticResource(request, response));
+    }
+
+    @Test
+    void directoryIsNotResourceRequest() throws Exception {
+        fileServer.writeResponse = false;
+        final Path folder = Files.createTempDirectory("test");
+
+        setupRequestURI("", "", "/frontend");
+        // generate URL so it is not ending with / so that we test the correct
+        // method
+        String rootAbsolutePath = folder.toFile().getAbsolutePath()
+                .replaceAll("\\\\", "/");
+        if (rootAbsolutePath.endsWith("/")) {
+            rootAbsolutePath = rootAbsolutePath.substring(0,
+                    rootAbsolutePath.length() - 1);
+        }
+        final URL folderPath = new URL("file:///" + rootAbsolutePath);
+
+        when(servletService.getStaticResource("/frontend"))
+                .thenReturn(folderPath);
+        assertFalse(fileServer.serveStaticResource(request, response),
+                "Folder on disk should not be a static resource.");
+
+        // Test any path ending with / to be seen as a directory
+        setupRequestURI("", "", "/fake");
+        when(servletService.getStaticResource("/fake"))
+                .thenReturn(new URL("file:///fake/"));
+        assertFalse(fileServer.serveStaticResource(request, response),
+                "Fake should not check the file system nor be a static resource.");
+
+        Path tempArchive = generateZipArchive(folder);
+
+        setupRequestURI("", "", "/frontend/.");
+        when(servletService.getStaticResource("/frontend/."))
+                .thenReturn(new URL("jar:file:///"
+                        + tempArchive.toString().replaceAll("\\\\", "/")
+                        + "!/frontend"));
+        assertFalse(fileServer.serveStaticResource(request, response),
+                "Folder 'frontend' in jar should not be a static resource.");
+        setupRequestURI("", "", "/file.txt");
+        when(servletService.getStaticResource("/file.txt")).thenReturn(new URL(
+                "jar:file:///" + tempArchive.toString().replaceAll("\\\\", "/")
+                        + "!/file.txt"));
+        assertTrue(fileServer.serveStaticResource(request, response),
+                "File 'file.txt' inside jar should be a static resource.");
+
+    }
+
+    @Test
+    void isStaticResource_jarWarFileScheme_detectsAsStaticResources()
+            throws IOException {
+        fileServer.writeResponse = false;
+        assertTrue(StaticFileServer.openFileSystems.isEmpty(),
+                "Can not run concurrently with other test");
+
+        final Path folder = Files.createTempDirectory("test");
+
+        File archiveFile = new File(folder.toFile(), "fake.jar");
+        archiveFile.createNewFile();
+        Path tempArchive = archiveFile.toPath();
+        File warFile = new File(folder.toFile(), "war.jar");
+        warFile.createNewFile();
+        Path warArchive = warFile.toPath();
+
+        generateJarInJar(archiveFile, tempArchive, warArchive);
+
+        // Instantiate URL stream handler factory to be able to handle war:
+        WarURLStreamHandlerFactory.getInstance();
+
+        final URL folderResourceURL = new URL(
+                "jar:war:" + warFile.toURI().toURL() + "!/"
+                        + archiveFile.getName() + "!/frontend");
+
+        setupRequestURI("", "", "/frontend/.");
+        when(servletService.getStaticResource("/frontend/."))
+                .thenReturn(folderResourceURL);
+
+        assertTrue(fileServer.serveStaticResource(request, response),
+                "Request should return as static request as we can not determine non file resources in jar files.");
+
+    }
+
+    @Test
+    void isStaticResource_jarInAJar_detectsAsStaticResources()
+            throws IOException {
+        fileServer.writeResponse = false;
+        assertTrue(StaticFileServer.openFileSystems.isEmpty(),
+                "Can not run concurrently with other test");
+
+        final Path folder = Files.createTempDirectory("test");
+
+        File archiveFile = new File(folder.toFile(), "fake.jar");
+        archiveFile.createNewFile();
+        Path tempArchive = archiveFile.toPath();
+
+        File warFile = new File(folder.toFile(), "war.jar");
+        warFile.createNewFile();
+        Path warArchive = warFile.toPath();
+
+        generateJarInJar(archiveFile, tempArchive, warArchive);
+
+        setupRequestURI("", "", "/frontend/.");
+        when(servletService.getStaticResource("/frontend/."))
+                .thenReturn(new URL("jar:" + warFile.toURI().toURL() + "!/"
+                        + archiveFile.getName() + "!/frontend"));
+        assertTrue(fileServer.serveStaticResource(request, response),
+                "Request should return as static request as we can not determine non file resources in jar files.");
+        setupRequestURI("", "", "/file.txt");
+        when(servletService.getStaticResource("/file.txt"))
+                .thenReturn(new URL("jar:" + warFile.toURI().toURL() + "!/"
+                        + archiveFile.getName() + "!/file.txt"));
+        assertTrue(fileServer.serveStaticResource(request, response),
+                "Request should return as static request as we can not determine non file resources in jar files.");
+
+    }
+
+    private Path generateZipArchive(Path folder) throws IOException {
+        File archiveFile = new File(folder.toFile(), "fake.jar");
+        archiveFile.createNewFile();
+        Path tempArchive = archiveFile.toPath();
+
+        try (ZipOutputStream zipOutputStream = new ZipOutputStream(
+                Files.newOutputStream(tempArchive))) {
+            // Create a file to the zip
+            zipOutputStream.putNextEntry(new ZipEntry("/file"));
+            zipOutputStream.closeEntry();
+            // Create a directory to the zip
+            zipOutputStream.putNextEntry(new ZipEntry("frontend/"));
+            zipOutputStream.closeEntry();
+        }
+        return tempArchive;
+    }
+
+    private void generateJarInJar(File archiveFile, Path tempArchive,
+            Path warArchive) throws IOException {
+        try (ZipOutputStream zipOutputStream = new ZipOutputStream(
+                Files.newOutputStream(tempArchive))) {
+            // Create a file to the zip
+            zipOutputStream.putNextEntry(new ZipEntry("/file"));
+            zipOutputStream.closeEntry();
+            // Create a directory to the zip
+            zipOutputStream.putNextEntry(new ZipEntry("frontend/"));
+            zipOutputStream.closeEntry();
+        }
+
+        try (ZipOutputStream warOutputStream = new ZipOutputStream(
+                Files.newOutputStream(warArchive))) {
+            // Create a file to the zip
+            warOutputStream.putNextEntry(new ZipEntry(archiveFile.getName()));
+            warOutputStream.write(Files.readAllBytes(tempArchive));
+
+            warOutputStream.closeEntry();
+        }
+    }
+
+    @Test
+    void openFileServerExistsForZip_openingNewDoesNotFail()
+            throws IOException, URISyntaxException {
+        assertTrue(StaticFileServer.openFileSystems.isEmpty(),
+                "Can not run concurrently with other test");
+
+        final Path folder = Files.createTempDirectory("test");
+
+        Path tempArchive = generateZipArchive(folder);
+
+        final FileSystem fileSystem = FileSystems
+                .newFileSystem(new URL("jar:file:///"
+                        + tempArchive.toString().replaceAll("\\\\", "/") + "!/")
+                        .toURI(), Collections.emptyMap());
+
+        final URL folderResourceURL = new URL(
+                "jar:file:///" + tempArchive.toString().replaceAll("\\\\", "/")
+                        + "!/frontend");
+
+        try {
+            fileServer.getFileSystem(folderResourceURL.toURI());
+        } finally {
+            fileServer.closeFileSystem(folderResourceURL.toURI());
+            fileSystem.close();
+        }
+
+    }
+
+    @Test
+    void openingJarFileSystemForDifferentFilesInSameJar_existingFileSystemIsUsed()
+            throws IOException, URISyntaxException {
+        assertTrue(StaticFileServer.openFileSystems.isEmpty(),
+                "Can not run concurrently with other test");
+
+        final Path folder = Files.createTempDirectory("test");
+
+        Path tempArchive = generateZipArchive(folder);
+
+        final URL folderResourceURL = new URL(
+                "jar:file:///" + tempArchive.toString().replaceAll("\\\\", "/")
+                        + "!/frontend");
+
+        final URL fileResourceURL = new URL(
+                "jar:file:///" + tempArchive.toString().replaceAll("\\\\", "/")
+                        + "!/file.txt");
+
+        fileServer.getFileSystem(folderResourceURL.toURI());
+        fileServer.getFileSystem(fileResourceURL.toURI());
+
+        assertEquals((Integer) 2,
+                StaticFileServer.openFileSystems.entrySet().iterator().next()
+                        .getValue(),
+                "Same file should be marked for both resources");
+        fileServer.closeFileSystem(folderResourceURL.toURI());
+        assertEquals((Integer) 1,
+                StaticFileServer.openFileSystems.entrySet().iterator().next()
+                        .getValue(),
+                "Closing resource should be removed from jar uri");
+        fileServer.closeFileSystem(fileResourceURL.toURI());
+        assertTrue(StaticFileServer.openFileSystems.isEmpty(),
+                "Closing last resource should clear marking");
+
+        try {
+            FileSystems.getFileSystem(folderResourceURL.toURI());
+            fail("Jar FileSystem should have been closed");
+        } catch (FileSystemNotFoundException fsnfe) {
+            // This should happen as we should not have an open FileSystem here.
+        }
+    }
+
+    @Test
+    void concurrentRequestsToJarResources_checksAreCorrect() throws IOException,
+            InterruptedException, ExecutionException, URISyntaxException {
+        fileServer.writeResponse = false;
+        assertTrue(StaticFileServer.openFileSystems.isEmpty(),
+                "Can not run concurrently with other test");
+
+        final Path folder = Files.createTempDirectory("test");
+
+        Path tempArchive = generateZipArchive(folder);
+
+        setupRequestURI("", "", "/frontend/.");
+        final URL folderResourceURL = new URL(
+                "jar:file:///" + tempArchive.toString().replaceAll("\\\\", "/")
+                        + "!/frontend");
+        when(servletService.getStaticResource("/frontend/."))
+                .thenReturn(folderResourceURL);
+
+        int THREADS = 5;
+
+        List<Callable<Result>> folderNotResource = IntStream.range(0, THREADS)
+                .mapToObj(i -> {
+                    Callable<Result> callable = () -> {
+                        try {
+                            if (fileServer.serveStaticResource(request,
+                                    response)) {
+                                throw new IllegalArgumentException(
+                                        "Folder 'frontend' in jar should not be a static resource.");
+                            }
+                        } catch (Exception e) {
+                            return new Result(e);
+                        }
+                        return new Result(null);
+                    };
+                    return callable;
+                }).collect(Collectors.toList());
+
+        ExecutorService executor = Executors.newFixedThreadPool(THREADS);
+        List<Future<Result>> futures = executor.invokeAll(folderNotResource);
+        List<String> exceptions = new ArrayList<>();
+
+        executor.shutdown();
+
+        for (Future<Result> resultFuture : futures) {
+            Result result = resultFuture.get();
+            if (result.exception != null) {
+                exceptions.add(result.exception.getMessage());
+            }
+        }
+
+        assertTrue(exceptions.isEmpty(),
+                "There were exceptions in concurrent requests {" + exceptions
+                        + "}");
+
+        assertFalse(
+                StaticFileServer.openFileSystems
+                        .containsKey(folderResourceURL.toURI()),
+                "Folder URI should have been cleared");
+        try {
+            FileSystems.getFileSystem(folderResourceURL.toURI());
+            fail("FileSystem for folder resource should be closed");
+        } catch (FileSystemNotFoundException fsnfe) {
+            // This should happen as we should not have an open FileSystem here.
+        }
+
+        setupRequestURI("", "", "/file.txt");
+        final URL fileResourceURL = new URL(
+                "jar:file:///" + tempArchive.toString().replaceAll("\\\\", "/")
+                        + "!/file.txt");
+        when(servletService.getStaticResource("/file.txt"))
+                .thenReturn(fileResourceURL);
+
+        List<Callable<Result>> fileIsResource = IntStream.range(0, THREADS)
+                .mapToObj(i -> {
+                    Callable<Result> callable = () -> {
+                        try {
+                            if (!fileServer.serveStaticResource(request,
+                                    response)) {
+                                throw new IllegalArgumentException(
+                                        "File 'file.txt' inside jar should be a static resource.");
+                            }
+                        } catch (Exception e) {
+                            return new Result(e);
+                        }
+                        return new Result(null);
+                    };
+                    return callable;
+                }).collect(Collectors.toList());
+
+        executor = Executors.newFixedThreadPool(THREADS);
+        futures = executor.invokeAll(fileIsResource);
+        exceptions = new ArrayList<>();
+
+        executor.shutdown();
+
+        for (Future<Result> resultFuture : futures) {
+            Result result = resultFuture.get();
+            if (result.exception != null) {
+                exceptions.add(result.exception.getMessage());
+            }
+        }
+
+        assertTrue(exceptions.isEmpty(),
+                "There were exceptions in concurrent requests {" + exceptions
+                        + "}");
+
+        assertFalse(
+                fileServer.openFileSystems.containsKey(fileResourceURL.toURI()),
+                "URI should have been cleared");
+        try {
+            FileSystems.getFileSystem(fileResourceURL.toURI());
+            fail("FileSystem for file resource should be closed");
+        } catch (FileSystemNotFoundException fsnfe) {
+            // This should happen as we should not have an open FileSystem here.
+        }
+
+    }
+
+    private static class Result {
+        final Exception exception;
+
+        Result(Exception exception) {
+            this.exception = exception;
+        }
+    }
+
+    @Test
+    void isNotResourceRequestWithContextPath() throws Exception {
+        setupRequestURI("/context", "", "/");
+        when(servletContext.getResource("/")).thenReturn(new URL("file", "", -1,
+                "flow/flow-tests/non-root-context-test/src/main/webapp/",
+                new URLStreamHandler() {
+
+                    @Override
+                    protected URLConnection openConnection(URL u)
+                            throws IOException {
+                        URLConnection mock = mock(URLConnection.class);
+                        return mock;
+                    }
+                }));
+
+        assertFalse(fileServer.serveStaticResource(request, response));
+    }
+
+    @Test
+    void writeModificationTimestampBrowserHasLatest()
+            throws MalformedURLException {
+        fileServer.overrideBrowserHasNewestVersion = true;
+        Long modificationTimestamp = writeModificationTime();
+        assertEquals(modificationTimestamp, dateHeaders.get("Last-Modified"));
+    }
+
+    @Test
+    void writeModificationTimestampBrowserDoesNotHaveLatest()
+            throws MalformedURLException {
+        fileServer.overrideBrowserHasNewestVersion = false;
+        Long modificationTimestamp = writeModificationTime();
+        assertEquals(modificationTimestamp, dateHeaders.get("Last-Modified"));
+
+    }
+
+    private Long writeModificationTime() throws MalformedURLException {
+        LocalDateTime modificationTime = LocalDateTime.of(2016, 2, 2, 0, 0, 0);
+        Long modificationTimestamp = modificationTime
+                .toEpochSecond(ZoneOffset.UTC) * 1000;
+        String filename = "modified-1d-ago.txt";
+        URL resourceUrl = new URL("file", "", -1, filename,
+                new URLStreamHandler() {
+                    @Override
+                    protected URLConnection openConnection(URL u)
+                            throws IOException {
+                        URLConnection mock = mock(URLConnection.class);
+                        when(mock.getLastModified())
+                                .thenReturn(modificationTimestamp);
+                        return mock;
+                    }
+                });
+
+        fileServer.writeModificationTimestamp(resourceUrl, request, response);
+        return modificationTimestamp;
+    }
+
+    @Test
+    void browserHasNewestVersionUnknownModificiationTime() {
+        assertFalse(fileServer.browserHasNewestVersion(request, -1));
+    }
+
+    @Test
+    void browserHasNewestVersionInvalidModificiationTime() {
+        assertThrows(AssertionError.class, () -> {
+            fileServer.browserHasNewestVersion(request, -2);
+        });
+    }
+
+    @Test
+    void browserHasNewestVersionNoIfModifiedSinceHeader() {
+        long fileModifiedTime = 0;
+
+        assertFalse(
+                fileServer.browserHasNewestVersion(request, fileModifiedTime));
+    }
+
+    @Test
+    void browserHasNewestVersionOlderIfModifiedSinceHeader() {
+        long browserIfModifiedSince = 123L;
+        long fileModifiedTime = 124L;
+        when(request.getDateHeader("If-Modified-Since"))
+                .thenReturn(browserIfModifiedSince);
+
+        assertFalse(
+                fileServer.browserHasNewestVersion(request, fileModifiedTime));
+    }
+
+    @Test
+    void browserHasNewestVersionNewerIfModifiedSinceHeader() {
+        long browserIfModifiedSince = 125L;
+        long fileModifiedTime = 124L;
+        when(request.getDateHeader("If-Modified-Since"))
+                .thenReturn(browserIfModifiedSince);
+
+        assertTrue(
+                fileServer.browserHasNewestVersion(request, fileModifiedTime));
+    }
+
+    @Test
+    void writeCacheHeadersCacheResource() {
+        fileServer.overrideCacheTime = 12;
+        fileServer.writeCacheHeaders("/folder/myfile.txt", response);
+        assertTrue(headers.get("Cache-Control").contains("max-age=12"));
+    }
+
+    @Test
+    void nonProductionMode_writeCacheHeadersCacheResource_noCache() {
+        when(configuration.isProductionMode()).thenReturn(false);
+
+        fileServer.overrideCacheTime = 12;
+        fileServer.writeCacheHeaders("/folder/myfile.txt", response);
+        assertTrue(headers.get("Cache-Control").equals("no-cache"));
+    }
+
+    @Test
+    void writeCacheHeadersDoNotCacheResource() {
+        fileServer.overrideCacheTime = 0;
+        fileServer.writeCacheHeaders("/folder/myfile.txt", response);
+        assertTrue(headers.get("Cache-Control").contains("max-age=0"));
+        assertTrue(headers.get("Cache-Control").contains("must-revalidate"));
+    }
+
+    @Test
+    void nonProductionMode_writeCacheHeadersDoNotCacheResource() {
+        when(configuration.isProductionMode()).thenReturn(false);
+
+        fileServer.overrideCacheTime = 0;
+        fileServer.writeCacheHeaders("/folder/myfile.txt", response);
+        assertTrue(headers.get("Cache-Control").equals("no-cache"));
+    }
+
+    @Test
+    void productionMode_writeCacheHeaders_withVersionParam_oneYearCache() {
+        when(configuration.isProductionMode()).thenReturn(true);
+        when(request.getParameter(ApplicationConstants.CONTENT_HASH_PARAMETER))
+                .thenReturn("abcd1234");
+
+        fileServer.writeCacheHeaders("/folder/myfile.css", request, response);
+        assertEquals("max-age=31536000, immutable",
+                headers.get("Cache-Control"));
+    }
+
+    @Test
+    void getCacheTime() {
+        int oneYear = 60 * 60 * 24 * 365;
+        assertEquals(oneYear, fileServer.getCacheTime("somefile.cache.js"));
+        assertEquals(oneYear,
+                fileServer.getCacheTime("folder/somefile.cache.js"));
+        assertEquals(0, fileServer.getCacheTime("somefile.nocache.js"));
+        assertEquals(0, fileServer.getCacheTime("folder/somefile.nocache.js"));
+        assertEquals(3600, fileServer.getCacheTime("randomfile.js"));
+        assertEquals(3600, fileServer.getCacheTime("folder/randomfile.js"));
+    }
+
+    @Test
+    void serveNonExistingStaticResource() throws IOException {
+        setupRequestURI("", "", "/nonexisting/file.js");
+
+        assertFalse(fileServer.serveStaticResource(request, response));
+    }
+
+    @Test
+    void serveStaticResource() throws IOException {
+        setupRequestURI("", "/some", "/file.js");
+        String fileData = "function() {eval('foo');};";
+
+        when(servletService.getStaticResource("/some/file.js")).thenReturn(
+                createFileURLWithDataAndLength("/some/file.js", fileData));
+
+        assertTrue(fileServer.serveStaticResource(request, response));
+        assertEquals(fileData, out.getOutputString());
+    }
+
+    @Test
+    void contextAndServletPath_serveStaticBundleBuildResource()
+            throws IOException {
+        String pathInfo = "/VAADIN/build/vaadin-bundle-1234.cache.js";
+        setupRequestURI("/context", "/servlet", pathInfo);
+        assertBundleBuildResource(pathInfo);
+    }
+
+    @Test
+    void ServletPath_serveStaticBundleBuildResource() throws IOException {
+        String pathInfo = "/VAADIN/build/vaadin-bundle-1234.cache.js";
+        setupRequestURI("", "/servlet", pathInfo);
+        assertBundleBuildResource(pathInfo);
+    }
+
+    @Test
+    void contextPath_serveStaticBundleBuildResource() throws IOException {
+        String pathInfo = "/VAADIN/build/vaadin-bundle-1234.cache.js";
+        setupRequestURI("/context", "", pathInfo);
+        assertBundleBuildResource(pathInfo);
+    }
+
+    @Test
+    void serveStaticBundleBuildResource() throws IOException {
+        String pathInfo = "/VAADIN/build/vaadin-bundle-1234.cache.js";
+        setupRequestURI("", "", pathInfo);
+        assertBundleBuildResource(pathInfo);
+    }
+
+    @Test
+    void contextAndServletPath_serveStaticFileResource() throws IOException {
+        String pathInfo = "/VAADIN/static/img/bg.jpg";
+        setupRequestURI("/context", "/servlet", pathInfo);
+        assertBundleBuildResource(pathInfo);
+    }
+
+    @Test
+    void ServletPath_serveStaticFileResource() throws IOException {
+        String pathInfo = "/VAADIN/static/img/bg.jpg";
+        setupRequestURI("", "/servlet", pathInfo);
+        assertBundleBuildResource(pathInfo);
+    }
+
+    @Test
+    void contextPath_serveStaticFileResource() throws IOException {
+        String pathInfo = "/VAADIN/static/img/bg.jpg";
+        setupRequestURI("/context", "", pathInfo);
+        assertBundleBuildResource(pathInfo);
+    }
+
+    @Test
+    void serveStaticFileResource() throws IOException {
+        String pathInfo = "/VAADIN/static/img/bg.jpg";
+        setupRequestURI("", "", pathInfo);
+        assertBundleBuildResource(pathInfo);
+    }
+
+    public void assertBundleBuildResource(String pathInfo) throws IOException {
+        String fileData = "function() {eval('foo');};";
+        ClassLoader mockLoader = mock(ClassLoader.class);
+        when(servletService.getClassLoader()).thenReturn(mockLoader);
+
+        when(mockLoader.getResource(WEBAPP_RESOURCE_PREFIX + pathInfo))
+                .thenReturn(createFileURLWithDataAndLength(
+                        "/" + WEBAPP_RESOURCE_PREFIX + pathInfo, fileData));
+
+        mockStatsBundles(mockLoader);
+        mockConfigurationPolyfills();
+
+        assertTrue(fileServer.serveStaticResource(request, response));
+        assertEquals(fileData, out.getOutputString());
+    }
+
+    private void staticBuildResourceWithDirectoryChange_nothingServed(
+            String pathInfo) throws IOException {
+        setupRequestURI("/context", "/servlet", pathInfo);
+        String fileData = "function() {eval('foo');};";
+        ClassLoader mockLoader = mock(ClassLoader.class);
+        when(servletService.getClassLoader()).thenReturn(mockLoader);
+
+        when(mockLoader.getResource(WEBAPP_RESOURCE_PREFIX + pathInfo))
+                .thenReturn(createFileURLWithDataAndLength(
+                        "/" + WEBAPP_RESOURCE_PREFIX + pathInfo, fileData));
+
+        // have data available for /VAADIN/vaadin-bundle-1234.cache.js
+        when(mockLoader.getResource(
+                WEBAPP_RESOURCE_PREFIX + pathInfo.replace("build/../", "")))
+                .thenReturn(
+                        createFileURLWithDataAndLength(
+                                WEBAPP_RESOURCE_PREFIX
+                                        + pathInfo.replace("build/../", ""),
+                                fileData));
+
+        mockStatsBundles(mockLoader);
+        mockConfigurationPolyfills();
+
+        assertTrue(fileServer.serveStaticResource(request, response));
+        assertEquals(0, out.getOutput().length);
+        assertEquals(HttpStatusCode.BAD_REQUEST.getCode(), responseCode.get());
+    }
+
+    @Test
+    void serveStaticResource_uriWithDirectoryChangeWithSlash_returnsImmediatelyAndSetsBadRequestStatus()
+            throws IOException {
+        staticBuildResourceWithDirectoryChange_nothingServed(
+                "/VAADIN/build/../vaadin-bundle-1234.cache.js");
+    }
+
+    @Test
+    void serveStaticResource_uriWithDirectoryChangeWithBackslash_returnsImmediatelyAndSetsBadRequestStatus()
+            throws IOException {
+        staticBuildResourceWithDirectoryChange_nothingServed(
+                "/VAADIN/build/something\\..\\vaadin-bundle-1234.cache.js");
+    }
+
+    @Test
+    void serveStaticResource_uriWithDirectoryChangeWithEncodedBackslashUpperCase_returnsImmediatelyAndSetsBadRequestStatus()
+            throws IOException {
+        staticBuildResourceWithDirectoryChange_nothingServed(
+                "/VAADIN/build/something%5C..%5Cvaadin-bundle-1234.cache.js");
+    }
+
+    @Test
+    void serveStaticResource_uriWithDirectoryChangeWithEncodedBackslashLowerCase_returnsImmediatelyAndSetsBadRequestStatus()
+            throws IOException {
+        staticBuildResourceWithDirectoryChange_nothingServed(
+                "/VAADIN/build/something%5c..%5cvaadin-bundle-1234.cache.js");
+    }
+
+    @Test
+    void serveStaticResource_uriWithDirectoryChangeInTheEndWithSlash_returnsImmediatelyAndSetsBadRequestStatus()
+            throws IOException {
+        staticBuildResourceWithDirectoryChange_nothingServed(
+                "/VAADIN/build/..");
+    }
+
+    @Test
+    void serveStaticResource_uriWithDirectoryChangeInTheEndWithBackslash_returnsImmediatelyAndSetsBadRequestStatus()
+            throws IOException {
+        staticBuildResourceWithDirectoryChange_nothingServed(
+                "/VAADIN/build/something\\..");
+    }
+
+    @Test
+    void serveStaticResource_uriWithDirectoryChangeInTheEndWithEncodedBackslashUpperCase_returnsImmediatelyAndSetsBadRequestStatus()
+            throws IOException {
+        staticBuildResourceWithDirectoryChange_nothingServed(
+                "/VAADIN/build/something%5C..");
+    }
+
+    @Test
+    void serveStaticResource_uriWithDirectoryChangeInTheEndWithEncodedBackslashLowerCase_returnsImmediatelyAndSetsBadRequestStatus()
+            throws IOException {
+        staticBuildResourceWithDirectoryChange_nothingServed(
+                "/VAADIN/build/something%5c..");
+    }
+
+    @Test
+    void serveStaticResource_uriWithPercent_isServed() throws IOException {
+        String pathInfo = "/VAADIN/build/100%.pdf";
+        setupRequestURI("", "", pathInfo);
+        String fileData = "contents";
+        ClassLoader mockLoader = mock(ClassLoader.class);
+        when(servletService.getClassLoader()).thenReturn(mockLoader);
+
+        when(mockLoader.getResource(WEBAPP_RESOURCE_PREFIX + pathInfo))
+                .thenReturn(createFileURLWithDataAndLength(
+                        "/" + WEBAPP_RESOURCE_PREFIX + pathInfo, fileData));
+
+        mockStatsBundles(mockLoader);
+        mockConfigurationPolyfills();
+
+        assertTrue(fileServer.serveStaticResource(request, response));
+        assertEquals(fileData, out.getOutputString());
+    }
+
+    @Test
+    void customStaticBuildResource_isServed() throws IOException {
+        String pathInfo = "/VAADIN/build/my-text.txt";
+        setupRequestURI("", "", pathInfo);
+        String fileData = "function() {eval('foo');};";
+        ClassLoader mockLoader = mock(ClassLoader.class);
+        when(servletService.getClassLoader()).thenReturn(mockLoader);
+
+        when(mockLoader.getResource(WEBAPP_RESOURCE_PREFIX + pathInfo))
+                .thenReturn(createFileURLWithDataAndLength(
+                        "/" + WEBAPP_RESOURCE_PREFIX + pathInfo, fileData));
+
+        mockStatsBundles(mockLoader);
+        mockConfigurationPolyfills();
+
+        assertTrue(fileServer.serveStaticResource(request, response));
+        assertEquals(fileData, out.getOutputString());
+    }
+
+    @Test
+    void nonexistingStaticBuildResource_notServed() throws IOException {
+        String pathInfo = "/VAADIN/build/my-text.txt";
+        setupRequestURI("", "", pathInfo);
+        ClassLoader mockLoader = mock(ClassLoader.class);
+        when(servletService.getClassLoader()).thenReturn(mockLoader);
+
+        mockStatsBundles(mockLoader);
+        mockConfigurationPolyfills();
+
+        assertFalse(fileServer.serveStaticResource(request, response));
+    }
+
+    @Test
+    void staticManifestPathResource_isServed() throws IOException {
+        String pathInfo = "/sw.js";
+        setupRequestURI("", "", pathInfo);
+        String fileData = "function() {eval('foo');};";
+        ClassLoader mockLoader = mock(ClassLoader.class);
+        when(servletService.getClassLoader()).thenReturn(mockLoader);
+
+        when(mockLoader.getResource(WEBAPP_RESOURCE_PREFIX + pathInfo))
+                .thenReturn(createFileURLWithDataAndLength(
+                        "/" + WEBAPP_RESOURCE_PREFIX + pathInfo, fileData));
+
+        assertTrue(fileServer.serveStaticResource(request, response));
+        assertEquals(fileData, out.getOutputString());
+    }
+
+    @Test
+    void staticManifestPathIndexHtmlResource_notServed() throws IOException {
+        String pathInfo = "/index.html";
+        setupRequestURI("", "", pathInfo);
+        String fileData = "function() {eval('foo');};";
+        ClassLoader mockLoader = mock(ClassLoader.class);
+        when(servletService.getClassLoader()).thenReturn(mockLoader);
+
+        when(mockLoader.getResource(WEBAPP_RESOURCE_PREFIX + pathInfo))
+                .thenReturn(createFileURLWithDataAndLength(
+                        "/" + WEBAPP_RESOURCE_PREFIX + pathInfo, fileData));
+
+        assertFalse(fileServer.serveStaticResource(request, response));
+    }
+
+    @Test
+    void customStatsJson_isServedFromServlet() throws IOException {
+        String pathInfo = "/VAADIN/build/stats.json";
+        setupRequestURI("", "/servlet", pathInfo);
+        String fileData = "function() {eval('foo');};";
+
+        ClassLoader mockLoader = mock(ClassLoader.class);
+        when(servletService.getClassLoader()).thenReturn(mockLoader);
+        mockStatsBundles(mockLoader);
+        mockConfigurationPolyfills();
+
+        when(servletService.getStaticResource(pathInfo))
+                .thenReturn(createFileURLWithDataAndLength(pathInfo, fileData));
+
+        assertTrue(fileServer.serveStaticResource(request, response));
+        assertEquals(fileData, out.getOutputString());
+    }
+
+    public void mockConfigurationPolyfills() {
+        when(configuration.getPolyfills()).thenReturn(
+                Arrays.asList(POLYFILLS_DEFAULT_VALUE.split("[, ]+")));
+    }
+
+    public void mockStatsBundles(ClassLoader mockLoader) {
+        when(configuration.getStringProperty(SERVLET_PARAMETER_STATISTICS_JSON,
+                VAADIN_SERVLET_RESOURCES + STATISTICS_JSON_DEFAULT))
+                .thenReturn("META-INF/VAADIN/config/stats.json");
+        when(mockLoader
+                .getResourceAsStream("META-INF/VAADIN/config/stats.json"))
+                .thenReturn(new ByteArrayInputStream(getStatsData()));
+    }
+
+    /**
+     * Returns a byte array for a valid stats.json containing only chunks
+     *
+     * @return
+     */
+    public byte[] getStatsData() {
+        return ("{ " + "\"assetsByChunkName\" :{ "
+                + "\"index\": \"build/vaadin-bundle-1234.cache.js\"} }")
+                .getBytes(StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void serveStaticResourceBrowserHasLatest() throws IOException {
+        long browserLatest = 123L;
+        long fileModified = 123L;
+
+        setupRequestURI("", "/some", "/file.js");
+        when(request.getDateHeader("If-Modified-Since"))
+                .thenReturn(browserLatest);
+
+        String fileData = "function() {eval('foo');};";
+        when(servletService.getStaticResource("/some/file.js"))
+                .thenReturn(createFileURLWithDataAndLength("/some/file.js",
+                        fileData, fileModified));
+
+        assertTrue(fileServer.serveStaticResource(request, response));
+        assertEquals(0, out.getOutput().length);
+        assertEquals(HttpStatusCode.NOT_MODIFIED.getCode(), responseCode.get());
+    }
+
+    @Test
+    void serveStaticResourceFromWebjarWithIncorrectPath() throws IOException {
+        when(configuration.getBooleanProperty(
+                StaticFileServer.PROPERTY_FIX_INCORRECT_WEBJAR_PATHS, false))
+                .thenReturn(true);
+        String fileData = "function() {eval('foo');};";
+        when(servletService.getStaticResource("/webjars/foo/bar.js"))
+                .thenReturn(createFileURLWithDataAndLength(
+                        "/webjars/foo/bar.js", fileData));
+
+        setupRequestURI("", "", "/frontend/src/webjars/foo/bar.js");
+
+        assertTrue(fileServer.serveStaticResource(request, response));
+        assertEquals(fileData, out.getOutputString());
+    }
+
+    @Test
+    void serveStaticResourceFromWebjarWithIncorrectPathAndFixingDisabled()
+            throws IOException {
+        when(configuration.getBooleanProperty(
+                StaticFileServer.PROPERTY_FIX_INCORRECT_WEBJAR_PATHS, false))
+                .thenReturn(false);
+
+        when(servletService
+                .getStaticResource("/frontend/src/webjars/foo/bar.js"))
+                .thenReturn(null);
+
+        setupRequestURI("", "", "/frontend/src/webjars/foo/bar.js");
+
+        assertFalse(fileServer.serveStaticResource(request, response));
+    }
+
+    @Test
+    void getStaticResource_delegateToVaadinService()
+            throws MalformedURLException {
+        URL url = new URL("http://bar");
+        when(servletService.getStaticResource("foo")).thenReturn(url);
+        URL result = fileServer.getStaticResource("foo");
+
+        verify(servletService).getStaticResource("foo");
+        assertSame(url, result);
+    }
+
+    @Test
+    void serveStaticResource_projectThemeResourceRequest_serveFromFrontend()
+            throws IOException {
+        File projectRootFolder = Files
+                .createTempDirectory(temporaryFolder, "temp").toFile();
+        final String styles = "body { background: black; }";
+        TestUtil.createStyleCssStubInFrontend(projectRootFolder, "my-theme",
+                styles);
+
+        when(configuration.isProductionMode()).thenReturn(false);
+        when(configuration.getProjectFolder()).thenReturn(projectRootFolder);
+        when(configuration.getBuildFolder()).thenReturn("target");
+        when(configuration.getFrontendFolder())
+                .thenReturn(new File(projectRootFolder, DEFAULT_FRONTEND_DIR));
+
+        setupRequestURI("", "", "/VAADIN/themes/my-theme/styles.css");
+        assertTrue(fileServer.serveStaticResource(request, response));
+        assertEquals(styles, out.getOutputString());
+    }
+
+    @Test
+    void serveStaticResource_externalThemeResourceRequest_serveFromBundle()
+            throws IOException {
+        File projectRootFolder = Files
+                .createTempDirectory(temporaryFolder, "temp").toFile();
+        final String styles = "body { background: black; }";
+        TestUtil.createStylesCssStubInBundle(projectRootFolder, "my-theme",
+                styles);
+
+        when(configuration.isProductionMode()).thenReturn(false);
+        when(configuration.getProjectFolder()).thenReturn(projectRootFolder);
+        when(configuration.getBuildFolder()).thenReturn("target");
+        when(configuration.getStringProperty(PARAM_FRONTEND_DIR,
+                DEFAULT_FRONTEND_DIR)).thenReturn(DEFAULT_FRONTEND_DIR);
+
+        setupRequestURI("", "", "/VAADIN/themes/my-theme/styles.css");
+        assertTrue(fileServer.serveStaticResource(request, response));
+        assertEquals(styles, out.getOutputString());
+    }
+
+    @Test
+    void serveStaticResource_themeResourceRequest_productionMode_notServeFromBundleNorFromFrontend()
+            throws IOException {
+        File projectRootFolder = Files
+                .createTempDirectory(temporaryFolder, "temp").toFile();
+        final String styles = "body { background: black; }";
+        TestUtil.createStylesCssStubInBundle(projectRootFolder, "my-theme",
+                styles);
+
+        when(configuration.isProductionMode()).thenReturn(true);
+        when(configuration.getProjectFolder()).thenReturn(projectRootFolder);
+        when(configuration.getBuildFolder()).thenReturn("target");
+
+        setupRequestURI("", "", "/themes/my-theme/styles.css");
+        assertFalse(fileServer.serveStaticResource(request, response));
+    }
+
+    @Test
+    void frameworkStaticFolder_withoutEndingSlash_doesNotServeStaticResource()
+            throws IOException {
+        // Test framework static folders without / at the end,
+        // that they do not return a result
+        for (String publicInternalFolderPath : HandlerHelper
+                .getPublicInternalFolderPaths()) {
+            assertTrue(publicInternalFolderPath.startsWith("/"));
+            assertFalse(publicInternalFolderPath.endsWith("/**"));
+
+            setupRequestURI("", "", publicInternalFolderPath);
+            when(servletService.getStaticResource(publicInternalFolderPath))
+                    .thenReturn(URI
+                            .create("file:///" + publicInternalFolderPath + "/")
+                            .toURL());
+
+            assertFalse(fileServer.serveStaticResource(request, response),
+                    publicInternalFolderPath
+                            + " should not be a static resource.");
+        }
+    }
+
+    private static class CapturingServletOutputStream
+            extends ServletOutputStream {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+
+        @Override
+        public void write(int b) throws IOException {
+            baos.write(b);
+        }
+
+        @Override
+        public void setWriteListener(WriteListener writeListener) {
+        }
+
+        @Override
+        public boolean isReady() {
+            return true;
+        }
+
+        public byte[] getOutput() {
+            return baos.toByteArray();
+        }
+
+        public String getOutputString() {
+            return new String(getOutput(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private static class OverrideableStaticFileServer extends StaticFileServer {
+        public boolean writeResponse = true;
+        private Boolean overrideBrowserHasNewestVersion;
+        private Integer overrideCacheTime;
+        private DeploymentConfiguration configuration;
+
+        OverrideableStaticFileServer(VaadinServletService servletService,
+                DeploymentConfiguration configuration) {
+            super(servletService);
+            this.configuration = configuration;
+        }
+
+        @Override
+        protected boolean browserHasNewestVersion(HttpServletRequest request,
+                long resourceLastModifiedTimestamp) {
+            if (overrideBrowserHasNewestVersion != null) {
+                return overrideBrowserHasNewestVersion;
+            }
+
+            return super.browserHasNewestVersion(request,
+                    resourceLastModifiedTimestamp);
+        }
+
+        @Override
+        protected int getCacheTime(String filenameWithPath) {
+            if (overrideCacheTime != null) {
+                return overrideCacheTime;
+            }
+            return super.getCacheTime(filenameWithPath);
+        }
+
+        @Override
+        public boolean serveStaticResource(HttpServletRequest request,
+                HttpServletResponse response) throws IOException {
+            if (!writeResponse)
+                try {
+                    {
+                        ResponseWriter fakeWriter = new ResponseWriter(
+                                configuration) {
+                            @Override
+                            public void writeResponseContents(
+                                    String filenameWithPath, URL resourceUrl,
+                                    HttpServletRequest request,
+                                    HttpServletResponse response) {
+                            }
+                        };
+                        Field f = StaticFileServer.class
+                                .getDeclaredField("responseWriter");
+                        f.setAccessible(true);
+                        f.set(this, fakeWriter);
+                    }
+                } catch (IllegalArgumentException | IllegalAccessException
+                        | NoSuchFieldException | SecurityException e) {
+                    throw new RuntimeException(e);
+                }
+            return super.serveStaticResource(request, response);
+        }
+
+    }
+}

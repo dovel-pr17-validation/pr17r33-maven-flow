@@ -1,0 +1,352 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.plugin.maven;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugin.MojoFailureException;
+import org.apache.maven.project.MavenProject;
+import org.codehaus.plexus.util.FileUtils;
+import org.codehaus.plexus.util.ReflectionUtils;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import tools.jackson.databind.node.ObjectNode;
+
+import com.vaadin.flow.internal.FrontendUtils;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.plugin.TestUtils;
+import com.vaadin.flow.server.Constants;
+import com.vaadin.flow.server.InitParameters;
+import com.vaadin.flow.server.frontend.FrontendTools;
+import com.vaadin.flow.server.frontend.installer.NodeInstaller;
+
+import static com.vaadin.flow.plugin.maven.BuildFrontendMojoTest.assertContainsPackage;
+import static com.vaadin.flow.plugin.maven.BuildFrontendMojoTest.assertNotContainingPackages;
+import static com.vaadin.flow.plugin.maven.BuildFrontendMojoTest.getPackageJson;
+import static com.vaadin.flow.plugin.maven.BuildFrontendMojoTest.setProject;
+import static com.vaadin.flow.server.Constants.PACKAGE_JSON;
+import static com.vaadin.flow.server.Constants.VAADIN_SERVLET_RESOURCES;
+import static com.vaadin.flow.server.Constants.VAADIN_WEBAPP_RESOURCES;
+import static com.vaadin.flow.server.InitParameters.FRONTEND_HOTDEPLOY;
+import static com.vaadin.flow.server.InitParameters.SERVLET_PARAMETER_PRODUCTION_MODE;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+
+class PrepareFrontendMojoTest {
+    @TempDir
+    Path tempDir;
+
+    private final PrepareFrontendMojo mojo = new PrepareFrontendMojo();
+    private String packageJson;
+    private File projectBase;
+    private File webpackOutputDirectory;
+    private File resourceOutputDirectory;
+    private File tokenFile;
+    private File defaultJavaSource;
+    private File defaultJavaResource;
+    private File generatedTsFolder;
+
+    @BeforeEach
+    void setup() throws Exception {
+
+        projectBase = tempDir.toFile();
+
+        tokenFile = new File(tempDir.toFile(),
+                VAADIN_SERVLET_RESOURCES + FrontendUtils.TOKEN_FILE);
+
+        packageJson = new File(projectBase, PACKAGE_JSON).getAbsolutePath();
+        webpackOutputDirectory = new File(projectBase, VAADIN_WEBAPP_RESOURCES);
+        resourceOutputDirectory = new File(projectBase,
+                VAADIN_SERVLET_RESOURCES);
+        defaultJavaSource = new File(".", "src/test/java");
+        defaultJavaResource = new File(".", "src/test/resources");
+        generatedTsFolder = new File(projectBase,
+                "src/main/frontend/generated");
+
+        ReflectionUtils.setVariableValueInObject(mojo, Constants.NPM_TOKEN,
+                projectBase);
+        ReflectionUtils.setVariableValueInObject(mojo, "webpackOutputDirectory",
+                webpackOutputDirectory);
+        ReflectionUtils.setVariableValueInObject(mojo,
+                "resourceOutputDirectory", resourceOutputDirectory);
+        ReflectionUtils.setVariableValueInObject(mojo, "frontendDirectory",
+                new File(projectBase, "src/main/frontend"));
+
+        ReflectionUtils.setVariableValueInObject(mojo, "openApiJsonFile",
+                new File(projectBase,
+                        "target/generated-resources/openapi.json"));
+        ReflectionUtils.setVariableValueInObject(mojo, "applicationProperties",
+                new File(projectBase,
+                        "src/main/resources/application.properties"));
+        ReflectionUtils.setVariableValueInObject(mojo, "javaSourceFolder",
+                defaultJavaSource);
+        ReflectionUtils.setVariableValueInObject(mojo, "javaResourceFolder",
+                defaultJavaResource);
+        ReflectionUtils.setVariableValueInObject(mojo, "generatedTsFolder",
+                generatedTsFolder);
+
+        ReflectionUtils.setVariableValueInObject(mojo, "pnpmEnable",
+                Constants.ENABLE_PNPM_DEFAULT);
+        ReflectionUtils.setVariableValueInObject(mojo, "requireHomeNodeExec",
+                true);
+        ReflectionUtils.setVariableValueInObject(mojo, "nodeVersion",
+                FrontendTools.DEFAULT_NODE_VERSION);
+        ReflectionUtils.setVariableValueInObject(mojo, "nodeDownloadRoot",
+                NodeInstaller.DEFAULT_NODEJS_DOWNLOAD_ROOT);
+        ReflectionUtils.setVariableValueInObject(mojo, "projectBasedir",
+                projectBase);
+        ReflectionUtils.setVariableValueInObject(mojo, "projectBuildDir",
+                Paths.get(projectBase.toString(), "target").toString());
+
+        setProject(mojo, projectBase);
+    }
+
+    @Test
+    void tokenFileShouldExist_noHotdeployTokenVisible()
+            throws IOException, MojoExecutionException, MojoFailureException {
+        mojo.execute();
+        assertTrue(tokenFile.exists(), "No token file could be found");
+
+        String json = org.apache.commons.io.FileUtils
+                .readFileToString(tokenFile, "UTF-8");
+        ObjectNode buildInfo = JacksonUtils.readTree(json);
+        assertNull(buildInfo.get(FRONTEND_HOTDEPLOY),
+                "Default HotDeploy token should not be available");
+        assertNotNull(buildInfo.get(SERVLET_PARAMETER_PRODUCTION_MODE),
+                "productionMode token should be available");
+    }
+
+    @Test
+    void tokenFileShouldExist_hotdeployIsTrueTokenVisible()
+            throws IOException, MojoExecutionException, MojoFailureException,
+            IllegalAccessException {
+        ReflectionUtils.setVariableValueInObject(mojo, "frontendHotdeploy",
+                Boolean.TRUE);
+        mojo.execute();
+        assertTrue(tokenFile.exists(), "No token file could be found");
+
+        String json = org.apache.commons.io.FileUtils
+                .readFileToString(tokenFile, "UTF-8");
+        ObjectNode buildInfo = JacksonUtils.readTree(json);
+        assertNotNull(buildInfo.get(FRONTEND_HOTDEPLOY),
+                "HotDeploy should be written");
+        assertTrue(buildInfo.get(FRONTEND_HOTDEPLOY).booleanValue(),
+                "HotDeploy should be enabled");
+    }
+
+    @Test
+    void existingTokenFile_defaultFrontendHotdeployShouldBeRemoved()
+            throws IOException, MojoExecutionException, MojoFailureException {
+
+        ObjectNode initialBuildInfo = JacksonUtils.createObjectNode();
+        initialBuildInfo.put(SERVLET_PARAMETER_PRODUCTION_MODE, false);
+        initialBuildInfo.put(FRONTEND_HOTDEPLOY, true);
+        org.apache.commons.io.FileUtils.forceMkdir(tokenFile.getParentFile());
+        org.apache.commons.io.FileUtils.write(tokenFile,
+                initialBuildInfo.toPrettyString() + "\n", "UTF-8");
+
+        mojo.execute();
+
+        String json = org.apache.commons.io.FileUtils
+                .readFileToString(tokenFile, "UTF-8");
+        ObjectNode buildInfo = JacksonUtils.readTree(json);
+        assertNull(buildInfo.get(FRONTEND_HOTDEPLOY),
+                "Default hotdeploy should not be added");
+        assertNotNull(buildInfo.get(SERVLET_PARAMETER_PRODUCTION_MODE),
+                "productionMode token should be available");
+    }
+
+    @Test
+    void writeTokenFile_devModePropertiesAreWritten()
+            throws IOException, MojoExecutionException, MojoFailureException {
+
+        mojo.execute();
+
+        String json = org.apache.commons.io.FileUtils
+                .readFileToString(tokenFile, StandardCharsets.UTF_8);
+        ObjectNode buildInfo = JacksonUtils.readTree(json);
+
+        assertTrue(buildInfo.has(InitParameters.SERVLET_PARAMETER_ENABLE_PNPM),
+                InitParameters.SERVLET_PARAMETER_ENABLE_PNPM
+                        + "should have been written");
+        assertFalse(
+                buildInfo.get(InitParameters.SERVLET_PARAMETER_ENABLE_PNPM)
+                        .booleanValue(),
+                InitParameters.SERVLET_PARAMETER_ENABLE_PNPM
+                        + "should have been disabled");
+
+        assertTrue(buildInfo.has(InitParameters.REQUIRE_HOME_NODE_EXECUTABLE),
+                InitParameters.REQUIRE_HOME_NODE_EXECUTABLE
+                        + "should have been written");
+        assertTrue(
+                buildInfo.get(InitParameters.REQUIRE_HOME_NODE_EXECUTABLE)
+                        .booleanValue(),
+                InitParameters.REQUIRE_HOME_NODE_EXECUTABLE
+                        + "should have been enabled");
+
+        assertFalse(buildInfo
+                .has(InitParameters.SERVLET_PARAMETER_DEVMODE_OPTIMIZE_BUNDLE),
+                InitParameters.SERVLET_PARAMETER_DEVMODE_OPTIMIZE_BUNDLE
+                        + "should not have been written");
+    }
+
+    @Test
+    void mavenGoal_when_packageJsonMissing_shouldNotGenerateDefault()
+            throws Exception {
+        assertFalse(FileUtils.fileExists(packageJson));
+        mojo.execute();
+        assertFalse(FileUtils.fileExists(packageJson));
+    }
+
+    @Test
+    void mavenGoal_when_frontendGeneratedExists_shouldClearFolder()
+            throws Exception {
+        if (!generatedTsFolder.mkdirs()) {
+            fail("Failed to generate Frontend/generated folders.");
+        }
+        final File flowFolder = new File(generatedTsFolder, "flow");
+        if (!flowFolder.mkdir()) {
+            fail("Failed to generate flow folder");
+        }
+        final File oldFile = new File(flowFolder, "old.js");
+        if (!oldFile.createNewFile()) {
+            fail("Failed to generate old.js in Frontend/generated/flow");
+        }
+
+        mojo.execute();
+        assertTrue(generatedTsFolder.exists(), "Missing generated folder");
+        assertFalse(oldFile.exists(), "Old file should have been removed");
+    }
+
+    @Test
+    void should_updateAndKeepDependencies_when_packageJsonExists()
+            throws Exception {
+        ObjectNode json = TestUtils.getInitialPackageJson();
+        json.set("dependencies", JacksonUtils.createObjectNode());
+        ((ObjectNode) json.get("dependencies")).put("foo", "bar");
+        FileUtils.fileWrite(packageJson, json.toString());
+        mojo.execute();
+        assertPackageJsonContent();
+
+        ObjectNode packageJsonObject = getPackageJson(packageJson);
+        assertContainsPackage(packageJsonObject.get("dependencies"), "foo");
+    }
+
+    @Test
+    void jarPackaging_copyProjectFrontendResources()
+            throws MojoExecutionException, MojoFailureException,
+            IllegalAccessException {
+        mojo.project.setPackaging("jar");
+        MavenProject project = spy(mojo.project);
+        ReflectionUtils.setVariableValueInObject(mojo, "project", project);
+
+        mojo.execute();
+
+        verify(project, atLeastOnce()).getArtifacts();
+    }
+
+    private void assertPackageJsonContent() throws IOException {
+        ObjectNode packageJsonObject = getPackageJson(packageJson);
+
+        assertNotContainingPackages(packageJsonObject.get("dependencies"),
+                "@polymer/polymer");
+
+        assertContainsPackage(packageJsonObject.get("devDependencies"), "vite",
+                "rollup-plugin-brotli", "vite-plugin-checker");
+    }
+
+    @Test
+    void buildFolder_buildDirInsideBasedir_returnsRelativeName()
+            throws Exception {
+        ReflectionUtils.setVariableValueInObject(mojo, "projectBuildDir",
+                new File(projectBase, "target").getAbsolutePath());
+
+        assertEquals("target", mojo.buildFolder());
+    }
+
+    // buildFolder() is consumed as new File(npmFolder, buildFolder()), so the
+    // four absolute/relative combinations of basedir and build dir must all
+    // resolve back to the real build dir, never a nested junk path under the
+    // source tree. Only the absolute/absolute combination occurs in a real
+    // Maven build; the others guard exotic setups.
+
+    @Test
+    void buildFolder_baseAbsolute_buildAbsolute_resolvesToBuildDir()
+            throws Exception {
+        File basedir = projectBase; // absolute
+        File buildDir = new File(projectBase.getParentFile(), "custom-build");
+        assertBuildFolderResolvesTo(basedir, buildDir.getAbsolutePath(),
+                buildDir);
+    }
+
+    @Test
+    void buildFolder_baseAbsolute_buildRelative_resolvesToBuildDir()
+            throws Exception {
+        File basedir = projectBase; // absolute
+        String buildDir = "../custom-build"; // relative to basedir
+        assertBuildFolderResolvesTo(basedir, buildDir,
+                new File(basedir, buildDir));
+    }
+
+    @Test
+    void buildFolder_baseRelative_buildAbsolute_resolvesToBuildDir()
+            throws Exception {
+        File basedir = new File("relative-base");
+        File buildDir = new File(projectBase.getParentFile(), "custom-build");
+        assertBuildFolderResolvesTo(basedir, buildDir.getAbsolutePath(),
+                buildDir);
+    }
+
+    @Test
+    void buildFolder_baseRelative_buildRelative_resolvesToBuildDir()
+            throws Exception {
+        File basedir = new File("relative-base");
+        String buildDir = "../custom-build"; // relative to basedir
+        assertBuildFolderResolvesTo(basedir, buildDir,
+                new File(basedir, buildDir));
+    }
+
+    private void assertBuildFolderResolvesTo(File basedir,
+            String projectBuildDir, File expectedBuildDir) throws Exception {
+        // npmFolder always equals basedir in a real project.
+        ReflectionUtils.setVariableValueInObject(mojo, Constants.NPM_TOKEN,
+                basedir);
+        ReflectionUtils.setVariableValueInObject(mojo, "projectBasedir",
+                basedir);
+        ReflectionUtils.setVariableValueInObject(mojo, "projectBuildDir",
+                projectBuildDir);
+
+        File resolved = new File(mojo.npmFolder(), mojo.buildFolder());
+        assertEquals(normalize(expectedBuildDir), normalize(resolved));
+    }
+
+    private static Path normalize(File file) {
+        return file.getAbsoluteFile().toPath().normalize();
+    }
+}

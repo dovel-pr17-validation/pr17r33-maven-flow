@@ -1,0 +1,143 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.auth;
+
+import java.lang.reflect.Field;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+import org.mockito.AdditionalAnswers;
+
+import com.vaadin.flow.di.DefaultInstantiator;
+import com.vaadin.flow.di.Lookup;
+import com.vaadin.flow.server.InitParameters;
+import com.vaadin.flow.server.InvalidMenuAccessControlException;
+import com.vaadin.flow.server.VaadinContext;
+import com.vaadin.flow.server.VaadinService;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@Isolated
+class DefaultInstantiatorMenuAccessControlTest {
+    private ClassLoader contextClassLoader;
+    private ClassLoader classLoader;
+
+    @BeforeEach
+    void init() throws NoSuchFieldException, IllegalAccessException,
+            ClassNotFoundException {
+        clearMenuAccessControlField();
+        contextClassLoader = Thread.currentThread().getContextClassLoader();
+
+        classLoader = mock(ClassLoader.class);
+        when(classLoader.loadClass(any()))
+                .thenAnswer(AdditionalAnswers.delegatesTo(contextClassLoader));
+        Thread.currentThread().setContextClassLoader(classLoader);
+    }
+
+    @AfterEach
+    void destroy() throws NoSuchFieldException, IllegalAccessException {
+        Thread.currentThread().setContextClassLoader(contextClassLoader);
+    }
+
+    @Test
+    void defaultInstantiator_getMenuAccessControl_defaultMenuAccessControl()
+            throws ClassNotFoundException {
+        VaadinService service = mock(VaadinService.class);
+        mockLookup(service);
+        DefaultInstantiator defaultInstantiator = new DefaultInstantiator(
+                service);
+        MenuAccessControl menuAccessControl = defaultInstantiator
+                .getMenuAccessControl();
+        assertNotNull(menuAccessControl);
+        assertTrue(menuAccessControl instanceof DefaultMenuAccessControl);
+        assertSame(menuAccessControl.getPopulateClientSideMenu(),
+                MenuAccessControl.PopulateClientMenu.AUTOMATIC);
+    }
+
+    @Test
+    void defaultInstantiator_getMenuAccessControl_customMenuAccessControl()
+            throws ClassNotFoundException {
+        String customMenuAccessControlClassName = "com.vaadin.flow.server.auth.CustomMenuAccessControl";
+
+        VaadinService service = mock(VaadinService.class);
+        mockLookup(service);
+        DefaultInstantiator defaultInstantiator = new DefaultInstantiator(
+                service) {
+            @Override
+            protected String getInitProperty(String propertyName) {
+                return customMenuAccessControlClassName;
+            }
+        };
+        MenuAccessControl menuAccessControl = defaultInstantiator
+                .getMenuAccessControl();
+        assertNotNull(menuAccessControl);
+        assertTrue(menuAccessControl instanceof CustomMenuAccessControl);
+        assertSame(menuAccessControl.getPopulateClientSideMenu(),
+                MenuAccessControl.PopulateClientMenu.ALWAYS);
+
+        verify(classLoader).loadClass(customMenuAccessControlClassName);
+    }
+
+    @Test
+    void defaultInstantiator_getMenuAccessControlWithInvalidType_throwException() {
+        VaadinService service = mock(VaadinService.class);
+        mockLookup(service);
+        DefaultInstantiator defaultInstantiator = new DefaultInstantiator(
+                service) {
+            @Override
+            protected String getInitProperty(String propertyName) {
+                return "com.vaadin.flow.server.auth.InvalidMenuAccessControl";
+            }
+        };
+        String errorMessage = assertThrows(
+                InvalidMenuAccessControlException.class,
+                () -> defaultInstantiator.getMenuAccessControl()).getMessage();
+        assertEquals("Menu access control implementation class property '"
+                + InitParameters.MENU_ACCESS_CONTROL
+                + "' is set to 'com.vaadin.flow.server.auth.InvalidMenuAccessControl' but it's not "
+                + MenuAccessControl.class.getSimpleName() + " implementation",
+                errorMessage);
+    }
+
+    public static void clearMenuAccessControlField()
+            throws NoSuchFieldException, IllegalAccessException {
+        Field field = DefaultInstantiator.class
+                .getDeclaredField("menuAccessControl");
+        field.setAccessible(true);
+        ((AtomicReference<MenuAccessControl>) field.get(null)).set(null);
+        field.setAccessible(false);
+    }
+
+    private Lookup mockLookup(VaadinService service) {
+        VaadinContext context = mock(VaadinContext.class);
+        when(service.getContext()).thenReturn(context);
+
+        Lookup lookup = mock(Lookup.class);
+        when(context.getAttribute(Lookup.class)).thenReturn(lookup);
+        return lookup;
+    }
+}

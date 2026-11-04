@@ -1,0 +1,759 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.internal;
+
+import java.io.Serializable;
+import java.lang.annotation.Annotation;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.lang.reflect.TypeVariable;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import net.bytebuddy.ByteBuddy;
+import net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+class ReflectToolsTest {
+
+    public class NonStaticInnerClass {
+        public NonStaticInnerClass() {
+
+        }
+    }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.TYPE)
+    public @interface TestAnnotation {
+        String value();
+    }
+
+    @TestAnnotation("foo")
+    public static class ClassWithAnnotation {
+
+    }
+
+    public static class ClassWithoutAnnotation {
+
+    }
+
+    private class PrivateInnerClass {
+    }
+
+    private static class PrivateStaticInnerClassPublicConstructor {
+        @SuppressWarnings("unused")
+        public PrivateStaticInnerClassPublicConstructor() {
+
+        }
+    }
+
+    public static class StaticInnerPrivateConstructorClass {
+        private StaticInnerPrivateConstructorClass() {
+        }
+    }
+
+    public static class StaticInnerConstructorNeedsParamsClass {
+        public StaticInnerConstructorNeedsParamsClass(String foo) {
+
+        }
+    }
+
+    public static class ConstructorThrowsExceptionClass {
+        public ConstructorThrowsExceptionClass() {
+            throw new NullPointerException();
+        }
+    }
+
+    public static class OkToCreate {
+
+    }
+
+    public static class VarArgsCtor {
+
+        public VarArgsCtor(String... args) {
+
+        }
+    }
+
+    public interface Entity<ID> {
+        ID getId();
+
+        void setId(ID id);
+    }
+
+    public static class CustomClassLoader extends ClassLoader {
+        protected CustomClassLoader(ClassLoader parent) {
+            super(parent);
+        }
+
+        protected CustomClassLoader() {
+            super();
+        }
+    }
+
+    public class Category implements Serializable, Entity<Long> {
+
+        @Override
+        public Long getId() {
+            return null;
+        }
+
+        @Override
+        public void setId(Long id) {
+        }
+    }
+
+    @Test
+    void testCreateInstance() {
+        OkToCreate instance = ReflectTools.createInstance(OkToCreate.class);
+
+        assertNotNull(instance);
+        assertSame(OkToCreate.class, instance.getClass(),
+                "Created instance should be of the requested type");
+    }
+
+    @Test
+    void testCreateInstance_varArgsCtor() {
+        VarArgsCtor instance = ReflectTools.createInstance(VarArgsCtor.class);
+
+        assertNotNull(instance);
+        assertSame(VarArgsCtor.class, instance.getClass(),
+                "Created instance should be of the requested type");
+    }
+
+    @Test
+    void createNonStaticInnerClass() {
+        assertError(
+                ReflectTools.CREATE_INSTANCE_FAILED_FOR_NON_STATIC_MEMBER_CLASS,
+                NonStaticInnerClass.class);
+    }
+
+    @Test
+    void createPrivateInnerClass() {
+        assertError(
+                ReflectTools.CREATE_INSTANCE_FAILED_FOR_NON_STATIC_MEMBER_CLASS,
+                PrivateInnerClass.class);
+    }
+
+    @Test
+    void createStaticInnerPrivateConstructorClass() {
+        assertError(
+                ReflectTools.CREATE_INSTANCE_FAILED_NO_PUBLIC_NOARG_CONSTRUCTOR,
+                StaticInnerPrivateConstructorClass.class);
+    }
+
+    @Test
+    void createStaticInnerConstructorNeedsParamsClass() {
+        assertError(
+                ReflectTools.CREATE_INSTANCE_FAILED_NO_PUBLIC_NOARG_CONSTRUCTOR,
+                StaticInnerConstructorNeedsParamsClass.class);
+    }
+
+    @Test
+    void createConstructorThrowsExceptionClass() {
+        assertError(
+                ReflectTools.CREATE_INSTANCE_FAILED_CONSTRUCTOR_THREW_EXCEPTION,
+                ConstructorThrowsExceptionClass.class);
+    }
+
+    @Test
+    void localClass() {
+        class LocalClass {
+        }
+        assertError(ReflectTools.CREATE_INSTANCE_FAILED_LOCAL_CLASS,
+                LocalClass.class);
+    }
+
+    @Test
+    void createProxyForNonStaticInnerClass() {
+        Class<NonStaticInnerClass> originalClass = NonStaticInnerClass.class;
+        Class<?> proxyClass = createProxyClass(originalClass);
+
+        // Even though proxyClass was created on top of NonStaticInnerClass, the
+        // exception message does not show it.
+        // It's sort of a feature, because proxy class is created as a top-level
+        // class.
+        assertError(
+                ReflectTools.CREATE_INSTANCE_FAILED_NO_PUBLIC_NOARG_CONSTRUCTOR,
+                proxyClass);
+
+        // This is how you get correct exception message.
+        try {
+            ReflectTools.createProxyInstance(proxyClass, originalClass);
+            fail("Creation should cause an exception");
+        } catch (IllegalArgumentException re) {
+            assertEquals(String.format(
+                    ReflectTools.CREATE_INSTANCE_FAILED_FOR_NON_STATIC_MEMBER_CLASS,
+                    originalClass.getName()), re.getMessage());
+        }
+    }
+
+    public interface TestInterface<T> {
+
+    }
+
+    public static class HasInterface implements TestInterface<String> {
+    }
+
+    public static class ParentInterface implements TestInterface<Boolean> {
+    }
+
+    public static class ChildInterface extends ParentInterface {
+    }
+
+    public interface TestInterfaceMulti<T, R, S> {
+
+    }
+
+    public static class HasInterfaceMulti
+            implements TestInterfaceMulti<String, Integer, Double> {
+    }
+
+    public static class ParentInterfacePartial<Z>
+            implements TestInterfaceMulti<Boolean, Z, Long> {
+    }
+
+    public static class ParentInterfaceMulti
+            implements TestInterfaceMulti<Boolean, Float, Long> {
+
+    }
+
+    public static class ChildInterfaceMulti extends ParentInterfaceMulti {
+    }
+
+    public static class ChildInterfacePartial
+            extends ParentInterfacePartial<Short> {
+    }
+
+    public static abstract class TestAbstractClass {
+
+    }
+
+    protected static class TestProtectedClass {
+
+    }
+
+    protected static class TestPackageProtectedClass {
+
+    }
+
+    private static class TestPrivateClass {
+
+    }
+
+    public static class NormalService {
+
+    }
+
+    public static class TestNoNonArgConstructorClass {
+        public TestNoNonArgConstructorClass(String foo) {
+
+        }
+    }
+
+    @Test
+    void getGenericInterfaceClass() {
+        Class<?> genericInterfaceType = ReflectTools.getGenericInterfaceType(
+                HasInterface.class, TestInterface.class);
+
+        assertEquals(String.class, genericInterfaceType);
+
+        genericInterfaceType = ReflectTools.getGenericInterfaceType(
+                ChildInterface.class, TestInterface.class);
+
+        assertEquals(Boolean.class, genericInterfaceType);
+    }
+
+    @Test
+    void getGenericInterfaceClasses() {
+
+        List<Class<?>> genericInterfaceTypes = ReflectTools
+                .getGenericInterfaceTypes(HasInterface.class,
+                        TestInterface.class);
+        assertArrayEquals(new Class<?>[] { String.class },
+                genericInterfaceTypes.toArray());
+
+        genericInterfaceTypes = ReflectTools.getGenericInterfaceTypes(
+                ChildInterface.class, TestInterface.class);
+        assertArrayEquals(new Class<?>[] { Boolean.class },
+                genericInterfaceTypes.toArray());
+
+        genericInterfaceTypes = ReflectTools.getGenericInterfaceTypes(
+                HasInterfaceMulti.class, TestInterfaceMulti.class);
+        assertArrayEquals(
+                new Class<?>[] { String.class, Integer.class, Double.class },
+                genericInterfaceTypes.toArray());
+
+        genericInterfaceTypes = ReflectTools.getGenericInterfaceTypes(
+                ChildInterfaceMulti.class, TestInterfaceMulti.class);
+        assertArrayEquals(
+                new Class<?>[] { Boolean.class, Float.class, Long.class },
+                genericInterfaceTypes.toArray());
+
+        genericInterfaceTypes = ReflectTools.getGenericInterfaceTypes(
+                ChildInterfacePartial.class, TestInterfaceMulti.class);
+        assertArrayEquals(
+                new Class<?>[] { Boolean.class, Short.class, Long.class },
+                genericInterfaceTypes.toArray());
+    }
+
+    public static class GenericHasInterface<X> implements TestInterface<X> {
+    }
+
+    @SuppressWarnings("rawtypes")
+    public static class RawHasInterface implements TestInterface {
+    }
+
+    public static class Holder {
+        GenericHasInterface<List<String>> parameterized;
+        @SuppressWarnings("rawtypes")
+        GenericHasInterface raw;
+    }
+
+    @Test
+    void getTypeParameter_unresolvedOrRaw() throws Exception {
+        TypeVariable<Class<TestInterface>> variable = TestInterface.class
+                .getTypeParameters()[0];
+
+        ParameterizedType parameterized = (ParameterizedType) Holder.class
+                .getDeclaredField("parameterized").getGenericType();
+        assertEquals(parameterized.getActualTypeArguments()[0],
+                ReflectTools.getTypeParameter(parameterized, variable));
+        assertSame(GenericHasInterface.class.getTypeParameters()[0],
+                ReflectTools.getTypeParameter(
+                        GenericHasInterface.class.getGenericInterfaces()[0],
+                        variable));
+        assertNull(ReflectTools.getTypeParameter(GenericHasInterface.class,
+                variable));
+        assertNull(ReflectTools.getTypeParameter(
+                Holder.class.getDeclaredField("raw").getGenericType(),
+                variable));
+        assertNull(
+                ReflectTools.getTypeParameter(RawHasInterface.class, variable));
+        assertNull(ReflectTools.getTypeParameter(String.class, variable));
+    }
+
+    public static class GenericSubclassOfNonGeneric<T> extends HasInterface {
+    }
+
+    public static class GenericSubSubclass<T>
+            extends GenericSubclassOfNonGeneric<T> {
+    }
+
+    public static class ArrayHasInterface<T> implements TestInterface<T[]> {
+    }
+
+    public static class StringArrayHasInterface
+            extends ArrayHasInterface<String> {
+    }
+
+    @Test
+    void getTypeParameter_rawGenericSubclassOfNonGenericClass_resolvedThroughNonGenericClass() {
+        assertEquals(String.class,
+                ReflectTools.getTypeParameter(GenericSubSubclass.class,
+                        TestInterface.class.getTypeParameters()[0]));
+    }
+
+    @Test
+    void getTypeParameter_genericArrayArgument_componentTypeSubstituted() {
+        assertEquals(String[].class,
+                ReflectTools.getTypeParameter(StringArrayHasInterface.class,
+                        TestInterface.class.getTypeParameters()[0]));
+    }
+
+    public static class GenericHolder<N extends Number, H extends HasInterface> {
+        N number;
+        H hasInterface;
+        List<? extends HasInterface> hasInterfaces;
+        List<String>[] lists;
+    }
+
+    @Test
+    void getTypeParameter_typeVariableOrWildcard_resolvedThroughBound()
+            throws Exception {
+        TypeVariable<Class<TestInterface>> variable = TestInterface.class
+                .getTypeParameters()[0];
+
+        assertEquals(String.class, ReflectTools.getTypeParameter(
+                genericHolderFieldType("hasInterface"), variable));
+        assertEquals(String.class, ReflectTools.getTypeParameter(
+                ((ParameterizedType) genericHolderFieldType("hasInterfaces"))
+                        .getActualTypeArguments()[0],
+                variable));
+    }
+
+    @Test
+    void erase_typeVariableWildcardAndGenericArray() throws Exception {
+        assertEquals(Number.class,
+                ReflectTools.erase(genericHolderFieldType("number")));
+        assertEquals(HasInterface.class, ReflectTools.erase(
+                ((ParameterizedType) genericHolderFieldType("hasInterfaces"))
+                        .getActualTypeArguments()[0]));
+        assertEquals(List[].class,
+                ReflectTools.erase(genericHolderFieldType("lists")));
+    }
+
+    private static Type genericHolderFieldType(String name)
+            throws NoSuchFieldException {
+        return GenericHolder.class.getDeclaredField(name).getGenericType();
+    }
+
+    @Test
+    void findCommonBaseType_sameType() {
+        assertSame(Number.class,
+                ReflectTools.findCommonBaseType(Number.class, Number.class));
+    }
+
+    @Test
+    void findCommonBaseType_aExtendsB() {
+        assertSame(Number.class,
+                ReflectTools.findCommonBaseType(Integer.class, Number.class));
+    }
+
+    @Test
+    void findCommonBaseType_bExtendsA() {
+        assertSame(Number.class,
+                ReflectTools.findCommonBaseType(Number.class, Integer.class));
+    }
+
+    @Test
+    void findCommonBaseType_commonBase() {
+        assertSame(Number.class,
+                ReflectTools.findCommonBaseType(Double.class, Integer.class));
+    }
+
+    @Test
+    void findCommonBaseType_noCommonBase() {
+        assertSame(Object.class,
+                ReflectTools.findCommonBaseType(String.class, Number.class));
+    }
+
+    @Test
+    void findCommonBaseType_interfaceNotSupported() {
+        var exception = assertThrows(IllegalArgumentException.class,
+                () -> ReflectTools.findCommonBaseType(Comparable.class,
+                        Object.class));
+
+        assertTrue(exception.getMessage().contains("a cannot be an interface"));
+    }
+
+    @Test
+    void findCommonBaseType_primitiveNotSupported() {
+        var exception = assertThrows(IllegalArgumentException.class,
+                () -> ReflectTools.findCommonBaseType(int.class, Object.class));
+
+        assertTrue(exception.getMessage()
+                .contains("a cannot be a primitive type"));
+    }
+
+    @Test
+    void getSetters_classIsGeneric_syntheticMethodsAreFilteredOut() {
+        List<Method> setters = ReflectTools.getSetterMethods(Category.class)
+                .collect(Collectors.toList());
+        assertEquals(1, setters.size());
+        Method setter = setters.get(0);
+        assertEquals("setId", setter.getName());
+        assertEquals(Long.class, setter.getParameterTypes()[0]);
+    }
+
+    @Test
+    void findClosestCommonClassLoaderAncestor_findAncestor_whenBothArgumentsAreTheSame() {
+        CustomClassLoader loader = new CustomClassLoader();
+        ClassLoader ret = ReflectTools
+                .findClosestCommonClassLoaderAncestor(loader, loader).get();
+
+        assertEquals(loader, ret);
+    }
+
+    public void findClosestCommonClassLoaderAncestor_null_whenNoSharedAncestor() {
+        CustomClassLoader loader1 = new CustomClassLoader();
+        CustomClassLoader loader2 = new CustomClassLoader();
+
+        Optional<ClassLoader> ret = ReflectTools
+                .findClosestCommonClassLoaderAncestor(loader1, loader2);
+
+        assertFalse(ret.isPresent());
+    }
+
+    @Test
+    void findClosestCommonClassLoaderAncestor_findsAncestor_whenOneIsParentOfTheOther() {
+        CustomClassLoader parent = new CustomClassLoader();
+        CustomClassLoader child = new CustomClassLoader(parent);
+        ClassLoader ret = ReflectTools
+                .findClosestCommonClassLoaderAncestor(parent, child).get();
+
+        assertEquals(parent, ret);
+    }
+
+    @Test
+    void findClosestCommonClassLoaderAncestor_findsAncestor_whenLoadersShareParent() {
+        CustomClassLoader parent = new CustomClassLoader();
+        CustomClassLoader childA = new CustomClassLoader(parent);
+        CustomClassLoader childB = new CustomClassLoader(parent);
+        ClassLoader ret = ReflectTools
+                .findClosestCommonClassLoaderAncestor(childA, childB).get();
+
+        assertEquals(parent, ret);
+    }
+
+    @Test
+    void findClosestCommonClassLoaderAncestor_findsAncestor_whenAncestorsAreOnDifferentLevels() {
+        CustomClassLoader grandParent = new CustomClassLoader();
+        CustomClassLoader parent = new CustomClassLoader(grandParent);
+        CustomClassLoader childA = new CustomClassLoader(parent);
+        CustomClassLoader childB = new CustomClassLoader(grandParent);
+
+        ClassLoader ret = ReflectTools
+                .findClosestCommonClassLoaderAncestor(childA, childB).get();
+
+        assertEquals(grandParent, ret);
+    }
+
+    @Test
+    void findClosestCommonClassLoaderAncestor_empty_whenEitherOrBothNull() {
+        CustomClassLoader loader = new CustomClassLoader();
+
+        Optional<ClassLoader> ret;
+
+        ret = ReflectTools.findClosestCommonClassLoaderAncestor(loader, null);
+        assertFalse(ret.isPresent());
+
+        ret = ReflectTools.findClosestCommonClassLoaderAncestor(null, loader);
+        assertFalse(ret.isPresent());
+
+        ret = ReflectTools.findClosestCommonClassLoaderAncestor(null, null);
+        assertFalse(ret.isPresent());
+    }
+
+    @Test
+    void hasAnnotation_annotationPresents_returnsTrue() {
+        assertTrue(ReflectTools.hasAnnotation(ClassWithAnnotation.class,
+                TestAnnotation.class.getName()));
+    }
+
+    @Test
+    void hasAnnotation_annotationIsAbsent_returnsFalse() {
+        assertFalse(ReflectTools.hasAnnotation(ClassWithoutAnnotation.class,
+                TestAnnotation.class.getName()));
+    }
+
+    @Test
+    void hasAnnotationWithSimpleName_annotationPresents_returnsTrue() {
+        assertTrue(ReflectTools.hasAnnotationWithSimpleName(
+                ClassWithAnnotation.class,
+                TestAnnotation.class.getSimpleName()));
+    }
+
+    @Test
+    void hasAnnotationWithSimpleName_annotationIsAbsent_returnsFalse() {
+        assertFalse(ReflectTools.hasAnnotationWithSimpleName(
+                ClassWithoutAnnotation.class,
+                TestAnnotation.class.getSimpleName()));
+    }
+
+    @Test
+    void getAnnotationMethodValue_annotaitonHasMethod_theValueIsReturned() {
+        assertEquals("foo", ReflectTools.getAnnotationMethodValue(
+                ClassWithAnnotation.class.getAnnotation(TestAnnotation.class),
+                "value"));
+    }
+
+    @Test
+    void getAnnotationMethodValue_annotationHasNoMethod_throws() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            ReflectTools.getAnnotationMethodValue(ClassWithAnnotation.class
+                    .getAnnotation(TestAnnotation.class), "foo");
+        });
+    }
+
+    @Test
+    void getAnnotation_annotationPresents_returnsAnnotation() {
+        Optional<Annotation> annotation = ReflectTools.getAnnotation(
+                ClassWithAnnotation.class, TestAnnotation.class.getName());
+        assertTrue(annotation.isPresent());
+        assertEquals(
+                ClassWithAnnotation.class.getAnnotation(TestAnnotation.class),
+                annotation.get());
+    }
+
+    @Test
+    void getAnnotation_annotationIsAbsent_returnsEmpty() {
+        Optional<Annotation> annotation = ReflectTools.getAnnotation(
+                ClassWithoutAnnotation.class, TestAnnotation.class.getName());
+        assertFalse(annotation.isPresent());
+    }
+
+    @Test
+    void intefaceShouldNotBeInstantiableService() {
+        assertFalse(ReflectTools.isInstantiableService(TestInterface.class));
+    }
+
+    @Test
+    void abstractClassShouldNotBeInstantiableService() {
+        assertFalse(
+                ReflectTools.isInstantiableService(TestAbstractClass.class));
+    }
+
+    @Test
+    void nonPublicClassShouldNotBeInstantiableService() {
+        assertFalse(
+                ReflectTools.isInstantiableService(TestProtectedClass.class));
+        assertFalse(ReflectTools
+                .isInstantiableService(TestPackageProtectedClass.class));
+        assertFalse(ReflectTools.isInstantiableService(TestPrivateClass.class));
+    }
+
+    @Test
+    void ClassWithoutNonArgConstructorShouldNotBeInstantiableService() {
+        assertFalse(ReflectTools
+                .isInstantiableService(TestNoNonArgConstructorClass.class));
+    }
+
+    @Test
+    void nonStaticInnerClassShouldNotBeInstantiableService() {
+        assertFalse(
+                ReflectTools.isInstantiableService(NonStaticInnerClass.class));
+    }
+
+    @Test
+    void privateInnerClassShouldNotBeInstantiableService() {
+        assertFalse(
+                ReflectTools.isInstantiableService(PrivateInnerClass.class));
+    }
+
+    @Test
+    void normalSericieShouldBeInstantiableService() {
+        assertTrue(ReflectTools.isInstantiableService(NormalService.class));
+    }
+
+    private Class<?> createProxyClass(Class<?> originalClass) {
+        return new ByteBuddy().subclass(originalClass).make()
+                .load(originalClass.getClassLoader(),
+                        ClassLoadingStrategy.Default.WRAPPER)
+                .getLoaded();
+    }
+
+    @Test
+    void findDeclaredField_declaredOnSameClass_foundAndAccessible()
+            throws Exception {
+        Field field = ReflectTools
+                .findDeclaredField(FieldsAndMethodsSubclass.class, "subField")
+                .orElseThrow();
+
+        assertSame(FieldsAndMethodsSubclass.class, field.getDeclaringClass());
+        assertEquals("sub", field.get(new FieldsAndMethodsSubclass()));
+    }
+
+    @Test
+    void findDeclaredField_declaredOnSuperclass_foundAndAccessible()
+            throws Exception {
+        Field field = ReflectTools
+                .findDeclaredField(FieldsAndMethodsSubclass.class, "superField")
+                .orElseThrow();
+
+        assertSame(FieldsAndMethodsSuperclass.class, field.getDeclaringClass());
+        assertEquals("super", field.get(new FieldsAndMethodsSubclass()));
+    }
+
+    @Test
+    void findDeclaredField_shadowedBySubclass_subclassFieldFound() {
+        Field field = ReflectTools
+                .findDeclaredField(FieldsAndMethodsSubclass.class, "shadowed")
+                .orElseThrow();
+
+        assertSame(FieldsAndMethodsSubclass.class, field.getDeclaringClass());
+    }
+
+    @Test
+    void findDeclaredField_notInHierarchy_empty() {
+        assertTrue(ReflectTools
+                .findDeclaredField(FieldsAndMethodsSubclass.class, "missing")
+                .isEmpty());
+    }
+
+    @Test
+    void findDeclaredMethod_declaredOnSuperclass_foundAndAccessible()
+            throws Exception {
+        Method method = ReflectTools
+                .findDeclaredMethod(FieldsAndMethodsSubclass.class,
+                        "superMethod", String.class)
+                .orElseThrow();
+
+        assertSame(FieldsAndMethodsSuperclass.class,
+                method.getDeclaringClass());
+        assertEquals("super-suffix",
+                method.invoke(new FieldsAndMethodsSubclass(), "suffix"));
+    }
+
+    @Test
+    void findDeclaredMethod_otherParameterTypes_empty() {
+        assertTrue(
+                ReflectTools.findDeclaredMethod(FieldsAndMethodsSubclass.class,
+                        "superMethod", Integer.class).isEmpty());
+    }
+
+    @Test
+    void findDeclaredMethod_declaredOnObject_empty() {
+        assertTrue(ReflectTools
+                .findDeclaredMethod(FieldsAndMethodsSubclass.class, "toString")
+                .isEmpty());
+    }
+
+    // S1068 and S1144: the members are looked up and used reflectively
+    @SuppressWarnings({ "java:S1068", "java:S1144" })
+    private static class FieldsAndMethodsSuperclass {
+        private final String superField = "super";
+        private final String shadowed = "superShadowed";
+
+        private String superMethod(String suffix) {
+            return "super-" + suffix;
+        }
+    }
+
+    @SuppressWarnings("java:S1068")
+    private static class FieldsAndMethodsSubclass
+            extends FieldsAndMethodsSuperclass {
+        private final String subField = "sub";
+        private final String shadowed = "subShadowed";
+    }
+
+    private void assertError(String expectedError, Class<?> cls) {
+        try {
+            ReflectTools.createInstance(cls);
+            fail("Creation should cause an exception");
+        } catch (IllegalArgumentException re) {
+            assertEquals(String.format(expectedError, cls.getName()),
+                    re.getMessage());
+        }
+    }
+}

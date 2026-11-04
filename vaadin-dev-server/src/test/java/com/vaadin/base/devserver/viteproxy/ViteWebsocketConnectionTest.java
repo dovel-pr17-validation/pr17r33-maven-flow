@@ -1,0 +1,220 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.base.devserver.viteproxy;
+
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.net.InetSocketAddress;
+import java.net.http.WebSocket;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
+import java.util.Base64;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+import com.sun.net.httpserver.Headers;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import org.awaitility.Awaitility;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.mockito.ThrowingConsumer;
+
+import com.vaadin.flow.internal.ReflectTools;
+
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
+
+class ViteWebsocketConnectionTest {
+
+    private HttpServer httpServer;
+
+    private ThrowingConsumer<HttpExchange> handlerSupplier;
+
+    @BeforeEach
+    void reservePort() throws IOException {
+        httpServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0),
+                10);
+        httpServer.createContext("/VAADIN",
+                exchange -> handlerSupplier.accept(exchange));
+        httpServer.start();
+    }
+
+    @AfterEach
+    void tearDown() throws Exception {
+        if (httpServer != null) {
+            httpServer.stop(0);
+        }
+    }
+
+    @Test
+    @Timeout(7)
+    void waitForConnection_clientWebsocketAvailable_blocksUntilConnectionIsEstablished()
+            throws ExecutionException, InterruptedException {
+        CountDownLatch connectionLatch = new CountDownLatch(1);
+        CountDownLatch closeLatch = new CountDownLatch(1);
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        handlerSupplier = (exchange) -> {
+            // Simulate connection delay
+            Thread.sleep(500);
+            handshake(exchange);
+        };
+        long startTime = System.nanoTime();
+        ViteWebsocketConnection viteConnection = new ViteWebsocketConnection(
+                httpServer.getAddress().getPort(), "/VAADIN", "proto", x -> {
+                }, closeLatch::countDown, err -> {
+                    error.set(err);
+                    connectionLatch.countDown();
+                }) {
+            @Override
+            public void onOpen(WebSocket webSocket) {
+                super.onOpen(webSocket);
+                connectionLatch.countDown();
+            }
+        };
+        boolean established = connectionLatch.await(5, TimeUnit.SECONDS);
+        long elapsedTime = Duration.ofNanos(System.nanoTime() - startTime)
+                .toMillis();
+        if (error.get() != null) {
+            throw new AssertionError(
+                    "Websocket connection failed: " + error.get().getMessage(),
+                    error.get());
+        }
+        assertTrue(established, "Connection NOT established. Elapsed time "
+                + elapsedTime + " ms");
+        assertTrue(elapsedTime > 500,
+                "Should have waited for connection to be established (elapsed time: "
+                        + elapsedTime + ")");
+        assertTrue(elapsedTime < 4000,
+                "Should not have been blocked too long after connection (elapsed time: "
+                        + elapsedTime + ")");
+        if (!closeLatch.await(500, TimeUnit.MILLISECONDS)) {
+            viteConnection.close();
+            closeLatch.await(500, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    @Test
+    void waitForConnection_clientWebsocketNotAvailable_fails()
+            throws InterruptedException {
+        // Immediately closing connection to simulate connection failure
+        handlerSupplier = HttpExchange::close;
+        CountDownLatch errorLatch = new CountDownLatch(1);
+        new ViteWebsocketConnection(httpServer.getAddress().getPort(),
+                "/VAADIN", "proto", x -> {
+                }, () -> {
+                }, err -> errorLatch.countDown());
+        if (!errorLatch.await(5, TimeUnit.SECONDS)) {
+            fail("Expecting connection failure, but not happened in 5 seconds");
+        }
+    }
+
+    @Test
+    @Timeout(5)
+    void close_clientWebsocketNotAvailable_dontBlock()
+            throws ExecutionException, InterruptedException {
+        AtomicReference<Throwable> connectionError = new AtomicReference<>();
+        CountDownLatch suspendConnectionLatch = new CountDownLatch(1);
+        handlerSupplier = exchange -> {
+            suspendConnectionLatch.await();
+        };
+        ViteWebsocketConnection connection = new ViteWebsocketConnection(
+                httpServer.getAddress().getPort(), "/VAADIN", "proto", x -> {
+                }, () -> {
+                }, connectionError::set);
+        connection.close();
+        suspendConnectionLatch.countDown();
+        assertNull(connectionError.get(), "Websocket connection failed");
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void close_clientWebsocketClose_dontBlockIndefinitely()
+            throws ExecutionException, InterruptedException,
+            NoSuchFieldException, InvocationTargetException,
+            IllegalAccessException {
+        handlerSupplier = ViteWebsocketConnectionTest::handshake;
+        AtomicReference<Throwable> connectionError = new AtomicReference<>();
+        ViteWebsocketConnection connection = new ViteWebsocketConnection(
+                httpServer.getAddress().getPort(), "/VAADIN", "proto", x -> {
+                }, () -> {
+                }, connectionError::set);
+
+        // Replace websocket with spy to mock close behavior
+        Field clientWebsocketField = ViteWebsocketConnection.class
+                .getDeclaredField("clientWebsocket");
+        CompletableFuture<WebSocket> clientWebsocketFuture = (CompletableFuture<WebSocket>) ReflectTools
+                .getJavaFieldValue(connection, clientWebsocketField);
+        WebSocket mockWebSocket = spy(clientWebsocketFuture.get());
+        when(mockWebSocket.sendClose(anyInt(), anyString())).then(i -> {
+            CompletableFuture<?> closeFuture = (CompletableFuture<?>) i
+                    .callRealMethod();
+            return closeFuture.thenRunAsync(() -> {
+                try {
+                    // Wait longer than test timeout.
+                    // Close should not wait that much
+                    Thread.sleep(5000);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        });
+        ReflectTools.setJavaFieldValue(connection, clientWebsocketField,
+                CompletableFuture.completedFuture(mockWebSocket));
+        Awaitility.await().atMost(2, TimeUnit.SECONDS).until(() -> {
+            connection.close();
+            return ReflectTools.getJavaFieldValue(connection,
+                    clientWebsocketField) == null;
+        });
+        assertNull(connectionError.get(), "Websocket connection failed");
+    }
+
+    private static void handshake(HttpExchange exchange) throws IOException {
+        Headers requestHeaders = exchange.getRequestHeaders();
+        if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && "upgrade"
+                .equalsIgnoreCase(requestHeaders.getFirst("Connection"))) {
+            String wsKey = requestHeaders.getFirst("Sec-websocket-key");
+            String wsAcceptKey;
+            try {
+                wsAcceptKey = Base64.getEncoder().encodeToString(
+                        MessageDigest.getInstance("SHA-1").digest(
+                                (wsKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+                                        .getBytes(StandardCharsets.UTF_8)));
+            } catch (NoSuchAlgorithmException e) {
+                throw new RuntimeException(e);
+            }
+            Headers responseHeaders = exchange.getResponseHeaders();
+            responseHeaders.add("Connection", "Upgrade");
+            responseHeaders.add("Upgrade", "websocket");
+            responseHeaders.add("Sec-WebSocket-Accept", wsAcceptKey);
+            exchange.sendResponseHeaders(101, -1);
+        }
+    }
+
+}

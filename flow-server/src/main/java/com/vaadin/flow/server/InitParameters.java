@@ -1,0 +1,489 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server;
+
+import java.io.Serializable;
+
+import com.vaadin.flow.component.UI;
+
+/**
+ * Constants for all servlet init parameters. Keeping them in a separate class
+ * allows using reflection to expose the parameters in the Spring add-on.
+ *
+ * <p>
+ * Note: do not add other constants than String constants representing init
+ * parameters here.
+ *
+ * @author Vaadin Ltd
+ * @since 4.0
+ */
+public class InitParameters implements Serializable {
+
+    /**
+     * The name of the parameter that is by default used in e.g. web.xml to
+     * define the name of the default {@link UI} class.
+     */
+    // javadoc in UI should be updated if this value is changed
+    public static final String UI_PARAMETER = "UI";
+
+    public static final String SERVLET_PARAMETER_PRODUCTION_MODE = "productionMode";
+
+    public static final String SERVLET_PARAMETER_INITIAL_UIDL = "eagerServerLoad";
+    public static final String SERVLET_PARAMETER_REUSE_DEV_SERVER = "reuseDevServer";
+    public static final String SERVLET_PARAMETER_REQUEST_TIMING = "requestTiming";
+    // Javadocs for VaadinService should be updated if this value is changed
+    public static final String SERVLET_PARAMETER_DISABLE_XSRF_PROTECTION = "disable-xsrf-protection";
+    public static final String SERVLET_PARAMETER_HEARTBEAT_INTERVAL = "heartbeatInterval";
+    public static final String SERVLET_PARAMETER_WEB_COMPONENT_DISCONNECT = "webComponentDisconnect";
+    public static final String SERVLET_PARAMETER_CLOSE_IDLE_SESSIONS = "closeIdleSessions";
+    public static final String SERVLET_PARAMETER_PUSH_MODE = "pushMode";
+    public static final String SERVLET_PARAMETER_SESSION_LOCK_CHECK_STRATEGY = "sessionLockCheckStrategy";
+    public static final String SERVLET_PARAMETER_PUSH_SERVLET_MAPPING = "pushServletMapping";
+    public static final String SERVLET_PARAMETER_SYNC_ID_CHECK = "syncIdCheck";
+    public static final String SERVLET_PARAMETER_SEND_URLS_AS_PARAMETERS = "sendUrlsAsParameters";
+    /**
+     * Configuration parameter name for the Content Security Policy mode of the
+     * application. The permitted values are {@code off} (the default),
+     * {@code warn} and {@code strict}, see {@link CspMode}. Values are
+     * case-insensitive; any other value fails the deployment configuration with
+     * an {@link IllegalArgumentException}.
+     *
+     * @since 25.4
+     */
+    public static final String CSP = "csp";
+    /**
+     * Configuration parameter name for the value of the {@code X-Frame-Options}
+     * HTTP response header sent with the application page. The header lets the
+     * browser opt in to protection against clickjacking. Common values are
+     * {@code SAMEORIGIN} (the default) and {@code DENY}. Set the parameter to
+     * an empty value to disable sending the header, e.g. for applications that
+     * are meant to be embedded in a frame.
+     * 
+     * @since 25.2
+     */
+    public static final String SERVLET_PARAMETER_FRAME_OPTIONS = "frameOptions";
+    public static final String SERVLET_PARAMETER_PUSH_SUSPEND_TIMEOUT_LONGPOLLING = "pushLongPollingSuspendTimeout";
+    public static final String SERVLET_PARAMETER_MAX_MESSAGE_SUSPEND_TIMEOUT = "maxMessageSuspendTimeout";
+
+    /**
+     * Configuration parameter name for the maximum size, in characters, that
+     * Flow reads from a client-to-server UIDL/RPC or push request body before
+     * rejecting the request with HTTP 413 (Request Entity Too Large). The
+     * default is 10&nbsp;MB; set the value to {@code -1} to disable the limit.
+     * <p>
+     * This limit does not apply to file uploads, which are streamed in chunks
+     * and have their own separate size limits (request size, file size and file
+     * count).
+     * <p>
+     * The body is read incrementally and the limit is enforced on the running
+     * total, so the request is rejected mid-stream once the limit is exceeded;
+     * even chunked ({@code Transfer-Encoding: chunked}) requests without a
+     * {@code Content-Length} header cannot bypass it. For this to hold, Flow
+     * must be the first component to read the body: if a filter or request
+     * wrapper in front of Flow buffers the whole body first, that memory cost
+     * is incurred before this check runs. As defense-in-depth, also configure a
+     * request body size limit and a request read timeout at the servlet
+     * container or reverse proxy (for example Tomcat {@code connectionTimeout}
+     * and {@code maxSwallowSize}, or nginx {@code client_max_body_size} and
+     * {@code client_body_timeout}).
+     * <p>
+     * Be careful not to set the limit too low: every Flow interaction adds a
+     * small protocol overhead (roughly 100&nbsp;bytes per request on top of the
+     * actual payload), and request bodies also grow with the size of component
+     * state changes and RPC arguments sent from the browser. A limit that is
+     * too low will reject legitimate interactions and make the application
+     * unusable. Choose a value that comfortably accommodates the largest
+     * expected UIDL/RPC payload produced by the application.
+     * 
+     * @since 25.2.2
+     */
+    public static final String SERVLET_PARAMETER_MAX_REQUEST_BODY_SIZE = "maxRequestBodySize";
+    public static final String SERVLET_PARAMETER_JSBUNDLE = "module.bundle";
+    public static final String SERVLET_PARAMETER_POLYFILLS = "module.polyfills";
+    public static final String NODE_VERSION = "node.version";
+    public static final String NODE_DOWNLOAD_ROOT = "node.download.root";
+    public static final String REACT_ENABLE = "react.enable";
+
+    /**
+     * Configuration name for the parameter that determines whether Brotli
+     * compression should be used for static resources in cases when a
+     * precompressed file is available.
+     */
+    public static final String SERVLET_PARAMETER_BROTLI = "brotli";
+
+    /**
+     * Configuration name for the frontend statistics json file to use to
+     * determine template contents.
+     * <p>
+     * File needs to be available either for the ClassLoader as a resource, or
+     * as a static web resource. By default it returns the value in
+     * {@link Constants#STATISTICS_JSON_DEFAULT}
+     */
+    public static final String SERVLET_PARAMETER_STATISTICS_JSON = "statistics.file.path";
+
+    /**
+     * Configuration name for the time waiting for the frontend build tool to
+     * output a success or error pattern.
+     * 
+     * @since 24.0
+     */
+    public static final String SERVLET_PARAMETER_DEVMODE_TIMEOUT = "devmode.output.pattern.timeout";
+
+    /**
+     * Configuration name for adding extra options to the vite.
+     * 
+     * @since 9.0
+     */
+    public static final String SERVLET_PARAMETER_DEVMODE_VITE_OPTIONS = "devmode.vite.options";
+
+    /**
+     * Boolean parameter for enabling/disabling bytecode scanning in dev mode.
+     * If enabled, entry points are scanned for reachable frontend resources. If
+     * disabled, all classes on the classpath are scanned.
+     */
+    public static final String SERVLET_PARAMETER_DEVMODE_OPTIMIZE_BUNDLE = "devmode.optimizeBundle";
+
+    /**
+     * A comma separated list of IP addresses, potentially with wildcards, which
+     * can connect to the dev tools. If not specified, only localhost
+     * connections are allowed.
+     * 
+     * @since 24.3
+     */
+    public static final String SERVLET_PARAMETER_DEVMODE_HOSTS_ALLOWED = "devmode.hostsAllowed";
+
+    /**
+     * The name of the custom HTTP header that contains the client IP address
+     * that is checked to allow access to the dev mode server. The HTTP header
+     * is supposed to contain a single address, and the HTTP request to have a
+     * single occurrence of the header. If not specified, remote address are
+     * read from the {@literal X-Forwarded-For} header.
+     * 
+     * @since 24.4
+     */
+    public static final String SERVLET_PARAMETER_DEVMODE_REMOTE_ADDRESS_HEADER = "devmode.remoteAddressHeader";
+
+    /**
+     * Configuration parameter name for enabling pnpm.
+     */
+    public static final String SERVLET_PARAMETER_ENABLE_PNPM = "pnpm.enable";
+
+    /**
+     * Configuration parameter name for enabling bun.
+     * 
+     * @since 24.3
+     */
+    public static final String SERVLET_PARAMETER_ENABLE_BUN = "bun.enable";
+
+    /*
+     * Configuration parameter name for enabling usage statistics.
+     *
+     */
+    public static final String SERVLET_PARAMETER_DEVMODE_STATISTICS = "devmode.usageStatistics.enabled";
+
+    /**
+     * Configuration parameter name for using globally installed pnpm or default
+     * one.
+     * 
+     * @since 9.0
+     */
+    public static final String SERVLET_PARAMETER_GLOBAL_PNPM = "pnpm.global";
+
+    /**
+     * Configuration parameter name for enabling live reload.
+     * <p>
+     * Note that if the dev tools are disabled
+     * ({@link #SERVLET_PARAMETER_DEVMODE_ENABLE_DEV_TOOLS} is set to {@code
+     * false}), the live reload will be disabled as well.
+     *
+     */
+    public static final String SERVLET_PARAMETER_DEVMODE_ENABLE_LIVE_RELOAD = "devmode.liveReload.enabled";
+
+    /**
+     * Configuration parameter name for enabling dev tools.
+     *
+     * @since 23.1
+     */
+    public static final String SERVLET_PARAMETER_DEVMODE_ENABLE_DEV_TOOLS = "devmode.devTools.enabled";
+
+    /**
+     * Configuration parameter name for enabling session serialization in
+     * development. If enabled, all the session's associated
+     * {@link com.vaadin.flow.component.UI} instances will be serialized.
+     * Otherwise, it won't be serialized.
+     *
+     * @since 8.0
+     */
+    public static final String APPLICATION_PARAMETER_DEVMODE_ENABLE_SERIALIZE_SESSION = "devmode.sessionSerialization.enabled";
+
+    /**
+     * Configuration parameter name for enabling component tracking in
+     * development mode. If not set, tracking is enabled by default.
+     *
+     * @since 24.4
+     */
+    public static final String APPLICATION_PARAMETER_DEVMODE_ENABLE_COMPONENT_TRACKER = "devmode.componentTracker.enabled";
+
+    /**
+     * Configuration parameter name for adding extra file extensions for stats
+     * bundle to generate hashes for.
+     * 
+     * @since 24.6
+     */
+    public static final String FRONTEND_EXTRA_EXTENSIONS = "devmode.frontendExtraFileExtensions";
+
+    /**
+     * I18N provider property.
+     */
+    public static final String I18N_PROVIDER = "i18n.provider";
+
+    /**
+     * Menu access control property.
+     * 
+     * @since 24.4
+     */
+    public static final String MENU_ACCESS_CONTROL = "menu.access.control";
+
+    /**
+     * Application-wide default {@code PageTitleGenerator} property.
+     * 
+     * @since 25.2
+     */
+    public static final String PAGE_TITLE_GENERATOR = "pageTitle.generator";
+
+    /**
+     * Configuration name for the parameter that determines if Flow should
+     * automatically register servlets needed for the application to work.
+     */
+    public static final String DISABLE_AUTOMATIC_SERVLET_REGISTRATION = "disable.automatic.servlet.registration";
+
+    /**
+     * Configuration parameter name for requiring node executable installed in
+     * home directory.
+     *
+     */
+    public static final String REQUIRE_HOME_NODE_EXECUTABLE = "require.home.node";
+
+    /**
+     * Configuration parameter name for specifying the folder containing the
+     * Node.js executable.
+     * <p>
+     * When this parameter is set to a non-empty value, the Node.js binary will
+     * be exclusively used from the specified folder. If the binary is not found
+     * in this folder, an exception will be thrown with no fallback to global or
+     * alternative installations.
+     * <p>
+     * Example: "/usr/local/custom-node" or "C:\\custom\\node"
+     * 
+     * @since 25.0.4
+     */
+    public static final String NODE_FOLDER = "node.folder";
+
+    /**
+     * Configuration name for the parameter that sets the compiled web
+     * components path. The path should be the same as
+     * {@code webComponentOutputDirectoryName} in the maven plugin that
+     * transpiles ES6 code. This path is only used for generated web components
+     * (server side web components) module in case they are transpiled: web
+     * component UI imports them as dependencies.
+     */
+    public static final String COMPILED_WEB_COMPONENTS_PATH = "compiled.web.components.path";
+
+    /**
+     * Configuration name for the build folder.
+     *
+     * @since 7.0
+     */
+    public static final String BUILD_FOLDER = "build.folder";
+
+    /**
+     * Packages, in addition to the internally used ones, to run postinstall
+     * scripts for.
+     *
+     * @since 23.0
+     */
+    public static final String ADDITIONAL_POSTINSTALL_PACKAGES = "npm.postinstallPackages";
+
+    /**
+     * Packages to exclude from running postinstall scripts. Used to skip
+     * built-in entries (e.g. {@code esbuild}) when their postinstall step is
+     * known to fail or is not needed.
+     * 
+     * @since 25.1.8
+     */
+    public static final String EXCLUDE_POSTINSTALL_PACKAGES = "npm.excludePostinstallPackages";
+
+    /**
+     * Configuration name for enabling development using the frontend
+     * development server instead of using an application bundle.
+     * 
+     * @since 24.0
+     */
+    public static final String FRONTEND_HOTDEPLOY = "frontend.hotdeploy";
+
+    /**
+     * Configuration name for adding dependencies on other projects when using
+     * the frontend development server.
+     * 
+     * @since 24.1
+     */
+    public static final String FRONTEND_HOTDEPLOY_DEPENDENCIES = "frontend.hotdeploy.dependencies";
+
+    /**
+     * Configuration name for enabling ci build for npm/pnpm.
+     * 
+     * @since 24.1
+     */
+    public static final String CI_BUILD = "vaadin.ci.build";
+
+    /**
+     * Configuration name for disabling dev bundle rebuild.
+     * 
+     * @since 24.1
+     */
+    public static final String SKIP_DEV_BUNDLE_REBUILD = "vaadin.skip.dev.bundle";
+
+    /**
+     * Configuration name for forcing optimized production bundle build.
+     * 
+     * @since 24.1
+     */
+    public static final String FORCE_PRODUCTION_BUILD = "vaadin.force.production.build";
+    /**
+     * Configuration name for forcing optimized production bundle build.
+     * 
+     * @since 24.3
+     */
+    public static final String COMPRESS_BUNDLE = "vaadin.compress.bundle";
+
+    /**
+     * Configuration name to enable adding a commercial banner to the
+     * application when commercial components are used without a valid license
+     * key.
+     * 
+     * @since 24.9
+     */
+    public static final String COMMERCIAL_WITH_BANNER = "commercialWithBanner";
+
+    /**
+     * Configuration name for cleaning or leaving frontend files in build.
+     * 
+     * @since 24.4
+     */
+    public static final String CLEAN_BUILD_FRONTEND_FILES = "vaadin.clean.build.frontend.files";
+
+    /**
+     * Configuration name for how long since last browser open before we open a
+     * new tab for the application in development mode.
+     *
+     * Time is given in minutes.
+     * 
+     * @since 24.4
+     */
+    public static final String LAUNCH_BROWSER_DELAY = "launch-browser-delay";
+
+    /**
+     * Configuration name for setting the application identifier.
+     * 
+     * @since 24.5
+     */
+    public static final String APPLICATION_IDENTIFIER = "applicationIdentifier";
+
+    /**
+     * Configuration name for excluding npm packages for web components.
+     * 
+     * @since 24.6
+     */
+    public static final String NPM_EXCLUDE_WEB_COMPONENTS = "npm.excludeWebComponents";
+
+    /**
+     * Configuration name for enabling browserless mode (e.g. for UI unit
+     * tests). When enabled, dev server related warnings are suppressed.
+     * 
+     * @since 25.1
+     */
+    public static final String BROWSERLESS = "browserless";
+
+    /**
+     * Configuration name for the minimum age (in days) a frontend (npm) package
+     * version must have before npm, pnpm or bun is allowed to install it. Set
+     * to {@code 0} to disable.
+     * <p>
+     * When not set, the value configured for npm or pnpm itself ({@code .npmrc}
+     * or {@code pnpm-workspace.yaml}) is used, defaulting to {@code 1} day if
+     * there is none. The configuration of bun cannot be read, so the default
+     * always applies for it.
+     * <p>
+     * The packages Vaadin publishes itself ({@code @vaadin/*}) are exempt from
+     * the check, so that a project can be built right after a Vaadin release.
+     * Excluding them requires npm &ge; 11.17.0, which Node.js &ge; 26.4.0 ships
+     * with, or pnpm &ge; 10.17.0; bun cannot exclude packages on the command
+     * line, so with bun an installation may fail during the first day after a
+     * Vaadin release.
+     *
+     * @since 25.1.6
+     */
+    public static final String MINIMUM_FRONTEND_PACKAGE_AGE_DAYS = "npm.minimumFrontendPackageAgeDays";
+
+    /**
+     * Configuration name for the comma-separated list of URL schemes that are
+     * considered safe in URLs set on components such as {@code Anchor},
+     * {@code IFrame} and in
+     * {@link com.vaadin.flow.component.page.Page#open(String, String)}.
+     * <p>
+     * When not set, a built-in default set of safe schemes is used (for example
+     * {@code http}, {@code https}, {@code mailto}, {@code tel} and
+     * {@code ftp}), which excludes script-capable schemes such as
+     * {@code javascript} and {@code data}. Any entry equal to {@code *} marks
+     * every scheme as safe, disabling scheme validation. URLs whose scheme is
+     * not safe can still be set through the dedicated {@code setUnsafe*}
+     * methods.
+     * <p>
+     * The {@code about:blank} URL is considered safe regardless of this
+     * configuration since it shows an empty document and cannot run scripts.
+     *
+     * @since 25.1.12
+     */
+    public static final String URL_SAFE_SCHEMES = "safeUrlSchemes";
+
+    /**
+     * Legacy name of the {@link #URL_SAFE_SCHEMES} configuration property, kept
+     * for backwards compatibility with applications configured against Vaadin
+     * 25.2.1. Use {@link #URL_SAFE_SCHEMES} instead; when both are present, the
+     * new name takes precedence.
+     *
+     * @deprecated use {@link #URL_SAFE_SCHEMES} instead
+     * @since 25.3
+     */
+    @Deprecated
+    public static final String URL_SAFE_SCHEMES_LEGACY = "com.vaadin.safeUrlSchemes";
+
+    /**
+     * Configuration name for letting the theme style plain HTML elements, such
+     * as a <code>&lt;table&gt;</code>, across the whole application. When
+     * enabled, the {@code <body>} of the application page carries the
+     * {@link Constants#THEMED_HTML_CLASS_NAME} class name, which the Aura and
+     * Lumo themes style the native elements under. A single element opts out
+     * with the {@link Constants#UNTHEMED_HTML_CLASS_NAME} class name.
+     * <p>
+     * Disabled by default, so that upgrading does not change how an existing
+     * application looks. The default is planned to become enabled in Vaadin 26.
+     * 
+     * @since 25.3.1
+     */
+    public static final String THEMED_HTML = "themedHtml";
+
+}

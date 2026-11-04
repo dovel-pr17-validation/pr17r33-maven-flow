@@ -1,0 +1,195 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server;
+
+import java.lang.reflect.Field;
+import java.util.Optional;
+import java.util.function.Predicate;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+
+import com.vaadin.flow.di.Lookup;
+import com.vaadin.flow.server.dau.DAUCustomizer;
+import com.vaadin.flow.server.dau.DAUVaadinRequestInterceptor;
+import com.vaadin.flow.server.dau.UserIdentitySupplier;
+import com.vaadin.pro.licensechecker.LicenseException;
+import com.vaadin.pro.licensechecker.dau.DauIntegration;
+import com.vaadin.tests.util.MockDeploymentConfiguration;
+
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mockStatic;
+
+public class VaadinServiceDauTest {
+
+    private static final Predicate<VaadinRequestInterceptor> IS_DAU_INTERCEPTOR = interceptor -> interceptor instanceof DAUVaadinRequestInterceptor
+            || (interceptor instanceof VaadinService.VaadinSessionOnRequestStartInterceptorWrapper wrapper
+                    && wrapper.delegate instanceof DAUVaadinRequestInterceptor);
+
+    private String subscriptionKey;
+    private MockedStatic<DauIntegration> dauIntegrationMock;
+
+    @BeforeEach
+    public void setUp() throws Exception {
+        subscriptionKey = System.getProperty("vaadin.subscriptionKey");
+        System.setProperty("vaadin.subscriptionKey", "sub-1234");
+        dauIntegrationMock = mockStatic(DauIntegration.class);
+    }
+
+    @AfterEach
+    public void tearDown() throws Exception {
+        if (subscriptionKey != null) {
+            System.setProperty("vaadin.subscriptionKey", subscriptionKey);
+        } else {
+            System.clearProperty("vaadin.subscriptionKey");
+        }
+        dauIntegrationMock.close();
+    }
+
+    @Test
+    public void init_developmentMode_dauNotEnabled() {
+        MockDeploymentConfiguration config = new MockDeploymentConfiguration();
+        config.setProductionMode(false);
+        config.setApplicationOrSystemProperty(Constants.DAU_TOKEN, "true");
+        // VaadinService.init() is called in the constructor
+        MockVaadinServletService service = new MockVaadinServletService(config);
+        assertTrue(vaadinInterceptors(service).noneMatch(IS_DAU_INTERCEPTOR),
+                "Expecting DAU interceptor not to be installed");
+        dauIntegrationMock.verifyNoInteractions();
+    }
+
+    @Test
+    public void init_productionMode_notDauBuild_dauNotEnabled() {
+        MockDeploymentConfiguration config = new MockDeploymentConfiguration();
+        config.setProductionMode(true);
+        config.setApplicationOrSystemProperty(Constants.DAU_TOKEN, "false");
+        // VaadinService.init() is called in the constructor
+        MockVaadinServletService service = new MockVaadinServletService(config);
+        assertTrue(vaadinInterceptors(service).noneMatch(IS_DAU_INTERCEPTOR),
+                "Expecting DAU interceptor not to be installed");
+        dauIntegrationMock.verifyNoInteractions();
+    }
+
+    @Test
+    public void init_productionMode_dauBuild_dauEnabled() {
+        MockDeploymentConfiguration config = new MockDeploymentConfiguration();
+        config.setProductionMode(true);
+        config.setApplicationOrSystemProperty(Constants.DAU_TOKEN, "true");
+        // VaadinService.init() is called in the constructor
+        MockVaadinServletService service = new MockVaadinServletService(config);
+        assertTrue(vaadinInterceptors(service).anyMatch(IS_DAU_INTERCEPTOR),
+                "Expecting DAU interceptor to be installed");
+        dauIntegrationMock
+                .verify(() -> DauIntegration.startTracking(anyString()));
+    }
+
+    @Test
+    public void init_productionMode_dauBuild_subscriptionKeyNotAvailable_throws() {
+        dauIntegrationMock.reset();
+        dauIntegrationMock.when(() -> DauIntegration.startTracking(anyString()))
+                .thenCallRealMethod();
+        System.clearProperty("vaadin.subscriptionKey");
+        MockDeploymentConfiguration config = new MockDeploymentConfiguration();
+        config.setProductionMode(true);
+        config.setApplicationOrSystemProperty(Constants.DAU_TOKEN, "true");
+        // VaadinService.init() is called in the constructor
+        assertThrows(LicenseException.class,
+                () -> new MockVaadinServletService(config));
+    }
+
+    @Test
+    public void init_dauEnabled_lookupCustomIdentitySupplier() {
+
+        UserIdentitySupplier providedIdentitySupplier = userIdentityContext -> Optional
+                .of("user1");
+
+        DAUCustomizer customizer = new DAUCustomizer() {
+            @Override
+            public UserIdentitySupplier getUserIdentitySupplier() {
+                return providedIdentitySupplier;
+            }
+        };
+        VaadinService service = vaadinServiceWithDau(customizer);
+
+        VaadinRequestInterceptor interceptor = vaadinInterceptors(service)
+                .filter(IS_DAU_INTERCEPTOR).findFirst()
+                .orElseThrow(() -> new AssertionError(
+                        "DAU interceptor not installed"));
+        // Ugly way to ensure custom user identity function in use
+        UserIdentitySupplier userIdentitySupplier = extractUserIdentitySupplierFromDauInterceptor(
+                interceptor);
+        assertSame(providedIdentitySupplier, userIdentitySupplier);
+    }
+
+    public static VaadinService vaadinServiceWithDau(DAUCustomizer customizer) {
+        MockDeploymentConfiguration config = new MockDeploymentConfiguration();
+        config.setProductionMode(true);
+        config.setApplicationOrSystemProperty(Constants.DAU_TOKEN, "true");
+        Lookup lookup;
+        if (customizer != null) {
+            lookup = Lookup.of(customizer, DAUCustomizer.class);
+        } else {
+            lookup = null;
+        }
+        // VaadinService.init() is called in the constructor
+        return new MockVaadinServletService(config) {
+
+            @Override
+            public VaadinContext getContext() {
+                VaadinContext context = super.getContext();
+                if (context.getAttribute(Lookup.class) == null) {
+                    context.setAttribute(Lookup.class, lookup);
+                }
+                return context;
+            }
+        };
+    }
+
+    private Stream<VaadinRequestInterceptor> vaadinInterceptors(
+            VaadinService service) {
+        return StreamSupport.stream(
+                service.getVaadinRequestInterceptors().spliterator(), false);
+    }
+
+    private UserIdentitySupplier extractUserIdentitySupplierFromDauInterceptor(
+            VaadinRequestInterceptor interceptor) {
+        if (interceptor instanceof VaadinService.VaadinSessionOnRequestStartInterceptorWrapper wrapper) {
+            interceptor = wrapper.delegate;
+        }
+        if (interceptor instanceof DAUVaadinRequestInterceptor) {
+            try {
+                Field identitySupplierField = DAUVaadinRequestInterceptor.class
+                        .getDeclaredField("userIdentitySupplier");
+                identitySupplierField.setAccessible(true);
+                return (UserIdentitySupplier) identitySupplierField
+                        .get(interceptor);
+            } catch (NoSuchFieldException | IllegalAccessException e) {
+                throw new AssertionError(
+                        "Cannot access userIdentitySupplier field", e);
+            }
+        }
+        throw new AssertionError(interceptor.getClass()
+                + " is not a DAUVaadinRequestInterceptor nor a wrapped instance");
+    }
+
+}

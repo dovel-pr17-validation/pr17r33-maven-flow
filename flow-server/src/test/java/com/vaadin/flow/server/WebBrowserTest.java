@@ -1,0 +1,124 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server;
+
+import java.util.Locale;
+
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class WebBrowserTest {
+
+    private WebBrowser browser = new WebBrowser();
+
+    @Test
+    void isLinux_noDetails_returnsFalse() {
+        assertFalse(browser.isLinux());
+    }
+
+    @Test
+    void isMacOSX_noDetails_returnsFalse() {
+        assertFalse(browser.isMacOSX());
+    }
+
+    @Test
+    void isWindows_noDetails_returnsFalse() {
+        assertFalse(browser.isWindows());
+    }
+
+    @Test
+    void isWindowsPhone_noDetails_returnsFalse() {
+        assertFalse(browser.isWindowsPhone());
+    }
+
+    @Test
+    void isAndroid_noDetails_returnsFalse() {
+        assertFalse(browser.isAndroid());
+    }
+
+    @Test
+    void isIPhone_noDetails_returnsFalse() {
+        assertFalse(browser.isIPhone());
+    }
+
+    @Test
+    void isChromeOS_noDetails_returnsFalse() {
+        assertFalse(browser.isChromeOS());
+    }
+
+    @Test
+    void isSafariOnMac_userDetails_returnsTrue() {
+        VaadinRequest request = initRequest(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 11_6_2) AppleWebKit/611.3.10.1.5 (KHTML, like Gecko) Version/14.1.2 Safari/611.3.10.1.5");
+
+        browser = new WebBrowser(request);
+        assertTrue(browser.isSafari());
+        assertTrue(browser.isMacOSX());
+    }
+
+    @Test
+    void isChromeOnWindows_userDetails_returnsTrue() {
+        VaadinRequest request = initRequest(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+
+        browser = new WebBrowser(request);
+        assertTrue(browser.isChrome());
+        assertTrue(browser.isWindows());
+    }
+
+    @Test
+    void isOperaOnWindows_userDetails_returnsTrue() {
+        VaadinRequest request = initRequest(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 OPR/115.0.0.0");
+
+        browser = new WebBrowser(request);
+        assertTrue(browser.isOpera());
+        assertTrue(browser.isWindows());
+    }
+
+    @Test
+    void isSafariOnIPhone_userDetails_returnsTrue() {
+        VaadinRequest request = initRequest(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1");
+
+        browser = new WebBrowser(request);
+        assertTrue(browser.isIPhone());
+        assertTrue(browser.isSafari());
+    }
+
+    @Test
+    void isFirefoxOnAndroid_userDetails_returnsTrue() {
+        VaadinRequest request = initRequest(
+                "Mozilla/5.0 (Android; Tablet; rv:33.0) Gecko/33.0 Firefox/33.0");
+
+        browser = new WebBrowser(request);
+        assertTrue(browser.isFirefox());
+        assertTrue(browser.isAndroid());
+    }
+
+    private static VaadinRequest initRequest(String userAgent) {
+        VaadinRequest request = mock(VaadinRequest.class);
+        when(request.getLocale()).thenReturn(Locale.ENGLISH);
+        when(request.getRemoteAddr()).thenReturn("0.0.0.0");
+        when(request.isSecure()).thenReturn(false);
+        when(request.getHeader("User-Agent")).thenReturn(userAgent);
+        return request;
+    }
+}

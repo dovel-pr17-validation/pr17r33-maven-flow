@@ -1,0 +1,910 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.server.communication;
+
+import java.io.IOException;
+import java.io.Reader;
+import java.io.Serializable;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.EventObject;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ArrayNode;
+
+import com.vaadin.flow.component.PollEvent;
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.internal.JacksonUtils;
+import com.vaadin.flow.internal.MessageDigestUtil;
+import com.vaadin.flow.internal.StateNode;
+import com.vaadin.flow.router.PreserveOnRefresh;
+import com.vaadin.flow.server.ErrorEvent;
+import com.vaadin.flow.server.RequestBodyTooLargeException;
+import com.vaadin.flow.server.SynchronizedRequestHandler;
+import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.server.VaadinServiceEventBus;
+import com.vaadin.flow.server.communication.rpc.AttachExistingElementRpcHandler;
+import com.vaadin.flow.server.communication.rpc.AttachTemplateChildRpcHandler;
+import com.vaadin.flow.server.communication.rpc.EventRpcHandler;
+import com.vaadin.flow.server.communication.rpc.MapSyncRpcHandler;
+import com.vaadin.flow.server.communication.rpc.NavigationRpcHandler;
+import com.vaadin.flow.server.communication.rpc.PublishedServerEventHandlerRpcHandler;
+import com.vaadin.flow.server.communication.rpc.RpcInvocationHandler;
+import com.vaadin.flow.server.dau.DAUUtils;
+import com.vaadin.flow.server.dau.FlowDauIntegration;
+import com.vaadin.flow.shared.ApplicationConstants;
+import com.vaadin.flow.shared.JsonConstants;
+
+/**
+ * Handles a client-to-server message containing serialized RPC invocations.
+ * <p>
+ * For internal use only. May be renamed or removed in a future release.
+ *
+ * @author Vaadin Ltd
+ * @since 1.0
+ */
+public class ServerRpcHandler implements Serializable {
+
+    /**
+     * A data transfer object representing an RPC request sent by the client
+     * side.
+     *
+     * @author Vaadin Ltd
+     */
+    public static class RpcRequest implements Serializable {
+
+        private final String csrfToken;
+        private final ArrayNode invocations;
+        private final int syncId;
+        private final JsonNode json;
+        private final boolean resynchronize;
+        private final int clientToServerMessageId;
+
+        /**
+         * Creates an instance based on the given JSON received through the
+         * given request.
+         *
+         * @param jsonString
+         *            the JSON containing the RPC invocations
+         * @param request
+         *            the request through which the JSON was received
+         */
+        public RpcRequest(String jsonString, VaadinRequest request) {
+            this(jsonString, request.getService().getDeploymentConfiguration()
+                    .isSyncIdCheckEnabled());
+        }
+
+        public RpcRequest(String jsonString, boolean isSyncIdCheckEnabled) {
+            json = JacksonUtils.readTree(jsonString);
+
+            JsonNode token = json.get(ApplicationConstants.CSRF_TOKEN);
+            if (token == null) {
+                csrfToken = ApplicationConstants.CSRF_TOKEN_DEFAULT_VALUE;
+            } else {
+                String csrfToken = token.asString();
+                if (csrfToken.isEmpty()) {
+                    csrfToken = ApplicationConstants.CSRF_TOKEN_DEFAULT_VALUE;
+                }
+                this.csrfToken = csrfToken;
+            }
+
+            if (isSyncIdCheckEnabled && !isUnloadBeaconRequest()) {
+                syncId = json.get(ApplicationConstants.SERVER_SYNC_ID)
+                        .intValue();
+            } else {
+                syncId = -1;
+            }
+
+            if (json.has(ApplicationConstants.RESYNCHRONIZE_ID)) {
+                resynchronize = json.get(ApplicationConstants.RESYNCHRONIZE_ID)
+                        .booleanValue();
+            } else {
+                resynchronize = false;
+            }
+
+            if (json.has(ApplicationConstants.CLIENT_TO_SERVER_ID)) {
+                clientToServerMessageId = json
+                        .get(ApplicationConstants.CLIENT_TO_SERVER_ID)
+                        .intValue();
+            } else {
+                if (!isUnloadBeaconRequest()) {
+                    getLogger()
+                            .warn("Server message without client id received");
+                }
+                clientToServerMessageId = -1;
+            }
+            invocations = (ArrayNode) json
+                    .get(ApplicationConstants.RPC_INVOCATIONS);
+        }
+
+        /**
+         * Gets the CSRF security token (synchronizer token pattern) for this
+         * request.
+         *
+         * @return the CSRF security token for this current change request
+         */
+        public String getCsrfToken() {
+            return csrfToken;
+        }
+
+        /**
+         * Gets the data to recreate the RPC as requested by the client side.
+         *
+         * @return the data describing which RPC should be made, and all their
+         *         data
+         */
+        public ArrayNode getRpcInvocationsData() {
+            return invocations;
+        }
+
+        /**
+         * Gets the sync id last seen by the client.
+         *
+         * @return the last sync id given by the server, according to the
+         *         client's request
+         */
+        public int getSyncId() {
+            return syncId;
+        }
+
+        /**
+         * Checks if this is a request to resynchronize the client side.
+         *
+         * @return true if this is a resynchronization request, false otherwise
+         */
+        public boolean isResynchronize() {
+            return resynchronize;
+        }
+
+        /**
+         * Gets the id of the client to server message.
+         *
+         * @return the server message id
+         */
+        public int getClientToServerId() {
+            return clientToServerMessageId;
+        }
+
+        /**
+         * Gets the entire request in JSON format, as it was received from the
+         * client.
+         * <p>
+         * <em>Note:</em> This is a shared reference - any modifications made
+         * will be shared.
+         *
+         * @return the raw JSON object that was received from the client
+         */
+        public JsonNode getRawJson() {
+            return json;
+        }
+
+        private boolean isUnloadBeaconRequest() {
+            return json.has(ApplicationConstants.UNLOAD_BEACON);
+        }
+
+    }
+
+    /**
+     * Exception thrown then the security key sent by the client does not match
+     * the expected one.
+     *
+     * @author Vaadin Ltd
+     */
+    public static class InvalidUIDLSecurityKeyException
+            extends GeneralSecurityException {
+
+        /**
+         * Default constructor for the exception.
+         */
+        public InvalidUIDLSecurityKeyException() {
+            super();
+        }
+
+        /**
+         * Creates an exception with a message that describes why the security
+         * key is invalid.
+         *
+         * @param message
+         *            the description of the invalid key
+         * @since 25.4
+         */
+        public InvalidUIDLSecurityKeyException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Exception thrown then the client side resynchronization is required.
+     * 
+     * @since 2.1
+     */
+    public static class ResynchronizationRequiredException
+            extends RuntimeException {
+
+        /**
+         * Default constructor for the exception.
+         */
+        public ResynchronizationRequiredException() {
+            super();
+        }
+    }
+
+    /**
+     * Exception thrown when the client side re-sends the same request.
+     * 
+     * @since 24.7
+     */
+    public static class ClientResentPayloadException extends RuntimeException {
+
+        /**
+         * Default constructor for the exception.
+         */
+        public ClientResentPayloadException() {
+            super();
+        }
+    }
+
+    /**
+     * Exception thrown when the client sends a message with an unexpected
+     * message ID, indicating that the client and server are out of sync.
+     * <p>
+     * This typically occurs when a server pod terminates abruptly (e.g.,
+     * OOMKilled, SIGKILL) before UI state can be serialized to distributed
+     * session storage. When clients reconnect to a healthy pod, their message
+     * ID exceeds what the server expects.
+     *
+     * @since 25.1
+     */
+    public static class MessageIdSyncException extends Exception {
+
+        private final int expectedId;
+        private final int receivedId;
+
+        /**
+         * Creates a new MessageIdSyncException with the expected and received
+         * message IDs.
+         *
+         * @param expectedId
+         *            the message ID the server expected
+         * @param receivedId
+         *            the message ID received from the client
+         */
+        public MessageIdSyncException(int expectedId, int receivedId) {
+            super("Unexpected message id from the client. Expected: "
+                    + expectedId + ", got: " + receivedId);
+            this.expectedId = expectedId;
+            this.receivedId = receivedId;
+        }
+
+        /**
+         * Gets the message ID the server expected.
+         *
+         * @return the expected message ID
+         */
+        public int getExpectedId() {
+            return expectedId;
+        }
+
+        /**
+         * Gets the message ID received from the client.
+         *
+         * @return the received message ID
+         */
+        public int getReceivedId() {
+            return receivedId;
+        }
+    }
+
+    /**
+     * Reads JSON containing zero or more serialized RPC calls (including legacy
+     * variable changes) and executes the calls.
+     *
+     * @param ui
+     *            The {@link UI} receiving the calls. Cannot be null.
+     * @param reader
+     *            The {@link Reader} used to read the JSON.
+     * @param request
+     *            The request through which the RPC was received
+     * @throws IOException
+     *             If reading the message fails.
+     * @throws InvalidUIDLSecurityKeyException
+     *             If the received security key does not match the one stored in
+     *             the session.
+     */
+    public void handleRpc(UI ui, Reader reader, VaadinRequest request)
+            throws IOException, InvalidUIDLSecurityKeyException,
+            MessageIdSyncException {
+        handleRpc(ui, getMessage(reader, request), request);
+    }
+
+    /**
+     * Reads JSON containing zero or more serialized RPC calls (including legacy
+     * variable changes) and executes the calls.
+     *
+     * @param ui
+     *            The {@link UI} receiving the calls. Cannot be null.
+     * @param message
+     *            The JSON message from the request.
+     * @param request
+     *            The request through which the RPC was received
+     * @throws InvalidUIDLSecurityKeyException
+     *             If the received security key does not match the one stored in
+     *             the session.
+     * @since 24.5.6
+     */
+    public void handleRpc(UI ui, String message, VaadinRequest request)
+            throws InvalidUIDLSecurityKeyException, MessageIdSyncException {
+        ui.getSessionOrThrow()
+                .setLastRequestTimestamp(System.currentTimeMillis());
+
+        if (message == null || message.isEmpty()) {
+            // The client sometimes sends empty messages, this is probably a bug
+            return;
+        }
+
+        RpcRequest rpcRequest = new RpcRequest(message, request.getService()
+                .getDeploymentConfiguration().isSyncIdCheckEnabled());
+
+        // Security: double cookie submission pattern unless disabled by
+        // property
+        if (!VaadinService.isCsrfTokenValid(ui, rpcRequest.getCsrfToken())) {
+            throw new InvalidUIDLSecurityKeyException(
+                    describeInvalidCsrfToken(ui, rpcRequest.getCsrfToken()));
+        }
+
+        handleRpc(ui, message, request, rpcRequest);
+    }
+
+    /**
+     * Describes why the security key of a request does not match the UI the
+     * request is addressed to, so that the log tells a client that never
+     * received a key apart from a client that holds the key of another UI. The
+     * key itself is not included.
+     */
+    private static String describeInvalidCsrfToken(UI ui, String token) {
+        int uiId = ui.getUIId();
+        if (ApplicationConstants.CSRF_TOKEN_DEFAULT_VALUE.equals(token)) {
+            return "the client sent no key for UI " + uiId
+                    + ", so it has not received the key of that UI";
+        }
+        byte[] tokenBytes = token.getBytes(StandardCharsets.UTF_8);
+        for (UI other : ui.getSessionOrThrow().getUIs()) {
+            String otherToken = other.getCsrfToken();
+            if (other != ui && otherToken != null && MessageDigest.isEqual(
+                    otherToken.getBytes(StandardCharsets.UTF_8), tokenBytes)) {
+                return "the key sent to UI " + uiId + " belongs to UI "
+                        + other.getUIId() + " of the same session";
+            }
+        }
+        return "the key sent to UI " + uiId
+                + " belongs to no UI of the session; the client may hold a UI"
+                + " of an earlier session, or the request did not originate"
+                + " from this application";
+    }
+
+    protected void handleRpc(UI ui, String message, VaadinRequest request,
+            RpcRequest rpcRequest) throws MessageIdSyncException {
+
+        String hashMessage = message;
+        if (hashMessage.length() > 64 * 1024) {
+            hashMessage = message.substring(0, 64 * 1024);
+        }
+        byte[] messageHash = MessageDigestUtil.sha256(hashMessage);
+
+        int expectedId = ui.getInternals().getLastProcessedClientToServerId()
+                + 1;
+        int requestId = rpcRequest.getClientToServerId();
+
+        if (requestId != -1 && requestId != expectedId) {
+            // Invalid message id, skip RPC processing but force a full
+            // re-synchronization of the client as it might have not received
+            // the previous response (e.g. due to a bad connection)
+
+            // Must resync also for duplicate messages because the server might
+            // have generated a response for the first message but the response
+            // did not reach the client. When the client re-sends the message,
+            // it would only get an empty response (because the dirty flags have
+            // been cleared on the server) and would be out of sync
+            if (requestId == expectedId - 1 && Arrays.equals(messageHash,
+                    ui.getInternals().getLastProcessedMessageHash())) {
+                /*
+                 * Last message was received again. This indicates that this
+                 * situation is most likely triggered by a timeout or such
+                 * causing a message to be resent.
+                 */
+                getLogger().debug(
+                        "Received old duplicate message from the client. Expected: "
+                                + expectedId + ", got: " + requestId
+                                + ". Resending previous response.");
+                fireEvent(ui, new ClientMessageResentEvent(ui));
+                throw new ClientResentPayloadException();
+            } else if (rpcRequest.isUnloadBeaconRequest()) {
+                getLogger().debug(
+                        "Ignoring unexpected message id from the client on UNLOAD request. "
+                                + "This could happen for example during login process, if concurrent requests "
+                                + "are sent to the server and one of those changes the session identifier, "
+                                + "causing an UIDL request to be rejected because of session expiration. "
+                                + "Expected client id: {}, got {}.",
+                        expectedId, requestId);
+            } else {
+                /*
+                 * If the reason for ending up here is intermittent, then we
+                 * should just issue a full resync since we cannot know the
+                 * state of the client engine.
+                 *
+                 * There are reasons to believe that there are deterministic
+                 * issues that trigger this condition, and we'd like to collect
+                 * more data to uncover anything such before actually
+                 * implementing the resync that would thus hide most symptoms of
+                 * the actual root cause bugs.
+                 */
+                String messageDetails = getMessageDetails(rpcRequest);
+                getLogger().debug("Unexpected message id from the client."
+                        + " Expected client id: " + expectedId + ", got "
+                        + requestId + ". Message start: " + messageDetails);
+                fireEvent(ui,
+                        new MessageIdSyncErrorEvent(ui, expectedId, requestId));
+                throw new MessageIdSyncException(expectedId, requestId);
+            }
+        } else {
+            // Message id ok, process RPCs
+            ui.getInternals().setLastProcessedClientToServerId(expectedId,
+                    messageHash);
+            enforceIfNeeded(request, rpcRequest);
+            handleInvocations(ui, rpcRequest.getRpcInvocationsData());
+        }
+
+        if (rpcRequest.isResynchronize()) {
+            fireEvent(ui, new UIResynchronizationEvent(ui));
+            getLogger().warn("Resynchronizing UI by client's request. "
+                    + "A network message was lost before reaching the client and the client is reloading the full UI state. "
+                    + "This typically happens because of a bad network connection with packet loss or because of some part of"
+                    + " the network infrastructure (load balancer, proxy) terminating a push (websocket or long-polling) connection."
+                    + " If you are using push with a proxy, make sure the push timeout is set to be smaller than the proxy connection timeout");
+
+            if (request.getWrappedSession().getAttributeNames().stream()
+                    .anyMatch(name -> name
+                            .startsWith("com.vaadin.server.VaadinSession"))) {
+                getLogger().warn(
+                        "MPR is in use, so full page reload will be done to achieve re-sync.");
+                ui.getPage().reload();
+                return;
+            }
+
+            // Run detach listeners and re-attach all nodes again to the
+            // state tree, in order to send changes for a full re-build of
+            // the client-side state tree in the response
+            ui.getInternals().getStateTree().prepareForResync();
+
+            // At this point, make no assumptions about which dependencies have
+            // been accepted by the client
+            ui.getInternals().getDependencyList().clearPendingSendToClient();
+
+            // Signal by exception instead of return value to keep the method
+            // signature for source and binary compatibility
+            throw new ResynchronizationRequiredException();
+        }
+        handleUnloadBeaconRequest(ui, rpcRequest);
+    }
+
+    private static void fireEvent(UI ui, EventObject event) {
+        ui.getSessionOrThrow().getService().getEventBus().fireEvent(event);
+    }
+
+    protected void handleUnloadBeaconRequest(UI ui, RpcRequest rpcRequest) {
+        if (rpcRequest.isUnloadBeaconRequest()) {
+            if (isPreserveOnRefreshTarget(ui)) {
+                getLogger().debug(
+                        "Eager UI close ignored for @PreserveOnRefresh view");
+            } else {
+                ui.close();
+                getLogger().debug("UI closed with a beacon request");
+            }
+        }
+    }
+
+    private void enforceIfNeeded(VaadinRequest request, RpcRequest rpcRequest) {
+        if (DAUUtils.isDauEnabled(request.getService())) {
+            FlowDauIntegration.applyEnforcement(request,
+                    shouldApplyEnforcement(rpcRequest));
+        }
+    }
+
+    private Predicate<VaadinRequest> shouldApplyEnforcement(
+            RpcRequest rpcRequest) {
+        return request -> {
+            // do not apply enforcement when the browser is closing, allow
+            // potential resources be released.
+            if (rpcRequest.isUnloadBeaconRequest()) {
+                return false;
+            }
+            // do not apply enforcement during a resync, user will be blocked
+            // anyway on next request.
+            if (rpcRequest.isResynchronize()) {
+                return false;
+            }
+            ArrayNode invocations = rpcRequest.getRpcInvocationsData();
+            if (invocations == null) {
+                // not a user interaction
+                return false;
+            }
+            // Do not enforce if RPC requests contains only poll or return
+            // channel events
+            for (int i = 0; i < invocations.size(); i++) {
+                JsonNode json = invocations.get(i);
+                String type = json.has("type") ? json.get("type").asString()
+                        : "";
+                String event = json.has("event") ? json.get("event").asString()
+                        : "";
+                if (!JsonConstants.RPC_TYPE_CHANNEL.equals(type)
+                        && (!JsonConstants.RPC_TYPE_EVENT.equals(type)
+                                || !PollEvent.DOM_EVENT_NAME.equals(event))) {
+                    return true;
+                }
+            }
+            return false;
+        };
+    }
+
+    // Kind of same as in AbstractNavigationStateRenderer, but gets
+    // "routeLayoutTypes" & class from UI instance.
+    private static boolean isPreserveOnRefreshTarget(UI ui) {
+        return ui.getInternals().getActiveRouterTargetsChain().stream()
+                .anyMatch(rt -> rt.getClass()
+                        .isAnnotationPresent(PreserveOnRefresh.class));
+    }
+
+    private String getMessageDetails(RpcRequest rpcRequest) {
+        StringBuilder messageDetails = new StringBuilder();
+        ArrayNode rpcArray = rpcRequest.getRpcInvocationsData();
+        if (rpcArray == null) {
+            return "{ no data }";
+        }
+
+        for (int i = 0; i < rpcArray.size(); i++) {
+            JsonNode json = rpcArray.get(i);
+            String type = json.has("type") ? json.get("type").asString() : "";
+            Double node = json.has("node") ? json.get("node").doubleValue()
+                    : null;
+            Double feature = json.has("feature")
+                    ? json.get("feature").doubleValue()
+                    : null;
+            appendAll(messageDetails, "{ type: ", type, " node: ",
+                    String.valueOf(node), " feature: ", String.valueOf(feature),
+                    " } ");
+        }
+        return messageDetails.toString();
+    }
+
+    private static void appendAll(StringBuilder builder, String... strings) {
+        for (String string : strings) {
+            builder.append(string);
+        }
+    }
+
+    /**
+     * Gets {@link RpcInvocationHandler}s map where the key is the type of the
+     * handler gotten via {@link RpcInvocationHandler#getRpcType()}.
+     * <p>
+     * This map is used to delegate RPC requests to a specific invocation
+     * handler using the type of the request.
+     * <p>
+     * Subclasses can overwrite this method to return custom invocation
+     * handlers.
+     *
+     * @return invocation handlers map
+     */
+    protected Map<String, RpcInvocationHandler> getInvocationHandlers() {
+        return Collections.unmodifiableMap(LazyInvocationHandlers.HANDLERS);
+    }
+
+    /**
+     * Processes invocations data received from the client.
+     * <p>
+     * The invocations data can contain any number of RPC calls.
+     *
+     * @param ui
+     *            the UI receiving the invocations data
+     * @param invocationsData
+     *            JSON containing all information needed to execute all
+     *            requested RPC calls.
+     */
+    private void handleInvocations(UI ui, ArrayNode invocationsData) {
+        List<JsonNode> data = new ArrayList<>(invocationsData.size());
+        List<Runnable> pendingChangeEvents = new ArrayList<>();
+
+        RpcInvocationHandler mapSyncHandler = getInvocationHandlers()
+                .get(JsonConstants.RPC_TYPE_MAP_SYNC);
+
+        for (int i = 0; i < invocationsData.size(); i++) {
+            JsonNode invocationJson = invocationsData.get(i);
+            String type = invocationJson.get(JsonConstants.RPC_TYPE).asString();
+            assert type != null;
+            if (JsonConstants.RPC_TYPE_MAP_SYNC.equals(type)) {
+                // Apply the value of every synchronized property in the request
+                // before firing any change event, so that application code sees
+                // a fully updated tree.
+                applyPropertySync(ui, type, invocationJson, mapSyncHandler)
+                        .ifPresent(changeEvent -> pendingChangeEvents
+                                .add(() -> observeInvocation(ui, type,
+                                        invocationJson, changeEvent)));
+            } else {
+                data.add(invocationJson);
+            }
+        }
+
+        pendingChangeEvents.forEach(Runnable::run);
+        data.forEach(json -> handleInvocationData(ui, json));
+    }
+
+    /**
+     * Applies the value of one synchronized property, the first of the two
+     * steps a property synchronization is handled in.
+     * <p>
+     * The invocation is observed around the change event this returns, since
+     * that is where a property change listener runs. Applying the value can
+     * fail on its own though: the property may not be synchronized at all, or a
+     * signal bound to it may reject the write. The change event that would have
+     * reported such a failure is never reached, so the phase events are fired
+     * here instead. The failure is then rethrown, since refusing a value the
+     * client should not have sent aborts the request and reports an internal
+     * error to the client, rather than being handled like a failure of the
+     * application code an invocation runs.
+     *
+     * @param ui
+     *            the UI the invocation is handled against
+     * @param type
+     *            the protocol-level invocation type
+     * @param invocationJson
+     *            the property synchronization being handled
+     * @param mapSyncHandler
+     *            the handler applying the value
+     * @return the deferred change event, or empty if there is none to fire
+     */
+    private static Optional<Runnable> applyPropertySync(UI ui, String type,
+            JsonNode invocationJson, RpcInvocationHandler mapSyncHandler) {
+        try {
+            return mapSyncHandler.handle(ui, invocationJson);
+        } catch (Throwable throwable) {
+            InvocationEvents events = new InvocationEvents(ui, type,
+                    invocationJson);
+            events.started();
+            events.failed(throwable);
+            events.ended();
+            throw throwable;
+        }
+    }
+
+    /**
+     * Handles one invocation, firing the invocation phase events around it and
+     * routing a failure to the error handler of the session.
+     *
+     * @param ui
+     *            the UI the invocation is handled against
+     * @param type
+     *            the protocol-level invocation type
+     * @param invocationJson
+     *            the invocation being handled
+     * @param invocation
+     *            performs the actual handling
+     */
+    private static void observeInvocation(UI ui, String type,
+            JsonNode invocationJson, Runnable invocation) {
+        InvocationEvents events = new InvocationEvents(ui, type,
+                invocationJson);
+        events.started();
+        try {
+            invocation.run();
+        } catch (Throwable throwable) {
+            events.failed(throwable);
+            callErrorHandler(ui, invocationJson, throwable);
+        } finally {
+            events.ended();
+        }
+    }
+
+    /**
+     * The invocation phase events of a single invocation.
+     * <p>
+     * The details they carry are extracted once, and only when the event bus
+     * has a listener for one of the phases, so that an application observing
+     * nothing allocates nothing per invocation and reads no clock.
+     */
+    private static final class InvocationEvents implements Serializable {
+
+        private final VaadinServiceEventBus eventBus;
+        private final UI ui;
+        private final String type;
+        private final int nodeId;
+        private final String name;
+        private final boolean observed;
+        private long startNanos;
+        private transient Throwable error;
+
+        private InvocationEvents(UI ui, String type, JsonNode invocationJson) {
+            this.ui = ui;
+            this.type = type;
+            eventBus = ui.getSessionOrThrow().getService().getEventBus();
+            observed = eventBus.hasListener(RpcInvocationStartedEvent.class)
+                    || eventBus.hasListener(RpcInvocationFailedEvent.class)
+                    || eventBus.hasListener(RpcInvocationEndedEvent.class);
+            nodeId = observed ? nodeId(invocationJson) : -1;
+            name = observed ? invocationName(type, invocationJson) : null;
+        }
+
+        private void started() {
+            if (observed) {
+                startNanos = System.nanoTime();
+                eventBus.fireEvent(
+                        new RpcInvocationStartedEvent(ui, type, nodeId, name));
+            }
+        }
+
+        private void failed(Throwable error) {
+            if (observed) {
+                this.error = error;
+                eventBus.fireEvent(new RpcInvocationFailedEvent(ui, type,
+                        nodeId, name, error));
+            }
+        }
+
+        private void ended() {
+            if (observed) {
+                Duration duration = Duration
+                        .ofNanos(System.nanoTime() - startNanos);
+                eventBus.fireEvent(new RpcInvocationEndedEvent(ui, type, nodeId,
+                        name, duration, error));
+            }
+        }
+    }
+
+    private void handleInvocationData(UI ui, JsonNode invocationJson) {
+        String type = invocationJson.get(JsonConstants.RPC_TYPE).asString();
+        RpcInvocationHandler handler = getInvocationHandlers().get(type);
+        if (handler == null) {
+            throw new IllegalArgumentException(
+                    "Unsupported event type: " + type);
+        }
+        observeInvocation(ui, type, invocationJson, () -> {
+            Optional<Runnable> handle = handler.handle(ui, invocationJson);
+            assert !handle.isPresent()
+                    : "RPC handler " + handler.getClass().getName()
+                            + " returned a Runnable even though it shouldn't";
+        });
+    }
+
+    private static int nodeId(JsonNode invocationJson) {
+        JsonNode node = invocationJson.get(JsonConstants.RPC_NODE);
+        return node != null ? node.intValue() : -1;
+    }
+
+    /**
+     * Extracts a human-readable identifier for an invocation so observers can
+     * label it without parsing the protocol JSON: the DOM event name for
+     * {@code event}, the invoked method for {@code publishedEventHandler}, the
+     * location for {@code navigation}, the channel id for {@code channel}, the
+     * synchronized property name for {@code mSync}.
+     * <p>
+     * Only identifiers are extracted, never the payload they carry: the
+     * property name of a synchronization is included, the property value is
+     * not.
+     */
+    private static String invocationName(String type, JsonNode invocationJson) {
+        String key = switch (type) {
+        case JsonConstants.RPC_TYPE_EVENT -> JsonConstants.RPC_EVENT_TYPE;
+        case JsonConstants.RPC_PUBLISHED_SERVER_EVENT_HANDLER ->
+            JsonConstants.RPC_TEMPLATE_EVENT_METHOD_NAME;
+        case JsonConstants.RPC_TYPE_NAVIGATION ->
+            JsonConstants.RPC_NAVIGATION_LOCATION;
+        case JsonConstants.RPC_TYPE_CHANNEL -> JsonConstants.RPC_CHANNEL;
+        case JsonConstants.RPC_TYPE_MAP_SYNC -> JsonConstants.RPC_PROPERTY;
+        default -> null;
+        };
+        if (key == null) {
+            return null;
+        }
+        JsonNode value = invocationJson.get(key);
+        return value != null ? value.asString() : null;
+    }
+
+    private static void callErrorHandler(UI ui, JsonNode invocationJson,
+            Throwable throwable) {
+        StateNode node = ui.getInternals().getStateTree().getNodeById(
+                invocationJson.get(JsonConstants.RPC_NODE).intValue());
+        ErrorEvent event;
+        if (node != null) {
+            event = new ErrorEvent(throwable, node);
+        } else {
+            event = new ErrorEvent(throwable);
+        }
+        ui.getSessionOrThrow().getErrorHandler().error(event);
+    }
+
+    protected String getMessage(Reader reader) throws IOException {
+        return SynchronizedRequestHandler.getRequestBody(reader);
+    }
+
+    /**
+     * Reads the RPC message from the given reader, enforcing the maximum
+     * request body size configured for the given request.
+     *
+     * @param reader
+     *            the reader to read the message from
+     * @param request
+     *            the request the message was received through
+     * @return the message as a string
+     * @throws IOException
+     *             if reading fails
+     * @throws RequestBodyTooLargeException
+     *             if the message exceeds the configured maximum size
+     * @since 25.2.2
+     */
+    protected String getMessage(Reader reader, VaadinRequest request)
+            throws IOException {
+        return SynchronizedRequestHandler.getRequestBody(reader,
+                SynchronizedRequestHandler.getMaxRequestBodySize(request));
+    }
+
+    private static Logger getLogger() {
+        return LoggerFactory.getLogger(ServerRpcHandler.class.getName());
+    }
+
+    private static RpcInvocationHandler resolveHandlerConflicts(
+            RpcInvocationHandler handler1, RpcInvocationHandler handler2) {
+        String msg = String.format(
+                "There are two Rpc invocation handlers for the same type '%s' : '%s and %s",
+                handler1.getRpcType(), handler1.getClass().getName(),
+                handler2.getClass().getName());
+        throw new IllegalStateException(msg);
+    }
+
+    private static class LazyInvocationHandlers {
+
+        private static final Map<String, RpcInvocationHandler> HANDLERS = loadHandlers()
+                .stream()
+                .collect(Collectors.toMap(RpcInvocationHandler::getRpcType,
+                        Function.identity(),
+                        ServerRpcHandler::resolveHandlerConflicts,
+                        HashMap::new));
+
+        private static List<RpcInvocationHandler> loadHandlers() {
+            List<RpcInvocationHandler> list = new ArrayList<>();
+            list.add(new EventRpcHandler());
+            list.add(new NavigationRpcHandler());
+            list.add(new MapSyncRpcHandler());
+            list.add(new PublishedServerEventHandlerRpcHandler());
+            list.add(new AttachExistingElementRpcHandler());
+            list.add(new AttachTemplateChildRpcHandler());
+            list.add(new ReturnChannelHandler());
+            return list;
+        }
+    }
+}

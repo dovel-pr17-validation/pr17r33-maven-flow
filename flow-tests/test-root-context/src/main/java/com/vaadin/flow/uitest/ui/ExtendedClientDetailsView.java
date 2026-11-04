@@ -1,0 +1,121 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.uitest.ui;
+
+import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.html.Div;
+import com.vaadin.flow.component.html.NativeButton;
+import com.vaadin.flow.component.page.ColorScheme;
+import com.vaadin.flow.component.page.ExtendedClientDetails;
+import com.vaadin.flow.router.Route;
+import com.vaadin.flow.uitest.servlet.ViewTestLayout;
+
+@Route(value = "com.vaadin.flow.uitest.ui.ExtendedClientDetailsView", layout = ViewTestLayout.class)
+public class ExtendedClientDetailsView extends AbstractDivView {
+
+    @Override
+    protected void onShow() {
+        Div screenWidth = createDiv("sw");
+        Div screenHeight = createDiv("sh");
+        Div windowInnerWidth = createDiv("ww");
+        Div windowInnerHeight = createDiv("wh");
+        Div bodyElementWidth = createDiv("bw");
+        Div bodyElementHeight = createDiv("bh");
+        Div devicePixelRatio = createDiv("pr");
+        Div touchDevice = createDiv("td");
+        Div colorScheme = createDiv("cs");
+        Div themeName = createDiv("tn");
+
+        // Display initial values immediately
+        ExtendedClientDetails details = UI.getCurrentOrThrow().getPage()
+                .getExtendedClientDetails();
+        displayDetails(details, screenWidth, screenHeight, windowInnerWidth,
+                windowInnerHeight, bodyElementWidth, bodyElementHeight,
+                devicePixelRatio, touchDevice, colorScheme, themeName);
+
+        // the sizing values cannot be set with JS but pixel ratio and touch
+        // support can be faked
+        NativeButton setValuesButton = new NativeButton("Set test values",
+                event -> {
+                    getUI().ifPresent(ui -> ui.getPage()
+                            .executeJs("{" + "window.devicePixelRatio = 2.0;"
+                                    + "navigator.msMaxTouchPoints = 1;" + "}"));
+                });
+        setValuesButton.setId("set-values");
+
+        NativeButton fetchDetailsButton = new NativeButton(
+                "Fetch client details", event -> {
+                    UI.getCurrentOrThrow().getPage().getExtendedClientDetails()
+                            .refresh(updatedDetails -> {
+                                displayDetails(updatedDetails, screenWidth,
+                                        screenHeight, windowInnerWidth,
+                                        windowInnerHeight, bodyElementWidth,
+                                        bodyElementHeight, devicePixelRatio,
+                                        touchDevice, colorScheme, themeName);
+
+                            });
+                    getUI().ifPresent(ui -> ui.getPage()
+                            .setColorScheme(ColorScheme.Value.LIGHT));
+                });
+        fetchDetailsButton.setId("fetch-values");
+        // Color scheme buttons
+        NativeButton setDarkButton = new NativeButton("Set Dark Theme",
+                event -> {
+                    getUI().ifPresent(ui -> ui.getPage()
+                            .setColorScheme(ColorScheme.Value.DARK));
+                });
+        setDarkButton.setId("set-dark");
+
+        NativeButton setLightButton = new NativeButton("Set Light Theme",
+                event -> {
+                    getUI().ifPresent(ui -> ui.getPage()
+                            .setColorScheme(ColorScheme.Value.LIGHT));
+                });
+        setLightButton.setId("set-light");
+
+        NativeButton clearThemeButton = new NativeButton("Clear Theme",
+                event -> {
+                    getUI().ifPresent(ui -> ui.getPage().setColorScheme(null));
+                });
+        clearThemeButton.setId("clear-theme");
+
+        add(setValuesButton, fetchDetailsButton, setDarkButton, setLightButton,
+                clearThemeButton);
+    }
+
+    private void displayDetails(ExtendedClientDetails details, Div screenWidth,
+            Div screenHeight, Div windowInnerWidth, Div windowInnerHeight,
+            Div bodyElementWidth, Div bodyElementHeight, Div devicePixelRatio,
+            Div touchDevice, Div colorScheme, Div themeName) {
+        screenWidth.setText("" + details.getScreenWidth());
+        screenHeight.setText("" + details.getScreenHeight());
+        windowInnerWidth.setText("" + details.getWindowInnerWidth());
+        windowInnerHeight.setText("" + details.getWindowInnerHeight());
+        bodyElementWidth.setText("" + details.getBodyClientWidth());
+        bodyElementHeight.setText("" + details.getBodyClientHeight());
+        devicePixelRatio.setText("" + details.getDevicePixelRatio());
+        touchDevice.setText("" + details.isTouchDevice());
+        colorScheme.setText("" + details.getColorScheme().getValue());
+        themeName.setText("" + details.getThemeName());
+    }
+
+    private Div createDiv(String id) {
+        Div div = new Div();
+        div.setId(id);
+        add(div);
+        return div;
+    }
+}

@@ -1,0 +1,285 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.component;
+
+import org.junit.jupiter.api.Test;
+
+import com.vaadin.flow.server.Constants;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class HasSizeTest {
+
+    @Tag("div")
+    public static class HasSizeComponent extends Component implements HasSize {
+
+    }
+
+    @Test
+    void setWidth() {
+        HasSizeComponent c = new HasSizeComponent();
+        c.setWidth("100px");
+        assertEquals("100px", c.getWidth());
+    }
+
+    @Test
+    void setMinWidth() {
+        HasSizeComponent c = new HasSizeComponent();
+        c.setMinWidth("100px");
+        assertEquals("100px", c.getMinWidth());
+    }
+
+    @Test
+    void setMaxWidth() {
+        HasSizeComponent c = new HasSizeComponent();
+        c.setMaxWidth("100px");
+        assertEquals("100px", c.getMaxWidth());
+    }
+
+    @Test
+    void removeWidth() {
+        HasSizeComponent c = new HasSizeComponent();
+        c.setWidth("100px");
+        assertEquals("100px", c.getWidth());
+
+        c.setWidth(null);
+        assertNull(c.getWidth());
+    }
+
+    @Test
+    void removeMinWidth() {
+        HasSizeComponent c = new HasSizeComponent();
+        c.setMinWidth("100px");
+        assertEquals("100px", c.getMinWidth());
+
+        c.setMinWidth(null);
+        assertNull(c.getMinWidth());
+    }
+
+    @Test
+    void removeMaxWidth() {
+        HasSizeComponent c = new HasSizeComponent();
+        c.setMaxWidth("100px");
+        assertEquals("100px", c.getMaxWidth());
+
+        c.setMaxWidth(null);
+        assertNull(c.getMaxWidth());
+    }
+
+    @Test
+    void setHeight() {
+        HasSizeComponent c = new HasSizeComponent();
+        c.setHeight("100px");
+        assertEquals("100px", c.getHeight());
+    }
+
+    @Test
+    void setMinHeight() {
+        HasSizeComponent c = new HasSizeComponent();
+        c.setMinHeight("100px");
+        assertEquals("100px", c.getMinHeight());
+    }
+
+    @Test
+    void setMaxHeight() {
+        HasSizeComponent c = new HasSizeComponent();
+        c.setMaxHeight("100px");
+        assertEquals("100px", c.getMaxHeight());
+    }
+
+    @Test
+    void removeHeight() {
+        HasSizeComponent c = new HasSizeComponent();
+        c.setHeight("100px");
+        assertEquals("100px", c.getHeight());
+
+        c.setHeight(null);
+        assertNull(c.getHeight());
+    }
+
+    @Test
+    void removeMinHeight() {
+        HasSizeComponent c = new HasSizeComponent();
+        c.setMinHeight("100px");
+        assertEquals("100px", c.getMinHeight());
+
+        c.setMinHeight(null);
+        assertNull(c.getMinHeight());
+    }
+
+    @Test
+    void removeMaxHeight() {
+        HasSizeComponent c = new HasSizeComponent();
+        c.setMaxHeight("100px");
+        assertEquals("100px", c.getMaxHeight());
+
+        c.setMaxHeight(null);
+        assertNull(c.getMaxHeight());
+    }
+
+    @Test
+    void setSizeFull() {
+        HasSizeComponent component = new HasSizeComponent();
+        component.setSizeFull();
+
+        assertEquals("100%", component.getWidth());
+        assertEquals("100%", component.getHeight());
+    }
+
+    @Test
+    void setSizeFull_addsDataAttribute() {
+        HasSizeComponent component = new HasSizeComponent();
+        component.setSizeFull();
+
+        assertTrue(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_WIDTH_FULL));
+        assertTrue(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_HEIGHT_FULL));
+    }
+
+    @Test
+    void setSizeFull_setSize_removesDataAttribute() {
+        HasSizeComponent component = new HasSizeComponent();
+        component.setSizeFull();
+
+        component.setWidth("10px");
+        assertFalse(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_WIDTH_FULL));
+        assertTrue(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_HEIGHT_FULL));
+
+        component.setHeight("10px");
+        assertFalse(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_WIDTH_FULL));
+        assertFalse(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_HEIGHT_FULL));
+    }
+
+    @Test
+    void setSizeFull_setSizeUndefined_removesDataAttribute() {
+        HasSizeComponent component = new HasSizeComponent();
+        component.setSizeFull();
+        component.setSizeUndefined();
+
+        assertFalse(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_WIDTH_FULL));
+        assertFalse(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_HEIGHT_FULL));
+    }
+
+    @Test
+    void setWidthFull() {
+        HasSizeComponent component = new HasSizeComponent();
+        component.setWidthFull();
+
+        assertEquals("100%", component.getWidth());
+    }
+
+    @Test
+    void setWidthFull_addsDataAttribute() {
+        HasSizeComponent component = new HasSizeComponent();
+        component.setWidthFull();
+
+        assertTrue(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_WIDTH_FULL));
+        assertFalse(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_HEIGHT_FULL));
+    }
+
+    @Test
+    void setWidthFull_setWidth_removesDataAttribute() {
+        HasSizeComponent component = new HasSizeComponent();
+        component.setWidthFull();
+        component.setWidth("10px");
+
+        assertFalse(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_WIDTH_FULL));
+        assertFalse(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_HEIGHT_FULL));
+    }
+
+    @Test
+    void setHeightFull() {
+        HasSizeComponent component = new HasSizeComponent();
+        component.setHeightFull();
+
+        assertEquals("100%", component.getHeight());
+    }
+
+    @Test
+    void setHeightFull_addsDataAttribute() {
+        HasSizeComponent component = new HasSizeComponent();
+        component.setHeightFull();
+
+        assertFalse(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_WIDTH_FULL));
+        assertTrue(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_HEIGHT_FULL));
+    }
+
+    @Test
+    void setHeightFull_setHeight_removesDataAttribute() {
+        HasSizeComponent component = new HasSizeComponent();
+        component.setHeightFull();
+        component.setHeight("10px");
+
+        assertFalse(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_WIDTH_FULL));
+        assertFalse(component.getElement()
+                .hasAttribute(Constants.ATTRIBUTE_HEIGHT_FULL));
+    }
+
+    @Test
+    void setSizeUndefined() {
+        HasSizeComponent component = new HasSizeComponent();
+        component.setWidth("10px");
+        component.setHeight("5em");
+
+        component.setSizeUndefined();
+
+        assertNull(component.getWidth());
+        assertNull(component.getHeight());
+    }
+
+    @Test
+    void getWidthUnit() {
+        HasSizeComponent component = new HasSizeComponent();
+        assertFalse(component.getWidthUnit().isPresent());
+
+        component.setWidth("10px");
+        assertTrue(component.getWidthUnit().isPresent());
+        assertEquals(Unit.PIXELS, component.getWidthUnit().get());
+
+        component.setSizeUndefined();
+        assertFalse(component.getWidthUnit().isPresent());
+    }
+
+    @Test
+    void getHeightUnit() {
+        HasSizeComponent component = new HasSizeComponent();
+        assertFalse(component.getHeightUnit().isPresent());
+
+        component.setHeight("10%");
+        assertTrue(component.getHeightUnit().isPresent());
+        assertEquals(Unit.PERCENTAGE, component.getHeightUnit().get());
+
+        component.setSizeUndefined();
+        assertFalse(component.getHeightUnit().isPresent());
+    }
+}

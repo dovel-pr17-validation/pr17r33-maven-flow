@@ -1,0 +1,861 @@
+/*
+ * Copyright 2000-2026 Vaadin Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package com.vaadin.flow.shared;
+
+import java.io.Serializable;
+
+/**
+ * Parses the user agent string from the browser and provides information about
+ * the browser.
+ *
+ * @author Vaadin Ltd
+ * @since 1.0.
+ * @deprecated For browser information users should parse the user-agent using a
+ *             parsing library like ua-parser/uap-java
+ */
+@Deprecated
+public class BrowserDetails implements Serializable {
+    private static final String CHROME = " chrome/";
+    private static final String HEADLESSCHROME = " headlesschrome/";
+    private static final String OS_MAJOR = "OS major";
+    private static final String OS_MINOR = "OS minor";
+    private static final String BROWSER_MAJOR = "Browser major";
+    private static final String BROWSER_MINOR = "Browser minor";
+
+    /**
+     * Detected operating systems.
+     */
+    public enum OperatingSystem {
+        UNKNOWN, WINDOWS, MACOSX, LINUX, IOS, ANDROID, CHROMEOS
+    }
+
+    /**
+     * @since 25.0
+     */
+    public enum BrowserName {
+        UNKNOWN, SAFARI, CHROME, FIREFOX, OPERA, IE, EDGE
+    }
+
+    /**
+     * @since 25.0
+     */
+    public enum BrowserEngine {
+        UNKNOWN, GECKO, WEBKIT, PRESTO, TRIDENT
+    }
+
+    private BrowserName browserName;
+    private BrowserEngine browserEngine;
+
+    private boolean isWindowsPhone;
+    private boolean isIPad;
+    private boolean isIPhone;
+    private boolean isChromeOS;
+
+    private OperatingSystem os;
+
+    private float browserEngineVersion = -10.0f;
+    private int browserMajorVersion = -10;
+    private int browserMinorVersion = -10;
+
+    private int osMajorVersion = -10;
+    private int osMinorVersion = -10;
+
+    private String userAgent;
+
+    /**
+     * Create an instance based on the given user agent.
+     *
+     * @param userAgentString
+     *            User agent as provided by the browser.
+     */
+    public BrowserDetails(String userAgentString) {
+        userAgent = userAgentString.toLowerCase();
+    }
+
+    private void parseBrowserEngine() {
+        // browser engine name
+        if (userAgent.contains("gecko") && !userAgent.contains("webkit")
+                && !userAgent.contains("trident/")) {
+            browserEngine = BrowserEngine.GECKO;
+        } else if (userAgent.contains(" presto/")) {
+            browserEngine = BrowserEngine.PRESTO;
+        } else if (userAgent.contains("trident/")) {
+            browserEngine = BrowserEngine.TRIDENT;
+        } else if (!userAgent.contains("trident/")
+                && userAgent.contains("applewebkit")) {
+            browserEngine = BrowserEngine.WEBKIT;
+        } else {
+            browserEngine = BrowserEngine.UNKNOWN;
+        }
+    }
+
+    private void parseBrowserName() {
+        // browser name
+        // isChrome =
+        if (userAgent.contains(" edge/") || userAgent.contains(" edg/")
+                || userAgent.contains(" edga/")
+                || userAgent.contains(" edgios/")) {
+            browserName = BrowserName.EDGE;
+
+        } else if ((userAgent.contains(CHROME) || userAgent.contains(" crios/")
+                || userAgent.contains(HEADLESSCHROME))
+                && !userAgent.contains(" opr/")) {
+            browserName = BrowserName.CHROME;
+        } else if (userAgent.contains("opera") || userAgent.contains(" opr/")) {
+            browserName = BrowserName.OPERA;
+        } else if ((userAgent.contains("msie") && !userAgent.contains("webtv"))
+                || userAgent.contains("trident/")) {
+            // check trident engine as IE 11 no longer contains MSIE in the user
+            // agent
+            browserName = BrowserName.IE;
+        } else if (userAgent.contains(" firefox/")
+                || userAgent.contains("fxios/")) {
+            browserName = BrowserName.FIREFOX;
+        } else if (userAgent.contains("safari")) {
+            browserName = BrowserName.SAFARI;
+        } else {
+            browserName = BrowserName.UNKNOWN;
+        }
+    }
+
+    private void parseEngineVersion() {
+        // Rendering engine version
+        if (browserEngine == null) {
+            parseBrowserEngine();
+        }
+        try {
+            if (browserEngine.equals(BrowserEngine.GECKO)) {
+                int rvPos = userAgent.indexOf("rv:");
+                if (rvPos >= 0) {
+                    String tmp = userAgent.substring(rvPos + 3);
+                    tmp = tmp.replaceFirst("(\\.[0-9]+).+", "$1");
+                    browserEngineVersion = Float.parseFloat(tmp);
+                }
+            } else if (browserEngine.equals(BrowserEngine.WEBKIT)) {
+                String tmp = userAgent
+                        .substring(userAgent.indexOf("webkit/") + 7);
+                tmp = tmp.replaceFirst("([0-9]+\\.[0-9]+).*", "$1");
+                browserEngineVersion = Float.parseFloat(tmp);
+            } else if (browserEngine.equals(BrowserEngine.TRIDENT)) {
+                String tmp = userAgent
+                        .substring(userAgent.indexOf("trident/") + 8);
+                tmp = tmp.replaceFirst("([0-9]+\\.[0-9]+).*", "$1");
+                browserEngineVersion = Float.parseFloat(tmp);
+                if (browserEngineVersion > 7) {
+                    // Windows 10 on launch reported Trident/8.0, now it does
+                    // not
+                    // Due to Edge there shouldn't ever be an Trident 8.0 or
+                    // IE12
+                    browserEngineVersion = 7;
+                }
+            } else if (browserName != null
+                    && browserName.equals(BrowserName.EDGE)) {
+                browserEngineVersion = 0;
+            } else {
+                browserEngineVersion = -1.0f;
+            }
+        } catch (Exception e) {
+            // Browser engine version parsing failed
+            log("Browser engine version parsing failed for: " + userAgent, e);
+        }
+    }
+
+    private void parseBrowserVersion() {
+        browserMajorVersion = -1;
+        browserMinorVersion = -1;
+
+        if (browserName == null) {
+            parseBrowserName();
+        }
+        if (browserEngine == null) {
+            parseBrowserEngine();
+        }
+        // Browser version
+        try {
+            if (browserName.equals(BrowserName.IE)) {
+                if (!userAgent.contains("msie")) {
+                    // IE 11+
+                    int rvPos = userAgent.indexOf("rv:");
+                    if (rvPos >= 0) {
+                        String tmp = userAgent.substring(rvPos + 3);
+                        tmp = tmp.replaceFirst("(\\.[0-9]+).+", "$1");
+                        parseVersionString(tmp, userAgent);
+                    }
+                } else if (browserEngine.equals(BrowserEngine.TRIDENT)) {
+                    // potentially IE 11 in compatibility mode
+                    // See
+                    // https://docs.microsoft.com/en-us/previous-versions/windows/internet-explorer/ie-developer/compatibility/ms537503(v=vs.85)#trident-token
+                    browserMajorVersion = 4 + (int) browserEngineVersion;
+                    browserMinorVersion = 0;
+                } else {
+                    String ieVersionString = userAgent
+                            .substring(userAgent.indexOf("msie ") + 5);
+                    ieVersionString = safeSubstring(ieVersionString, 0,
+                            ieVersionString.indexOf(';'));
+                    parseVersionString(ieVersionString, userAgent);
+                }
+            } else if (browserName.equals(BrowserName.FIREFOX)) {
+                int i = userAgent.indexOf(" fxios/");
+                if (i != -1) {
+                    // Version present in Opera 10 and newer
+                    i = userAgent.indexOf(" fxios/") + 7;
+                } else {
+                    i = userAgent.indexOf(" firefox/") + 9;
+                }
+                parseVersionString(
+                        safeSubstring(userAgent, i,
+                                i + getVersionStringLength(userAgent, i)),
+                        userAgent);
+            } else if (browserName.equals(BrowserName.CHROME)) {
+                parseChromeVersion(userAgent);
+            } else if (browserName.equals(BrowserName.SAFARI)) {
+                int i = userAgent.indexOf(" version/");
+                if (i >= 0) {
+                    i += 9;
+                    parseVersionString(
+                            safeSubstring(userAgent, i,
+                                    i + getVersionStringLength(userAgent, i)),
+                            userAgent);
+                } else {
+                    if (browserEngineVersion == -10) {
+                        parseEngineVersion();
+                    }
+                    int engineVersion = (int) (browserEngineVersion * 10);
+                    if (engineVersion >= 6010 && engineVersion < 6015) {
+                        browserMajorVersion = 9;
+                        browserMinorVersion = 0;
+                    } else if (engineVersion >= 6015 && engineVersion < 6018) {
+                        browserMajorVersion = 9;
+                        browserMinorVersion = 1;
+                    } else if (engineVersion >= 6020 && engineVersion < 6030) {
+                        browserMajorVersion = 10;
+                        browserMinorVersion = 0;
+                    } else if (engineVersion >= 6030 && engineVersion < 6040) {
+                        browserMajorVersion = 10;
+                        browserMinorVersion = 1;
+                    } else if (engineVersion >= 6040 && engineVersion < 6050) {
+                        browserMajorVersion = 11;
+                        browserMinorVersion = 0;
+                    } else if (engineVersion >= 6050 && engineVersion < 6060) {
+                        browserMajorVersion = 11;
+                        browserMinorVersion = 1;
+                    } else if (engineVersion >= 6060 && engineVersion < 6070) {
+                        browserMajorVersion = 12;
+                        browserMinorVersion = 0;
+                    } else if (engineVersion >= 6070) {
+                        browserMajorVersion = 12;
+                        browserMinorVersion = 1;
+                    }
+                }
+            } else if (browserName.equals(BrowserName.OPERA)) {
+                int i = userAgent.indexOf(" version/");
+                if (i != -1) {
+                    // Version present in Opera 10 and newer
+                    i += 9; // " version/".length
+                } else if (userAgent.contains(" opr/")) {
+                    i = userAgent.indexOf(" opr/") + 5;
+                } else {
+                    i = userAgent.indexOf("opera/") + 6;
+                }
+                parseVersionString(
+                        safeSubstring(userAgent, i,
+                                i + getVersionStringLength(userAgent, i)),
+                        userAgent);
+            } else if (browserName.equals(BrowserName.EDGE)) {
+                int i = userAgent.indexOf(" edge/") + 6;
+                if (userAgent.contains(" edg/")) {
+                    i = userAgent.indexOf(" edg/") + 5;
+                } else if (userAgent.contains(" edga/")) {
+                    i = userAgent.indexOf(" edga/") + 6;
+                } else if (userAgent.contains(" edgios/")) {
+                    i = userAgent.indexOf(" edgios/") + 8;
+                }
+
+                parseVersionString(
+                        safeSubstring(userAgent, i,
+                                i + getVersionStringLength(userAgent, i)),
+                        userAgent);
+            }
+        } catch (Exception e) {
+            // Browser version parsing failed
+            log("Browser version parsing failed for: " + userAgent, e);
+
+        }
+    }
+
+    private void parseOperatingSystem() {
+
+        // Operating system
+        if (userAgent.contains("windows ")) {
+            os = OperatingSystem.WINDOWS;
+            isWindowsPhone = userAgent.contains("windows phone");
+        } else if (userAgent.contains("android")) {
+            os = OperatingSystem.ANDROID;
+            parseAndroidVersion(userAgent);
+        } else if (userAgent.contains("linux")) {
+            os = OperatingSystem.LINUX;
+        } else if (userAgent.contains("macintosh")
+                || userAgent.contains("mac osx")
+                || userAgent.contains("mac os x")) {
+            isIPad = userAgent.contains("ipad");
+            isIPhone = userAgent.contains("iphone");
+            if (isIPad || isIPhone) {
+                os = OperatingSystem.IOS;
+                parseIOSVersion(userAgent);
+            } else {
+                os = OperatingSystem.MACOSX;
+            }
+        } else if (userAgent.contains("; cros ")) {
+            os = OperatingSystem.CHROMEOS;
+            isChromeOS = true;
+            parseChromeOSVersion(userAgent);
+        } else {
+            os = OperatingSystem.UNKNOWN;
+        }
+    }
+
+    // (X11; CrOS armv7l 6946.63.0)
+    private void parseChromeOSVersion(String userAgent) {
+        int start = userAgent.indexOf("; cros ");
+        if (start == -1) {
+            return;
+        }
+        int end = userAgent.indexOf(')', start);
+        if (end == -1) {
+            return;
+        }
+        int cur = end;
+        while (cur >= start && userAgent.charAt(cur) != ' ') {
+            cur--;
+        }
+        if (cur == start) {
+            return;
+        }
+        String osVersionString = userAgent.substring(cur + 1, end);
+        String[] parts = osVersionString.split("\\.");
+        parseChromeOsVersionParts(parts, userAgent);
+    }
+
+    private void parseChromeOsVersionParts(String[] parts, String userAgent) {
+        osMajorVersion = -1;
+        osMinorVersion = -1;
+
+        if (parts.length > 2) {
+            osMajorVersion = parseVersionPart(parts[0], OS_MAJOR, userAgent);
+            osMinorVersion = parseVersionPart(parts[1], OS_MINOR, userAgent);
+        }
+    }
+
+    private void parseChromeVersion(String userAgent) {
+        final String crios = " crios/";
+        int i = userAgent.indexOf(crios);
+        if (i == -1) {
+            i = userAgent.indexOf(CHROME);
+            if (i == -1) {
+                i = userAgent.indexOf(HEADLESSCHROME) + HEADLESSCHROME.length();
+            } else {
+                i += CHROME.length();
+            }
+            int versionBreak = getVersionStringLength(userAgent, i);
+            parseVersionString(safeSubstring(userAgent, i, i + versionBreak),
+                    userAgent);
+        } else {
+            i += crios.length(); // move index to version string start
+            int versionBreak = getVersionStringLength(userAgent, i);
+            parseVersionString(safeSubstring(userAgent, i, i + versionBreak),
+                    userAgent);
+        }
+    }
+
+    /**
+     * Get the full version string until space.
+     *
+     * @param userAgent
+     *            user agent string
+     * @param startIndex
+     *            index for version string start
+     * @return length of version number
+     */
+    private static int getVersionStringLength(String userAgent,
+            int startIndex) {
+        final String versionSubString = userAgent.substring(startIndex);
+        int versionBreak = versionSubString.indexOf(" ");
+        if (versionBreak == -1) {
+            versionBreak = versionSubString.length();
+        }
+        return versionBreak;
+    }
+
+    private void parseAndroidVersion(String userAgent) {
+        // Android 5.1;
+        if (!userAgent.contains("android ")) {
+            osMajorVersion = -1;
+            osMinorVersion = -1;
+            return;
+        }
+
+        if (userAgent.contains("ddg_android/")) {
+            int startIndex = userAgent.indexOf("ddg_android/");
+            String osVersionString = safeSubstring(userAgent,
+                    startIndex + "ddg_android/".length(),
+                    userAgent.indexOf(' ', startIndex));
+            String[] parts = osVersionString.split("\\.");
+            parseOsVersion(parts, userAgent);
+            return;
+        }
+
+        if (userAgent.contains("callpod keeper for android")) {
+            String token = "; android ";
+            int startIndex = userAgent.indexOf(token) + token.length();
+            int endIndex = userAgent.indexOf(";", startIndex);
+            String osVersionString = safeSubstring(userAgent, startIndex,
+                    endIndex);
+            String[] parts = osVersionString.split("\\.");
+            parseOsVersion(parts, userAgent);
+            return;
+        }
+
+        String osVersionString = safeSubstring(userAgent,
+                userAgent.indexOf("android ") + "android ".length(),
+                userAgent.length());
+        int semicolonIndex = osVersionString.indexOf(";");
+        int bracketIndex = osVersionString.indexOf(")");
+        int endIndex = semicolonIndex != -1 && semicolonIndex < bracketIndex
+                ? semicolonIndex
+                : bracketIndex;
+        osVersionString = safeSubstring(osVersionString, 0, endIndex);
+        String[] parts = osVersionString.split("\\.");
+        parseOsVersion(parts, userAgent);
+    }
+
+    private void parseIOSVersion(String userAgent) {
+        // OS 5_1 like Mac OS X
+        if (!userAgent.contains("os ") || !userAgent.contains(" like mac")) {
+            osMajorVersion = -1;
+            osMinorVersion = -1;
+            return;
+        }
+
+        String osVersionString = safeSubstring(userAgent,
+                userAgent.indexOf("os ") + 3, userAgent.indexOf(" like mac"));
+        String[] parts = osVersionString.split("_");
+        parseOsVersion(parts, userAgent);
+    }
+
+    private void parseOsVersion(String[] parts, String userAgent) {
+        osMajorVersion = -1;
+        osMinorVersion = -1;
+
+        if (parts.length >= 1) {
+            osMajorVersion = parseVersionPart(parts[0], OS_MAJOR, userAgent);
+        }
+        if (parts.length >= 2) {
+            // Some Androids report version numbers as "2.1-update1"
+            int dashIndex = parts[1].indexOf('-');
+            if (dashIndex > -1) {
+                String dashlessVersion = parts[1].substring(0, dashIndex);
+                osMinorVersion = parseVersionPart(dashlessVersion, OS_MINOR,
+                        userAgent);
+            } else {
+                osMinorVersion = parseVersionPart(parts[1], OS_MINOR,
+                        userAgent);
+            }
+        }
+    }
+
+    private void parseVersionString(String versionString, String userAgent) {
+        int idx = versionString.indexOf('.');
+        if (idx < 0) {
+            idx = versionString.length();
+        }
+        String majorVersionPart = safeSubstring(versionString, 0, idx);
+        browserMajorVersion = parseVersionPart(majorVersionPart, BROWSER_MAJOR,
+                userAgent);
+
+        if (browserMajorVersion == -1) {
+            // no need to scan for minor if major version scanning failed.
+            return;
+        }
+
+        int idx2 = versionString.indexOf('.', idx + 1);
+        if (idx2 < 0) {
+            // If string only contains major version, set minor to 0.
+            if (versionString.substring(idx).length() == 0) {
+                browserMinorVersion = 0;
+                return;
+            }
+            idx2 = versionString.length();
+        }
+        String minorVersionPart = safeSubstring(versionString, idx + 1, idx2)
+                .replaceAll("[^0-9].*", "");
+        browserMinorVersion = parseVersionPart(minorVersionPart, BROWSER_MINOR,
+                userAgent);
+    }
+
+    private static String safeSubstring(String string, int beginIndex,
+            int endIndex) {
+        int trimmedStart, trimmedEnd;
+        if (beginIndex < 0) {
+            trimmedStart = 0;
+        } else {
+            trimmedStart = beginIndex;
+        }
+
+        if (endIndex < 0 || endIndex > string.length()) {
+            trimmedEnd = string.length();
+        } else {
+            trimmedEnd = endIndex;
+        }
+        return string.substring(trimmedStart, trimmedEnd);
+    }
+
+    private int parseVersionPart(String versionString, String partName,
+            String userAgent) {
+        try {
+            return Integer.parseInt(versionString);
+        } catch (Exception e) {
+            log(partName + " version parsing failed for: \"" + versionString
+                    + "\"\nWith userAgent: " + userAgent, e);
+        }
+        return -1;
+    }
+
+    /**
+     * Tests if the browser is Firefox.
+     *
+     * @return true if it is Firefox, false otherwise
+     */
+    public boolean isFirefox() {
+        if (browserName == null) {
+            parseBrowserName();
+        }
+        return browserName.equals(BrowserName.FIREFOX);
+    }
+
+    /**
+     * Tests if the browser is using the Gecko engine.
+     *
+     * @return true if it is Gecko, false otherwise
+     */
+    public boolean isGecko() {
+        if (browserEngine == null) {
+            parseBrowserEngine();
+        }
+        return browserEngine.equals(BrowserEngine.GECKO);
+    }
+
+    /**
+     * Tests if the browser is using the WebKit engine.
+     *
+     * @return true if it is WebKit, false otherwise
+     */
+    public boolean isWebKit() {
+        if (browserEngine == null) {
+            parseBrowserEngine();
+        }
+        return browserEngine.equals(BrowserEngine.WEBKIT);
+    }
+
+    /**
+     * Tests if the browser is using the Presto engine.
+     *
+     * @return true if it is Presto, false otherwise
+     */
+    public boolean isPresto() {
+        if (browserEngine == null) {
+            parseBrowserEngine();
+        }
+        return browserEngine.equals(BrowserEngine.PRESTO);
+    }
+
+    /**
+     * Tests if the browser is using the Trident engine.
+     *
+     * @return true if it is Trident, false otherwise
+     */
+    public boolean isTrident() {
+        if (browserEngine == null) {
+            parseBrowserEngine();
+        }
+        return browserEngine.equals(BrowserEngine.TRIDENT);
+    }
+
+    /**
+     * Tests if the browser is Safari.
+     *
+     * @return true if it is Safari, false otherwise
+     */
+    public boolean isSafari() {
+        if (browserName == null) {
+            parseBrowserName();
+        }
+        return browserName.equals(BrowserName.SAFARI);
+    }
+
+    /**
+     * Tests if the browser is Chrome.
+     *
+     * @return true if it is Chrome, false otherwise
+     */
+    public boolean isChrome() {
+        if (browserName == null) {
+            parseBrowserName();
+        }
+        return browserName.equals(BrowserName.CHROME);
+    }
+
+    /**
+     * Tests if the browser is Opera.
+     *
+     * @return true if it is Opera, false otherwise
+     */
+    public boolean isOpera() {
+        if (browserName == null) {
+            parseBrowserName();
+        }
+        return browserName.equals(BrowserName.OPERA);
+    }
+
+    /**
+     * Tests if the browser is Internet Explorer.
+     *
+     * @return true if it is Internet Explorer, false otherwise
+     */
+    public boolean isIE() {
+        if (browserName == null) {
+            parseBrowserName();
+        }
+        return browserName.equals(BrowserName.IE);
+    }
+
+    /**
+     * Tests if the browser is Edge.
+     *
+     * @return true if it is Edge, false otherwise
+     */
+    public boolean isEdge() {
+        if (browserName == null) {
+            parseBrowserName();
+        }
+        return browserName.equals(BrowserName.EDGE);
+    }
+
+    /**
+     * Returns the version of the browser engine. For WebKit this is an integer
+     * e.g., 532.0. For gecko it is a float e.g., 1.8 or 1.9.
+     *
+     * @return The version of the browser engine
+     */
+    public float getBrowserEngineVersion() {
+        if (browserEngineVersion == -10.0f) {
+            parseEngineVersion();
+        }
+        return browserEngineVersion;
+    }
+
+    /**
+     * Returns the browser major version e.g., 3 for Firefox 3.5, 4 for Chrome
+     * 4, 8 for Internet Explorer 8.
+     * <p>
+     * Note that Internet Explorer 8 and newer will return the document mode so
+     * IE8 rendering as IE7 will return 7.
+     *
+     * @return The major version of the browser.
+     */
+    public final int getBrowserMajorVersion() {
+        if (browserMajorVersion == -10) {
+            parseBrowserVersion();
+        }
+        return browserMajorVersion;
+    }
+
+    /**
+     * Returns the browser minor version e.g., 5 for Firefox 3.5.
+     *
+     * @see #getBrowserMajorVersion()
+     *
+     * @return The minor version of the browser, or -1 if not known/parsed.
+     */
+    public final int getBrowserMinorVersion() {
+        if (browserMinorVersion == -10) {
+            parseBrowserVersion();
+        }
+        return browserMinorVersion;
+    }
+
+    private OperatingSystem getOs() {
+        if (os == null) {
+            parseOperatingSystem();
+        }
+        return os;
+    }
+
+    /**
+     * Tests if the browser is run on Windows.
+     *
+     * @return true if run on Windows, false otherwise
+     */
+    public boolean isWindows() {
+        return getOs().equals(OperatingSystem.WINDOWS);
+    }
+
+    /**
+     * Tests if the browser is run on Windows Phone.
+     *
+     * @return true if run on Windows Phone, false otherwise
+     */
+    public boolean isWindowsPhone() {
+        return isWindowsPhone;
+    }
+
+    /**
+     * Tests if the browser is run on Mac OSX.
+     *
+     * @return true if run on Mac OSX, false otherwise
+     */
+    public boolean isMacOSX() {
+        return getOs().equals(OperatingSystem.MACOSX);
+    }
+
+    /**
+     * Tests if the browser is run on Linux.
+     *
+     * @return true if run on Linux, false otherwise
+     */
+    public boolean isLinux() {
+        return getOs().equals(OperatingSystem.LINUX);
+    }
+
+    /**
+     * Tests if the browser is run on Android.
+     *
+     * @return true if run on Android, false otherwise
+     */
+    public boolean isAndroid() {
+        return getOs().equals(OperatingSystem.ANDROID);
+    }
+
+    /**
+     * Tests if the browser is run on iPhone.
+     *
+     * @return true if run on iPhone, false otherwise
+     */
+    public boolean isIPhone() {
+        if (os == null) {
+            parseOperatingSystem();
+        }
+        return isIPhone;
+    }
+
+    /**
+     * Tests if the browser is run on iPad.
+     *
+     * @return true if run on iPad, false otherwise
+     * @since 24.6
+     */
+    public boolean isIPad() {
+        if (os == null) {
+            parseOperatingSystem();
+        }
+        return isIPad;
+    }
+
+    /**
+     * Tests if the browser is run on Chrome OS (e.g. a Chromebook).
+     *
+     * @return true if run on Chrome OS, false otherwise
+     */
+    public boolean isChromeOS() {
+        if (os == null) {
+            parseOperatingSystem();
+        }
+        return isChromeOS;
+    }
+
+    /**
+     * Returns the major version of the operating system. Currently only
+     * supported for mobile devices (iOS/Android)
+     *
+     * @return The major version or -1 if unknown
+     */
+    public int getOperatingSystemMajorVersion() {
+        if (os == null) {
+            parseOperatingSystem();
+        }
+        return osMajorVersion;
+    }
+
+    /**
+     * Returns the minor version of the operating system. Currently only
+     * supported for mobile devices (iOS/Android)
+     *
+     * @return The minor version or -1 if unknown
+     */
+    public int getOperatingSystemMinorVersion() {
+        if (os == null) {
+            parseOperatingSystem();
+        }
+        return osMinorVersion;
+    }
+
+    /**
+     * Checks if the browser is so old that it simply won't work.
+     *
+     * @return true if the browser won't work, false if not the browser is
+     *         supported or might work
+     */
+    public boolean isTooOldToFunctionProperly() {
+        // IE is not supported
+        if (isIE()) {
+            return true;
+        }
+        // Only ChromeEdge is supported
+        if (isEdge() && getBrowserMajorVersion() < 79) {
+            return true;
+        }
+        // Safari 14+
+        if (isSafari() && getBrowserMajorVersion() < 14) {
+            if (isIPhone() && (getOperatingSystemMajorVersion() > 14
+                    || (getOperatingSystemMajorVersion() == 14
+                            && getOperatingSystemMinorVersion() >= 7))) {
+                // #11654
+                return false;
+            }
+            return true;
+        }
+        // Firefox 78+ for now
+        if (isFirefox() && getBrowserMajorVersion() < 78) {
+            return true;
+        }
+        // Opera 58+ for now
+        if (isOpera() && getBrowserMajorVersion() < 58) {
+            return true;
+        }
+        // Chrome 71+ for now
+        if (isChrome() && getBrowserMajorVersion() < 71) {
+            return true;
+        }
+        return false;
+    }
+
+    protected void log(String error, Exception e) {
+        // "Logs" to stdout so the problem can be found but does not prevent
+        // using the app. As this class is shared, we do not use
+        // slf4j for logging as normal.
+        System.err.println(error + ' ' + e.getMessage());
+    }
+
+}
